@@ -81,6 +81,12 @@ binary_component = _module("homeassistant.components.binary_sensor")
 binary_component.BinarySensorEntity = _BinarySensorEntity
 button_component = _module("homeassistant.components.button")
 button_component.ButtonEntity = _ButtonEntity
+frontend_component = _module("homeassistant.components.frontend")
+panel_custom_component = _module("homeassistant.components.panel_custom")
+http_component = _module("homeassistant.components.http")
+http_component.StaticPathConfig = object
+components.frontend = frontend_component
+components.panel_custom = panel_custom_component
 config_entries = _module("homeassistant.config_entries")
 config_entries.ConfigEntry = _ConfigEntry
 core = _module("homeassistant.core")
@@ -117,6 +123,7 @@ BINARY_MODULE = _load(
     "custom_components.kniha_jizd.binary_sensor", "binary_sensor.py"
 )
 BUTTON_MODULE = _load("custom_components.kniha_jizd.button", "button.py")
+PANEL_MODULE = _load("custom_components.kniha_jizd.panel", "panel.py")
 
 
 class PlatformEntityTest(unittest.TestCase):
@@ -149,6 +156,16 @@ class PlatformEntityTest(unittest.TestCase):
         self.assertTrue(ready.is_on)
         self.assertEqual(button._kind, "export_button")
         self.assertEqual(export.native_value, "ready")
+
+    def test_panel_exists_falls_back_on_older_home_assistant(self) -> None:
+        """Use frontend_panels when the newer helper is unavailable."""
+        hass = types.SimpleNamespace(
+            data={"frontend_panels": {"kniha-jizd": object()}}
+        )
+
+        self.assertTrue(PANEL_MODULE._panel_exists(hass))
+        hass.data["frontend_panels"].clear()
+        self.assertFalse(PANEL_MODULE._panel_exists(hass))
 
 
 if __name__ == "__main__":

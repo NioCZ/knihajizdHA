@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,8 @@ from .manager import KnihaJizdManager
 from .nearby_search import NearbyInstitutionSearcher
 from .panel import async_register_panel, async_unregister_panel
 from .storage import KnihaJizdRepository
+
+_LOGGER = logging.getLogger(__name__)
 
 EXPORT_SERVICE_SCHEMA = vol.Schema({vol.Optional(ATTR_PATH, default=DEFAULT_EXPORT_PATH): str})
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
@@ -123,7 +126,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await manager.async_start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    await async_register_panel(hass)
+    try:
+        await async_register_panel(hass)
+    except Exception:  # noqa: BLE001 - the optional panel must not break trip logging
+        _LOGGER.exception("Could not register the optional Kniha jízd sidebar panel")
     return True
 
 
