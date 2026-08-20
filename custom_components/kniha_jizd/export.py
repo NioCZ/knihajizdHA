@@ -108,7 +108,7 @@ def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         business_km = sum(
             _number(segment.get("distance_km"))
             for segment in day_segments
-            if segment.get("trip_type") in {"business", "fueling"}
+            if segment.get("trip_type") == "business"
         )
         private_km = sum(
             _number(segment.get("distance_km"))
@@ -186,6 +186,10 @@ def _raw_columns() -> list[str]:
         "trip_type",
         "classification_source",
         "map_estimate",
-        "fuel_liters",
-        "fuel_price",
+        "map_address",
+        "map_attribution",
+        "map_candidates",
+        "candidate_search_radius_m",
+        "selected_map_candidate",
+        "validation_error",
     ]

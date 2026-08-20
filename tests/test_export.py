@@ -49,8 +49,8 @@ class ExportExcelTest(unittest.TestCase):
             headers = [cell.value for cell in raw[1]]
             self.assertEqual(raw.max_row, 4)
             self.assertIn("odometer_wait_timed_out", headers)
-            self.assertIn("fuel_liters", headers)
-            self.assertIn("fuel_price", headers)
+            self.assertIn("map_candidates", headers)
+            self.assertIn("candidate_search_radius_m", headers)
 
 
 if __name__ == "__main__":

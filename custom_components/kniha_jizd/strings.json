@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Nastavení knihy jízd",
-        "description": "Veřejný Nominatim povoluje jen malé zatížení, platný identifikující User-Agent a lokální cache. Pro firemní provoz zvažte vlastní nebo komerční endpoint.",
+        "description": "Potvrzená místa se porovnávají lokálně. Nové odborné instituce hledá Overpass a adresu doplňuje Nominatim. Veřejné endpointy povolují jen malé zatížení a vyžadují identifikující User-Agent.",
         "data": {
           "trigger_entity": "Android Auto",
           "gps_entity": "GPS entita telefonu",
@@ -12,7 +12,10 @@
           "odometer_entity": "Tachometr",
           "notify_service": "Notifikační služba (bez notify.)",
           "wait_timeout": "Maximální čekání na tachometr",
-          "place_radius": "Poloměr známého místa",
+          "place_radius": "Poloměr potvrzeného místa",
+          "institution_search_radius": "Poloměr hledání nových institucí",
+          "overpass_url": "URL Overpass API",
+          "relevance_keywords": "Klíčová slova pro odborná pracoviště",
           "nominatim_url": "URL reverse-geocoding endpointu",
           "nominatim_user_agent": "Identifikující User-Agent",
           "nominatim_email": "Kontaktní e-mail pro Nominatim (volitelné)"
@@ -34,7 +37,10 @@
           "odometer_entity": "Tachometr",
           "notify_service": "Notifikační služba (bez notify.)",
           "wait_timeout": "Maximální čekání na tachometr",
-          "place_radius": "Poloměr známého místa",
+          "place_radius": "Poloměr potvrzeného místa",
+          "institution_search_radius": "Poloměr hledání nových institucí",
+          "overpass_url": "URL Overpass API",
+          "relevance_keywords": "Klíčová slova pro odborná pracoviště",
           "nominatim_url": "URL reverse-geocoding endpointu",
           "nominatim_user_agent": "Identifikující User-Agent",
           "nominatim_email": "Kontaktní e-mail pro Nominatim (volitelné)"

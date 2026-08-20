@@ -9,10 +9,14 @@ import os
 from pathlib import Path
 import re
 from typing import Any
+from uuid import uuid4
 
 from homeassistant.core import HomeAssistant
 
 from .const import LEARNED_PLACES_FILENAME, RAW_DATA_FILENAME
+
+_MAX_ANCHORS_PER_PLACE = 50
+_RAW_DATA_VERSION = 2
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -43,6 +47,11 @@ def _normalize_address(value: str | None) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().casefold())
 
 
+def _normalize_label(value: Any) -> str:
+    """Normalize a customer label for anchor grouping."""
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
 def _haversine_meters(
     latitude_a: float, longitude_a: float, latitude_b: float, longitude_b: float
 ) -> float:
@@ -57,6 +66,38 @@ def _haversine_meters(
         * sin(delta_longitude / 2) ** 2
     )
     return 2 * earth_radius_m * asin(sqrt(a))
+
+
+def _place_anchors(place: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return anchors from the current format plus any legacy top-level point."""
+    anchors: list[dict[str, Any]] = []
+    stored = place.get("anchors")
+    if isinstance(stored, list):
+        anchors.extend(item.copy() for item in stored if isinstance(item, dict))
+
+    legacy = {
+        "latitude": place.get("latitude"),
+        "longitude": place.get("longitude"),
+        "address": place.get("address"),
+        "updated_at": place.get("updated_at"),
+    }
+    if any(legacy.get(key) is not None for key in ("latitude", "longitude", "address")):
+        legacy_address = _normalize_address(legacy.get("address"))
+        if not any(
+            legacy_address
+            and _normalize_address(anchor.get("address")) == legacy_address
+            for anchor in anchors
+        ):
+            anchors.append(legacy)
+    return anchors
+
+
+def _optional_float(value: Any) -> float | None:
+    """Return a finite-enough coordinate number or None."""
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 class KnihaJizdRepository:
@@ -77,18 +118,22 @@ class KnihaJizdRepository:
     def _initialize_sync(self) -> None:
         """Initialize the files in an executor."""
         if not self.raw_path.exists():
-            _write_json_atomic(self.raw_path, {"version": 1, "segments": []})
+            _write_json_atomic(
+                self.raw_path, {"version": _RAW_DATA_VERSION, "segments": []}
+            )
         else:
             self._load_raw_sync()
 
         if not self.places_path.exists():
-            _write_json_atomic(self.places_path, {"version": 1, "places": []})
+            _write_json_atomic(self.places_path, {"version": 2, "places": []})
         else:
             self._load_places_sync()
 
     def _load_raw_sync(self) -> dict[str, Any]:
         """Load and validate raw data."""
-        data = _read_json(self.raw_path, {"version": 1, "segments": []})
+        data = _read_json(
+            self.raw_path, {"version": _RAW_DATA_VERSION, "segments": []}
+        )
         if not isinstance(data.get("segments"), list):
             raise ValueError(f"{self.raw_path} must contain a 'segments' list")
         return data
@@ -96,13 +141,13 @@ class KnihaJizdRepository:
     def _load_places_sync(self) -> dict[str, Any]:
         """Load learned places, accepting a legacy bare mapping or list."""
         if not self.places_path.exists():
-            return {"version": 1, "places": []}
+            return {"version": 2, "places": []}
 
         with self.places_path.open("r", encoding="utf-8") as file_handle:
             loaded = json.load(file_handle)
 
         if isinstance(loaded, list):
-            return {"version": 1, "places": loaded}
+            return {"version": 2, "places": loaded}
         if isinstance(loaded, dict) and isinstance(loaded.get("places"), list):
             return loaded
         if isinstance(loaded, dict):
@@ -113,7 +158,7 @@ class KnihaJizdRepository:
                 place = value.copy()
                 place.setdefault("label", str(key))
                 places.append(place)
-            return {"version": 1, "places": places}
+            return {"version": 2, "places": places}
         raise ValueError(f"{self.places_path} has an unsupported structure")
 
     async def async_append_segment(self, segment: dict[str, Any]) -> bool:
@@ -131,6 +176,7 @@ class KnihaJizdRepository:
         if any(item.get("id") == segment_id for item in segments):
             return False
         segments.append(segment)
+        data["version"] = _RAW_DATA_VERSION
         _write_json_atomic(self.raw_path, data)
         return True
 
@@ -160,32 +206,42 @@ class KnihaJizdRepository:
     ) -> dict[str, Any] | None:
         """Find a learned place in an executor."""
         places = self._load_places_sync()["places"]
-        closest: tuple[float, dict[str, Any]] | None = None
+        closest: tuple[float, dict[str, Any], dict[str, Any]] | None = None
         if latitude is not None and longitude is not None:
             for place in places:
-                try:
+                place_radius = _optional_float(place.get("radius_m")) or radius_meters
+                for anchor in _place_anchors(place):
+                    anchor_latitude = _optional_float(anchor.get("latitude"))
+                    anchor_longitude = _optional_float(anchor.get("longitude"))
+                    if anchor_latitude is None or anchor_longitude is None:
+                        continue
                     distance = _haversine_meters(
                         latitude,
                         longitude,
-                        float(place["latitude"]),
-                        float(place["longitude"]),
+                        anchor_latitude,
+                        anchor_longitude,
                     )
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if distance <= radius_meters and (
-                    closest is None or distance < closest[0]
-                ):
-                    closest = (distance, place)
+                    if distance <= place_radius and (
+                        closest is None or distance < closest[0]
+                    ):
+                        closest = (distance, place, anchor)
             if closest is not None:
                 result = closest[1].copy()
                 result["match_distance_m"] = round(closest[0], 1)
+                result["matched_address"] = closest[2].get("address")
                 return result
+            # With valid GPS the configured circle is authoritative. An address
+            # can cover a whole campus and must not create a match outside it.
+            return None
 
         normalized = _normalize_address(address)
         if normalized:
             for place in places:
-                if _normalize_address(place.get("address")) == normalized:
-                    return place.copy()
+                for anchor in _place_anchors(place):
+                    if _normalize_address(anchor.get("address")) == normalized:
+                        result = place.copy()
+                        result["matched_address"] = anchor.get("address")
+                        return result
         return None
 
     async def async_learn_place(self, place: dict[str, Any]) -> None:
@@ -196,23 +252,96 @@ class KnihaJizdRepository:
             )
 
     def _learn_place_sync(self, place: dict[str, Any]) -> None:
-        """Persist a learned place in an executor."""
+        """Persist a customer and append a confirmed parking anchor."""
         data = self._load_places_sync()
+        data["version"] = 2
         places: list[dict[str, Any]] = data["places"]
         place_id = place.get("id")
-        normalized = _normalize_address(place.get("address"))
+        normalized_address = _normalize_address(place.get("address"))
+        normalized_label = _normalize_label(place.get("label"))
+        trip_type = place.get("trip_type")
 
         replacement_index: int | None = None
         for index, existing in enumerate(places):
             if place_id and existing.get("id") == place_id:
                 replacement_index = index
                 break
-            if normalized and _normalize_address(existing.get("address")) == normalized:
+            if (
+                normalized_label
+                and _normalize_label(existing.get("label")) == normalized_label
+                and existing.get("trip_type") == trip_type
+            ):
                 replacement_index = index
                 break
 
+        new_anchor = {
+            "latitude": place.get("latitude"),
+            "longitude": place.get("longitude"),
+            "address": place.get("address"),
+            "updated_at": place.get("updated_at"),
+        }
+
         if replacement_index is None:
-            places.append(place)
+            learned = {
+                "id": place_id or uuid4().hex,
+                "label": place.get("label"),
+                "trip_type": trip_type,
+                "map_name": place.get("map_name"),
+                "updated_at": place.get("updated_at"),
+                "anchors": [new_anchor],
+            }
+            places.append(learned)
         else:
-            places[replacement_index] = place
+            learned = places[replacement_index].copy()
+            anchors = _place_anchors(learned)
+            new_latitude = _optional_float(new_anchor.get("latitude"))
+            new_longitude = _optional_float(new_anchor.get("longitude"))
+            duplicate_index: int | None = None
+            for index, anchor in enumerate(anchors):
+                anchor_latitude = _optional_float(anchor.get("latitude"))
+                anchor_longitude = _optional_float(anchor.get("longitude"))
+                if (
+                    new_latitude is not None
+                    and new_longitude is not None
+                    and anchor_latitude is not None
+                    and anchor_longitude is not None
+                    and _haversine_meters(
+                        new_latitude,
+                        new_longitude,
+                        anchor_latitude,
+                        anchor_longitude,
+                    )
+                    <= 25
+                ):
+                    duplicate_index = index
+                    break
+                if (
+                    new_latitude is None
+                    and normalized_address
+                    and _normalize_address(anchor.get("address")) == normalized_address
+                ):
+                    duplicate_index = index
+                    break
+
+            if duplicate_index is None:
+                anchors.append(new_anchor)
+            else:
+                anchors[duplicate_index] = {
+                    **anchors[duplicate_index],
+                    **{key: value for key, value in new_anchor.items() if value is not None},
+                }
+
+            learned.update(
+                {
+                    "id": learned.get("id") or place_id or uuid4().hex,
+                    "label": place.get("label"),
+                    "trip_type": trip_type,
+                    "map_name": place.get("map_name") or learned.get("map_name"),
+                    "updated_at": place.get("updated_at"),
+                    "anchors": anchors[-_MAX_ANCHORS_PER_PLACE:],
+                }
+            )
+            for legacy_key in ("latitude", "longitude", "address"):
+                learned.pop(legacy_key, None)
+            places[replacement_index] = learned
         _write_json_atomic(self.places_path, data)

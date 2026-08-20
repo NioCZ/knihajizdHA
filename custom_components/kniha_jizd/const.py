@@ -12,6 +12,9 @@ CONF_ODOMETER_ENTITY: Final = "odometer_entity"
 CONF_NOTIFY_SERVICE: Final = "notify_service"
 CONF_WAIT_TIMEOUT: Final = "wait_timeout"
 CONF_PLACE_RADIUS: Final = "place_radius"
+CONF_INSTITUTION_SEARCH_RADIUS: Final = "institution_search_radius"
+CONF_OVERPASS_URL: Final = "overpass_url"
+CONF_RELEVANCE_KEYWORDS: Final = "relevance_keywords"
 CONF_NOMINATIM_URL: Final = "nominatim_url"
 CONF_NOMINATIM_USER_AGENT: Final = "nominatim_user_agent"
 CONF_NOMINATIM_EMAIL: Final = "nominatim_email"
@@ -22,7 +25,13 @@ DEFAULT_ADDRESS_ENTITY: Final = "sensor.telefon_geocoded_location"
 DEFAULT_ODOMETER_ENTITY: Final = "sensor.skoda_odometer"
 DEFAULT_NOTIFY_SERVICE: Final = "mobile_app_telefon"
 DEFAULT_WAIT_TIMEOUT: Final = 600
-DEFAULT_PLACE_RADIUS: Final = 150
+DEFAULT_PLACE_RADIUS: Final = 1000
+DEFAULT_INSTITUTION_SEARCH_RADIUS: Final = 3000
+DEFAULT_OVERPASS_URL: Final = "https://overpass-api.de/api/interpreter"
+DEFAULT_RELEVANCE_KEYWORDS: Final = (
+    "genet, genom, dna, molekul, biomed, laborato, cytogen, sekven, "
+    "patolog, onkolog, mikrobiolog"
+)
 DEFAULT_NOMINATIM_URL: Final = "https://nominatim.openstreetmap.org/reverse"
 DEFAULT_NOMINATIM_USER_AGENT: Final = "HomeAssistant-kniha-jizd/1.0"
 
@@ -39,10 +48,8 @@ ACTION_PREFIX: Final = "KNIHA_JIZD"
 ACTION_CONFIRM: Final = "CONFIRM"
 ACTION_NEW: Final = "NEW"
 ACTION_PRIVATE: Final = "PRIVATE"
-ACTION_FUEL: Final = "FUEL"
 
 TRIP_TYPE_BUSINESS: Final = "business"
 TRIP_TYPE_PRIVATE: Final = "private"
-TRIP_TYPE_FUELING: Final = "fueling"
 
 UNAVAILABLE_STATES: Final = frozenset({"unknown", "unavailable", "none", ""})

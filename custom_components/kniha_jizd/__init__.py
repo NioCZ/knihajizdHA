@@ -15,16 +15,25 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     ATTR_PATH,
+    CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_NOMINATIM_EMAIL,
     CONF_NOMINATIM_URL,
     CONF_NOMINATIM_USER_AGENT,
+    CONF_OVERPASS_URL,
+    CONF_PLACE_RADIUS,
+    CONF_RELEVANCE_KEYWORDS,
     DEFAULT_EXPORT_PATH,
+    DEFAULT_INSTITUTION_SEARCH_RADIUS,
+    DEFAULT_OVERPASS_URL,
+    DEFAULT_PLACE_RADIUS,
+    DEFAULT_RELEVANCE_KEYWORDS,
     DOMAIN,
     SERVICE_EXPORT_EXCEL,
 )
 from .export import export_excel
 from .geocoding import NominatimGeocoder
 from .manager import KnihaJizdManager
+from .nearby_search import NearbyInstitutionSearcher
 from .storage import KnihaJizdRepository
 
 EXPORT_SERVICE_SCHEMA = vol.Schema({vol.Optional(ATTR_PATH, default=DEFAULT_EXPORT_PATH): str})
@@ -67,21 +76,67 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Kniha jízd from a config entry."""
     merged_config = {**entry.data, **entry.options}
+    merged_config.setdefault(
+        CONF_INSTITUTION_SEARCH_RADIUS, DEFAULT_INSTITUTION_SEARCH_RADIUS
+    )
+    merged_config.setdefault(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL)
+    merged_config.setdefault(CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS)
     repository = KnihaJizdRepository(hass)
     try:
         await repository.async_initialize()
     except (OSError, ValueError) as err:
         raise ConfigEntryError(f"Cannot initialize Kniha jízd data files: {err}") from err
 
+    session = async_get_clientsession(hass)
     geocoder = NominatimGeocoder(
-        async_get_clientsession(hass),
+        session,
         str(merged_config[CONF_NOMINATIM_URL]),
         str(merged_config[CONF_NOMINATIM_USER_AGENT]),
         str(merged_config.get(CONF_NOMINATIM_EMAIL, "")),
     )
-    manager = KnihaJizdManager(hass, entry, merged_config, repository, geocoder)
+    institution_searcher = NearbyInstitutionSearcher(
+        session,
+        str(merged_config[CONF_OVERPASS_URL]),
+        str(merged_config[CONF_NOMINATIM_USER_AGENT]),
+        str(merged_config[CONF_RELEVANCE_KEYWORDS]),
+    )
+    manager = KnihaJizdManager(
+        hass,
+        entry,
+        merged_config,
+        repository,
+        geocoder,
+        institution_searcher,
+    )
     entry.runtime_data = manager
     await manager.async_start()
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate version 1 entries to institution-aware location matching."""
+    if entry.version >= 2:
+        return True
+
+    data = dict(entry.data)
+    options = dict(entry.options)
+    for values in (data, options):
+        if not values:
+            continue
+        if values.get(CONF_PLACE_RADIUS) == 150:
+            values[CONF_PLACE_RADIUS] = DEFAULT_PLACE_RADIUS
+        values.setdefault(
+            CONF_INSTITUTION_SEARCH_RADIUS, DEFAULT_INSTITUTION_SEARCH_RADIUS
+        )
+        values.setdefault(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL)
+        values.setdefault(CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS)
+
+    hass.config_entries.async_update_entry(
+        entry,
+        data=data,
+        options=options,
+        version=2,
+    )
     return True
 
 

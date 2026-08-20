@@ -23,8 +23,19 @@
       "map_estimate": "ACME",
       "map_address": "Průmyslová 12, 102 00 Praha 10, Česko",
       "map_attribution": "© OpenStreetMap contributors, ODbL",
-      "fuel_liters": null,
-      "fuel_price": null,
+      "map_candidates": [
+        {
+          "name": "ACME s.r.o.",
+          "distance_m": 340.0,
+          "score": 51.6,
+          "category": "office=research"
+        }
+      ],
+      "candidate_search_radius_m": 3000,
+      "selected_map_candidate": {
+        "name": "ACME s.r.o.",
+        "distance_m": 340.0
+      },
       "validation_error": null
     },
     {
@@ -49,8 +60,9 @@
       "map_estimate": "Vinohrady",
       "map_address": "Vinohradská 50, 120 00 Praha 2, Česko",
       "map_attribution": "© OpenStreetMap contributors, ODbL",
-      "fuel_liters": null,
-      "fuel_price": null,
+      "map_candidates": [],
+      "candidate_search_radius_m": 3000,
+      "selected_map_candidate": null,
       "validation_error": null
     },
     {
@@ -69,14 +81,15 @@
       "start_longitude": 14.443,
       "end_latitude": 50.087,
       "end_longitude": 14.421,
-      "purpose": "Tankování",
-      "trip_type": "fueling",
+      "purpose": "Beta a.s.",
+      "trip_type": "business",
       "classification_source": "notification",
-      "map_estimate": "Čerpací stanice",
+      "map_estimate": "Beta",
       "map_address": "Dlouhá 1, 110 00 Praha 1, Česko",
       "map_attribution": "© OpenStreetMap contributors, ODbL",
-      "fuel_liters": 42.5,
-      "fuel_price": 1650.0,
+      "map_candidates": [],
+      "candidate_search_radius_m": 3000,
+      "selected_map_candidate": null,
       "validation_error": null
     }
   ]

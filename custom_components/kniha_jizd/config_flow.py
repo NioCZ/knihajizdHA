@@ -14,21 +14,27 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_ADDRESS_ENTITY,
     CONF_GPS_ENTITY,
+    CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_NOMINATIM_EMAIL,
     CONF_NOMINATIM_URL,
     CONF_NOMINATIM_USER_AGENT,
     CONF_NOTIFY_SERVICE,
     CONF_ODOMETER_ENTITY,
+    CONF_OVERPASS_URL,
     CONF_PLACE_RADIUS,
+    CONF_RELEVANCE_KEYWORDS,
     CONF_TRIGGER_ENTITY,
     CONF_WAIT_TIMEOUT,
     DEFAULT_ADDRESS_ENTITY,
     DEFAULT_GPS_ENTITY,
+    DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_NOMINATIM_URL,
     DEFAULT_NOMINATIM_USER_AGENT,
     DEFAULT_NOTIFY_SERVICE,
     DEFAULT_ODOMETER_ENTITY,
+    DEFAULT_OVERPASS_URL,
     DEFAULT_PLACE_RADIUS,
+    DEFAULT_RELEVANCE_KEYWORDS,
     DEFAULT_TRIGGER_ENTITY,
     DEFAULT_WAIT_TIMEOUT,
     DOMAIN,
@@ -80,11 +86,40 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     min=25,
-                    max=1000,
+                    max=5000,
                     step=25,
                     mode=selector.NumberSelectorMode.BOX,
                     unit_of_measurement="m",
                 )
+            ),
+            vol.Required(
+                CONF_INSTITUTION_SEARCH_RADIUS,
+                default=defaults.get(
+                    CONF_INSTITUTION_SEARCH_RADIUS,
+                    DEFAULT_INSTITUTION_SEARCH_RADIUS,
+                ),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=500,
+                    max=10000,
+                    step=250,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="m",
+                )
+            ),
+            vol.Required(
+                CONF_OVERPASS_URL,
+                default=defaults.get(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL),
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
+            ),
+            vol.Required(
+                CONF_RELEVANCE_KEYWORDS,
+                default=defaults.get(
+                    CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS
+                ),
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(multiline=True)
             ),
             vol.Required(
                 CONF_NOMINATIM_URL,
@@ -111,7 +146,7 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
 class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kniha jízd."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

@@ -19,12 +19,12 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ACTION_CONFIRM,
-    ACTION_FUEL,
     ACTION_NEW,
     ACTION_PREFIX,
     ACTION_PRIVATE,
     CONF_ADDRESS_ENTITY,
     CONF_GPS_ENTITY,
+    CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_NOTIFY_SERVICE,
     CONF_ODOMETER_ENTITY,
     CONF_PLACE_RADIUS,
@@ -34,17 +34,17 @@ from .const import (
     EVENT_NOTIFICATION_ACTION,
     RUNTIME_STORE_VERSION,
     TRIP_TYPE_BUSINESS,
-    TRIP_TYPE_FUELING,
     TRIP_TYPE_PRIVATE,
     UNAVAILABLE_STATES,
 )
 from .geocoding import NominatimGeocoder
+from .nearby_search import NearbyInstitutionSearcher
 from .storage import KnihaJizdRepository
 
 _LOGGER = logging.getLogger(__name__)
 
 _ACTION_PATTERN = re.compile(
-    rf"^{ACTION_PREFIX}_({ACTION_CONFIRM}|{ACTION_NEW}|{ACTION_PRIVATE}|{ACTION_FUEL})_([0-9a-f]+)$"
+    rf"^{ACTION_PREFIX}_({ACTION_CONFIRM}|{ACTION_NEW}|{ACTION_PRIVATE})_([0-9a-f]+)$"
 )
 
 
@@ -58,12 +58,14 @@ class KnihaJizdManager:
         config: dict[str, Any],
         repository: KnihaJizdRepository,
         geocoder: NominatimGeocoder,
+        institution_searcher: NearbyInstitutionSearcher,
     ) -> None:
         """Initialize the manager."""
         self.hass = hass
         self.entry = entry
         self.repository = repository
         self.geocoder = geocoder
+        self.institution_searcher = institution_searcher
 
         self.trigger_entity = str(config[CONF_TRIGGER_ENTITY])
         self.gps_entity = str(config[CONF_GPS_ENTITY])
@@ -74,6 +76,9 @@ class KnihaJizdManager:
         )
         self.wait_timeout = float(config[CONF_WAIT_TIMEOUT])
         self.place_radius = float(config[CONF_PLACE_RADIUS])
+        self.institution_search_radius = float(
+            config[CONF_INSTITUTION_SEARCH_RADIUS]
+        )
 
         self._active: dict[str, Any] | None = None
         self._closing: dict[str, dict[str, Any]] = {}
@@ -233,8 +238,9 @@ class KnihaJizdManager:
                 "map_estimate": None,
                 "map_address": None,
                 "map_attribution": None,
-                "fuel_liters": None,
-                "fuel_price": None,
+                "map_candidates": [],
+                "candidate_search_radius_m": None,
+                "selected_map_candidate": None,
                 "validation_error": (
                     None if start_odometer is not None else "missing_start_odometer"
                 ),
@@ -308,8 +314,8 @@ class KnihaJizdManager:
                 _as_text(segment.get("start_address")),
                 self.place_radius,
             )
-            if learned_start is not None and learned_start.get("address"):
-                segment["start_address"] = learned_start["address"]
+            if learned_start is not None and learned_start.get("matched_address"):
+                segment["start_address"] = learned_start["matched_address"]
             else:
                 start_map_result = await self.geocoder.async_reverse(
                     _as_float(segment.get("start_latitude")),
@@ -325,15 +331,22 @@ class KnihaJizdManager:
             self.place_radius,
         )
         if learned_place is not None:
-            segment["map_estimate"] = learned_place.get("map_name")
+            segment["map_estimate"] = learned_place.get("map_name") or learned_place.get(
+                "label"
+            )
             if _address_is_coordinate_fallback(
                 segment.get("end_address")
-            ) and learned_place.get("address"):
-                segment["end_address"] = learned_place["address"]
+            ) and learned_place.get("matched_address"):
+                segment["end_address"] = learned_place["matched_address"]
+            learned_trip_type = (
+                TRIP_TYPE_PRIVATE
+                if learned_place.get("trip_type") == TRIP_TYPE_PRIVATE
+                else TRIP_TYPE_BUSINESS
+            )
             await self._async_finalize_segment(
                 segment,
                 purpose=str(learned_place.get("label") or "Neznámý zákazník"),
-                trip_type=str(learned_place.get("trip_type") or TRIP_TYPE_BUSINESS),
+                trip_type=learned_trip_type,
                 source="learned_place",
                 learn_place=False,
             )
@@ -341,14 +354,28 @@ class KnihaJizdManager:
             await self._async_save_runtime()
             return
 
-        map_result = await self.geocoder.async_reverse(
-            _as_float(segment.get("end_latitude")),
-            _as_float(segment.get("end_longitude")),
+        end_latitude = _as_float(segment.get("end_latitude"))
+        end_longitude = _as_float(segment.get("end_longitude"))
+        candidates, map_result = await asyncio.gather(
+            self.institution_searcher.async_search(
+                end_latitude,
+                end_longitude,
+                self.institution_search_radius,
+            ),
+            self.geocoder.async_reverse(end_latitude, end_longitude),
         )
+        segment["map_candidates"] = candidates
+        segment["candidate_search_radius_m"] = self.institution_search_radius
+        if candidates:
+            segment["map_estimate"] = candidates[0]["name"]
+            segment["map_attribution"] = "© OpenStreetMap contributors, ODbL"
         if map_result is not None:
-            segment["map_estimate"] = map_result.get("name")
+            if not segment.get("map_estimate"):
+                segment["map_estimate"] = map_result.get("name")
             segment["map_address"] = map_result.get("display_name")
-            segment["map_attribution"] = map_result.get("attribution")
+            segment["map_attribution"] = (
+                segment.get("map_attribution") or map_result.get("attribution")
+            )
             if _address_is_coordinate_fallback(segment.get("end_address")) and map_result.get(
                 "display_name"
             ):
@@ -463,9 +490,25 @@ class KnihaJizdManager:
         """Ask the phone to classify an unknown destination."""
         segment_id = str(segment["id"])
         estimate = str(segment.get("map_estimate") or "Neznámý cíl")
+        candidates = _map_candidates(segment)
+        candidate_lines = [
+            f"{index}. {candidate['name']} ({_format_distance(candidate.get('distance_m'))})"
+            for index, candidate in enumerate(candidates[:3], start=1)
+        ]
+        if candidate_lines:
+            base_message = (
+                f"Jízda ukončena. Nejpravděpodobnější cíl: {estimate}. "
+                f"Návrhy: {'; '.join(candidate_lines)}. Jak jízdu zařadit? "
+                "U volby Navrhnout nového lze zadat vlastní název nebo číslo návrhu."
+            )
+        else:
+            base_message = (
+                f"Jízda ukončena. Odhadovaný cíl: {estimate}. Jak jízdu zařadit?"
+            )
         message = (
-            validation_message
-            or f"Jízda ukončena. Odhadovaný cíl: {estimate}. Jak jízdu zařadit?"
+            f"{validation_message} {base_message}"
+            if validation_message
+            else base_message
         )
         service = self.notify_service
         if not self.hass.services.has_service("notify", service):
@@ -486,18 +529,11 @@ class KnihaJizdManager:
                 "title": "Navrhnout nového",
                 "behavior": "textInput",
                 "textInputButtonTitle": "Uložit",
-                "textInputPlaceholder": "Název zákazníka",
+                "textInputPlaceholder": "Název nebo číslo návrhu 1–3",
             },
             {
                 "action": _action_id(ACTION_PRIVATE, segment_id),
                 "title": "Osobní KM",
-            },
-            {
-                "action": _action_id(ACTION_FUEL, segment_id),
-                "title": "Tankování",
-                "behavior": "textInput",
-                "textInputButtonTitle": "Uložit",
-                "textInputPlaceholder": "Litry; celková cena (např. 42,5; 1650)",
             },
         ]
         await self.hass.services.async_call(
@@ -529,12 +565,14 @@ class KnihaJizdManager:
                 return
             segment = deepcopy(original)
             reply_text = str(event_data.get("reply_text") or "").strip()
-            fuel_liters: float | None = None
-            fuel_price: float | None = None
+            candidates = _map_candidates(segment)
+            selected_candidate: dict[str, Any] | None = None
 
             if action == ACTION_CONFIRM:
                 purpose = str(segment.get("map_estimate") or "Neznámý zákazník")
                 trip_type = TRIP_TYPE_BUSINESS
+                if candidates:
+                    selected_candidate = candidates[0]
             elif action == ACTION_NEW:
                 if not reply_text:
                     await self._async_send_classification_notification(
@@ -542,23 +580,36 @@ class KnihaJizdManager:
                         "Název zákazníka nebyl vyplněn. Zkuste to prosím znovu.",
                     )
                     return
-                purpose = reply_text
+                if reply_text.isdigit():
+                    candidate_number = int(reply_text)
+                    if not 1 <= candidate_number <= min(3, len(candidates)):
+                        await self._async_send_classification_notification(
+                            original,
+                            "Toto číslo návrhu není dostupné. Zkuste to prosím znovu.",
+                        )
+                        return
+                    selected_candidate = candidates[candidate_number - 1]
+                    purpose = str(selected_candidate["name"])
+                else:
+                    purpose = reply_text
                 trip_type = TRIP_TYPE_BUSINESS
             elif action == ACTION_PRIVATE:
                 purpose = "Soukromá"
                 trip_type = TRIP_TYPE_PRIVATE
-            else:
-                purpose = "Tankování"
-                trip_type = TRIP_TYPE_FUELING
-                fuel_liters, fuel_price = _parse_fuel_reply(reply_text)
 
-            segment["fuel_liters"] = fuel_liters
-            segment["fuel_price"] = fuel_price
+            if selected_candidate is not None:
+                segment["map_estimate"] = purpose
+                segment["selected_map_candidate"] = selected_candidate
+
             await self._async_finalize_segment(
                 segment,
                 purpose=purpose,
                 trip_type=trip_type,
-                source="notification",
+                source=(
+                    "notification_map_candidate"
+                    if selected_candidate is not None
+                    else "notification"
+                ),
                 learn_place=True,
             )
             self._pending.pop(segment_id, None)
@@ -717,13 +768,23 @@ def _address_is_coordinate_fallback(value: Any) -> bool:
     return bool(re.fullmatch(r"-?\d+\.\d{6},\s*-?\d+\.\d{6}", value.strip()))
 
 
-def _parse_fuel_reply(value: str) -> tuple[float | None, float | None]:
-    """Parse 'litres; total price', allowing Czech decimal commas."""
-    if not value.strip():
-        return None, None
-    parts = [part.strip() for part in value.split(";", maxsplit=1)]
-    liters = _as_float(re.sub(r"[^0-9,.-]", "", parts[0]))
-    price = None
-    if len(parts) > 1:
-        price = _as_float(re.sub(r"[^0-9,.-]", "", parts[1]))
-    return liters, price
+def _map_candidates(segment: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return valid serialized map candidates from a segment."""
+    candidates = segment.get("map_candidates")
+    if not isinstance(candidates, list):
+        return []
+    return [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate.get("name")
+    ]
+
+
+def _format_distance(value: Any) -> str:
+    """Format candidate distance compactly for a phone notification."""
+    distance = _as_float(value)
+    if distance is None:
+        return "neznámá vzdálenost"
+    if distance < 1000:
+        return f"{distance:.0f} m"
+    return f"{distance / 1000:.1f} km"

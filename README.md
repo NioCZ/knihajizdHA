@@ -31,8 +31,8 @@ integraci bezpečně reloaduje.
   `last_updated` (nebo HA metadata `State.last_updated`) je **po** čase odpojení.
 - Po timeoutu (výchozí 600 s) použije poslední dostupnou hodnotu a v raw datech
   nastaví `odometer_wait_timed_out: true`.
-- Známé místo v nastaveném poloměru se zařadí automaticky. Neznámý cíl vyvolá
-  actionable notification se čtyřmi akcemi.
+- Potvrzené místo v okruhu 1 000 m se zařadí automaticky. U neznámého cíle se
+  v okruhu 3 000 m vyhledají a obodují odborné instituce a odešle se notifikace.
 
 Aktivní jízda, čekající ukončení i nezodpovězená notifikace jsou uloženy v interním
 HA Store. Restart Home Assistantu proto rozpracovanou jízdu nezahodí. Pokud začne
@@ -41,21 +41,50 @@ doručení předchozí finální hodnoty opraví na tuto hodnotu.
 
 ### Akce notifikace
 
-- **Potvrdit klienta** – použije název odhadnutý mapou jako služební jízdu.
-- **Navrhnout nového** – textový vstup uloží vlastní název jako služební jízdu.
+- **Potvrdit klienta** – použije nejpravděpodobnější mapový návrh.
+- **Navrhnout nového** – přijme vlastní název nebo číslo návrhu `1`, `2` či `3`.
 - **Osobní KM** – označí segment jako soukromý.
-- **Tankování** – textový vstup přijímá `litry; celková cena`, například
-  `42,5; 1650`. Oba údaje jsou volitelné a jízda se počítá jako služební.
 
 Volba se spolu se souřadnicemi a typem jízdy uloží do
 `/config/learned_places.json`. Příští cíl v nastaveném poloměru se už neptá.
+
+## Rozpoznání nemocnic a výzkumných pracovišť
+
+Vyhledávání má dvě nezávislé vzdálenosti:
+
+- **Poloměr potvrzeného místa** – výchozí 1 000 m. Vztahuje se pouze na zákazníky,
+  které už uživatel potvrdil. Nejbližší shoda se zapíše automaticky. Je-li GPS
+  dostupná, shodná textová adresa nemůže tento okruh obejít; adresa je záloha jen
+  při chybějících souřadnicích.
+- **Poloměr hledání nových institucí** – výchozí 3 000 m. Slouží jen pro sestavení
+  návrhů; samotný mapový odhad se bez potvrzení nezapíše.
+
+Jeden Overpass dotaz načte objekty označené jako nemocnice, klinika, univerzita,
+výzkumný ústav, výzkumná kancelář, laboratoř nebo univerzitní pracoviště. Kandidáti
+získávají body za odpovídající OSM kategorii a za výskyty nakonfigurovaných kořenů
+slov. Výchozí sada zvýhodňuje genetiku, genomiku, DNA, molekulární a biomedicínská
+pracoviště, laboratoře, cytogenetiku, sekvenování, patologii, onkologii a
+mikrobiologii. Za vzdálenost se body odečítají. Proto může relevantní genetický
+ústav porazit bližší obecnou nemocnici nebo univerzitu.
+
+Do notifikace se vloží až tři nejlepší výsledky se vzdáleností. Tlačítko potvrzení
+vybere první; v textovém vstupu lze napsat číslo druhého/třetího výsledku nebo úplně
+vlastní název. Kompletní skóre, důvody a kandidáti zůstávají v raw datech pro audit.
+
+Jeden zákazník může mít v `learned_places.json` více potvrzených parkovacích bodů
+(`anchors`). Když je stejný název potvrzen na vzdálenějším parkovišti, nový bod se
+přidá ke stejnému zákazníkovi. Starý formát s jednou dvojicí latitude/longitude se
+načítá zpětně kompatibilně. Volitelným ručním polem `radius_m` lze konkrétnímu
+zákazníkovi přepsat globální poloměr.
 
 ## Datové soubory
 
 `/config/kniha_jizd_raw.json` má kořenový objekt s verzí formátu a polem
 `segments`. Každý segment obsahuje stabilní ID, lokální datum, přesné UTC časy,
 oba raw stavy tachometru, čas finální aktualizace, příznak timeoutu, celé adresy,
-GPS, účel, typ jízdy, zdroj klasifikace, mapový odhad a případně litry/cenu.
+GPS, účel, typ jízdy, zdroj klasifikace a mapový odhad.
+U nových míst navíc obsahuje seřazené `map_candidates`, použitý vyhledávací okruh
+a případně vybraného mapového kandidáta.
 
 Zápisy obou JSON souborů probíhají atomickou výměnou souboru. ID segmentu navíc
 brání duplicitnímu zápisu při opakování akce nebo zotavení po restartu.
@@ -78,7 +107,7 @@ běží přes `hass.async_add_executor_job`, takže neblokuje event loop.
   unikátní zákazníci a součty služebních/soukromých kilometrů.
 - **Raw data**: všechny segmenty ve stejných polích jako JSON log.
 
-## Nominatim a soukromí
+## Mapové služby a soukromí
 
 Výchozí reverse geocoder je veřejný Nominatim. Integrace dodržuje maximálně jeden
 požadavek za sekundu a známé cíle lokálně cacheuje. Nastavte identifikující
@@ -87,5 +116,10 @@ firemní flotilu; v konfiguraci lze přepnout na vlastní či smluvní kompatibi
 endpoint. Aktuální podmínky jsou v
 [Nominatim Usage Policy](https://operations.osmfoundation.org/policies/nominatim/).
 
+Kandidáty odborných institucí dodává samostatný Overpass endpoint. Používá se jeden
+sloučený dotaz na neznámý cíl, nejvýše jeden současně a s odstupem nejméně dvě
+sekundy. Oba endpointy jsou nastavitelné, takže je lze nahradit vlastními službami.
+
 Souřadnice neznámého startu/cíle jsou při lookupu odeslány z HA na zvolený
-geocoding endpoint. Do Excelu se ukládá atribuce OpenStreetMap, je-li lookup použit.
+Nominatim endpoint; souřadnice neznámého cíle také na zvolený Overpass endpoint.
+Do Excelu se ukládá atribuce OpenStreetMap, je-li mapové hledání použito.
