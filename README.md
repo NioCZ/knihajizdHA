@@ -6,6 +6,17 @@ vytvořit dvoulistý Excel report.
 
 ## Instalace
 
+### HACS
+
+1. V HACS otevřete **Integrace → Vlastní repozitáře**.
+2. Přidejte `https://github.com/NioCZ/knihajizdHA` jako typ **Integrace**.
+3. Stáhněte poslední vydanou verzi a restartujte Home Assistant.
+
+Pro spolehlivé verzování používejte publikované GitHub Releases. Samotná větev
+`main` je podporovaná také, HACS ji ale označuje zkráceným hashem commitu.
+
+### Ruční instalace
+
 1. Zkopírujte adresář `custom_components/kniha_jizd` do stejné cesty v `/config`.
 2. Restartujte Home Assistant.
 3. Otevřete **Nastavení → Zařízení a služby → Přidat integraci → Kniha jízd**.
