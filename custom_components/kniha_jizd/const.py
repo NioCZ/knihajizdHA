@@ -11,6 +11,7 @@ CONF_ADDRESS_ENTITY: Final = "address_entity"
 CONF_ODOMETER_ENTITY: Final = "odometer_entity"
 CONF_NOTIFY_SERVICE: Final = "notify_service"
 CONF_WAIT_TIMEOUT: Final = "wait_timeout"
+CONF_RETURN_CONTEXT_HOURS: Final = "return_context_hours"
 CONF_PLACE_RADIUS: Final = "place_radius"
 CONF_INSTITUTION_SEARCH_RADIUS: Final = "institution_search_radius"
 CONF_OVERPASS_URL: Final = "overpass_url"
@@ -25,6 +26,7 @@ DEFAULT_ADDRESS_ENTITY: Final = "sensor.telefon_geocoded_location"
 DEFAULT_ODOMETER_ENTITY: Final = "sensor.skoda_odometer"
 DEFAULT_NOTIFY_SERVICE: Final = "mobile_app_telefon"
 DEFAULT_WAIT_TIMEOUT: Final = 600
+DEFAULT_RETURN_CONTEXT_HOURS: Final = 18
 DEFAULT_PLACE_RADIUS: Final = 1000
 DEFAULT_INSTITUTION_SEARCH_RADIUS: Final = 3000
 DEFAULT_OVERPASS_URL: Final = "https://overpass-api.de/api/interpreter"
@@ -49,8 +51,13 @@ ACTION_PREFIX: Final = "KNIHA_JIZD"
 ACTION_CONFIRM: Final = "CONFIRM"
 ACTION_NEW: Final = "NEW"
 ACTION_PRIVATE: Final = "PRIVATE"
+ACTION_RETURN: Final = "RETURN"
 
 TRIP_TYPE_BUSINESS: Final = "business"
 TRIP_TYPE_PRIVATE: Final = "private"
+TRIP_TYPE_CONTEXTUAL: Final = "contextual"
+
+PLACE_ROLE_CLIENT: Final = "client"
+PLACE_ROLE_RETURN: Final = "return"
 
 UNAVAILABLE_STATES: Final = frozenset({"unknown", "unavailable", "none", ""})

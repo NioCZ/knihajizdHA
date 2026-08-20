@@ -17,6 +17,7 @@ from .const import LEARNED_PLACES_FILENAME, RAW_DATA_FILENAME
 
 _MAX_ANCHORS_PER_PLACE = 50
 _RAW_DATA_VERSION = 2
+_LEARNED_PLACES_VERSION = 3
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -125,7 +126,10 @@ class KnihaJizdRepository:
             self._load_raw_sync()
 
         if not self.places_path.exists():
-            _write_json_atomic(self.places_path, {"version": 2, "places": []})
+            _write_json_atomic(
+                self.places_path,
+                {"version": _LEARNED_PLACES_VERSION, "places": []},
+            )
         else:
             self._load_places_sync()
 
@@ -141,13 +145,13 @@ class KnihaJizdRepository:
     def _load_places_sync(self) -> dict[str, Any]:
         """Load learned places, accepting a legacy bare mapping or list."""
         if not self.places_path.exists():
-            return {"version": 2, "places": []}
+            return {"version": _LEARNED_PLACES_VERSION, "places": []}
 
         with self.places_path.open("r", encoding="utf-8") as file_handle:
             loaded = json.load(file_handle)
 
         if isinstance(loaded, list):
-            return {"version": 2, "places": loaded}
+            return {"version": _LEARNED_PLACES_VERSION, "places": loaded}
         if isinstance(loaded, dict) and isinstance(loaded.get("places"), list):
             return loaded
         if isinstance(loaded, dict):
@@ -158,7 +162,7 @@ class KnihaJizdRepository:
                 place = value.copy()
                 place.setdefault("label", str(key))
                 places.append(place)
-            return {"version": 2, "places": places}
+            return {"version": _LEARNED_PLACES_VERSION, "places": places}
         raise ValueError(f"{self.places_path} has an unsupported structure")
 
     async def async_append_segment(self, segment: dict[str, Any]) -> bool:
@@ -265,7 +269,7 @@ class KnihaJizdRepository:
     def _learn_place_sync(self, place: dict[str, Any]) -> None:
         """Persist a customer and append a confirmed parking anchor."""
         data = self._load_places_sync()
-        data["version"] = 2
+        data["version"] = _LEARNED_PLACES_VERSION
         places: list[dict[str, Any]] = data["places"]
         place_id = place.get("id")
         normalized_address = _normalize_address(place.get("address"))
@@ -297,6 +301,7 @@ class KnihaJizdRepository:
                 "id": place_id or uuid4().hex,
                 "label": place.get("label"),
                 "trip_type": trip_type,
+                "place_role": place.get("place_role"),
                 "map_name": place.get("map_name"),
                 "updated_at": place.get("updated_at"),
                 "anchors": [new_anchor],
@@ -347,6 +352,9 @@ class KnihaJizdRepository:
                     "id": learned.get("id") or place_id or uuid4().hex,
                     "label": place.get("label"),
                     "trip_type": trip_type,
+                    "place_role": (
+                        place.get("place_role") or learned.get("place_role")
+                    ),
                     "map_name": place.get("map_name") or learned.get("map_name"),
                     "updated_at": place.get("updated_at"),
                     "anchors": anchors[-_MAX_ANCHORS_PER_PLACE:],

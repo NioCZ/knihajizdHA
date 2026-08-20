@@ -67,6 +67,29 @@ Stránka je dostupná pouze administrátorům.
 - Potvrzené místo v okruhu 1 000 m se zařadí automaticky. U neznámého cíle se
   v okruhu 3 000 m vyhledají a obodují odborné instituce a odešle se notifikace.
 
+### Služební návraty domů, na firmu nebo do hotelu
+
+Integrace nehádá typ jízdy jen podle cíle, protože stejná cesta domů může být
+služební i soukromá. Místo toho kontroluje návaznost na poslední uložený segment:
+
+- předchozí segment musí být služební,
+- nová jízda musí začít v nastaveném okruhu od jeho cíle (případně na přesně
+  stejné adrese, pokud GPS chybí),
+- časová mezera nesmí překročit nastavenou hodnotu, výchozí je 18 hodin,
+- pokud jsou známé oba stavy tachometru, jejich rozdíl nesmí být větší než 1 km;
+  větší rozdíl znamená, že mezi segmenty pravděpodobně proběhla jiná cesta.
+
+Při první takové jízdě nabídne notifikace **Služební návrat**, **Jiný klient** a
+**Osobní KM**. Potvrzený domov, firma či hotel se uloží s rolí `return`. Příští
+návrat na stejné místo se zapíše automaticky jako služební jen při platné
+návaznosti na klienta; bez návaznosti se integrace znovu zeptá. Služební návrat
+si ponechá zákazníka předchozího segmentu a v raw datech má `journey_role: return`
+a `return_of_segment_id`, takže agregovaný Excel zákazníka nerozdělí na dvě jména.
+
+Maximální čas návaznosti lze změnit přes **Konfigurovat** u integrace v rozsahu
+1–72 hodin. Volnější hodnota je vhodná pro přenocování v hotelu, kratší omezuje
+riziko, že se za návrat nabídne pozdější nesouvisející cesta.
+
 Aktivní jízda, čekající ukončení i nezodpovězená notifikace jsou uloženy v interním
 HA Store. Restart Home Assistantu proto rozpracovanou jízdu nezahodí. Pokud začne
 další jízda dříve, než cloud doplní předchozí tachometr, její počáteční stav se po
@@ -77,6 +100,9 @@ doručení předchozí finální hodnoty opraví na tuto hodnotu.
 - **Potvrdit klienta** – použije nejpravděpodobnější mapový návrh.
 - **Navrhnout nového** – přijme vlastní název nebo číslo návrhu `1`, `2` či `3`.
 - **Osobní KM** – označí segment jako soukromý.
+
+U rozpoznané návazné jízdy se první dvě volby nahradí tlačítky **Služební návrat**
+a **Jiný klient**. Návratové místo se učí kontextově, nikoli napevno jako služební.
 
 Volba se spolu se souřadnicemi a typem jízdy uloží do
 `/config/learned_places.json`. Příští cíl v nastaveném poloměru se už neptá.

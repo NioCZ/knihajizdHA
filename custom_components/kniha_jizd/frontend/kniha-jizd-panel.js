@@ -187,12 +187,13 @@ class KnihaJizdPanel extends HTMLElement {
             <dt>Aktivní segment</dt><dd>${this._text(attrs.active_segment_id)}</dd>
             <dt>Čeká tachometr</dt><dd>${this._text(attrs.closing_count, "0")}</dd>
             <dt>Čeká zařazení</dt><dd>${this._text(attrs.pending_count, "0")}</dd>
+            <dt>Návaznost návratu</dt><dd>${this._text(attrs.return_context_hours)} h</dd>
             <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
           </dl></article>
           <article class="card"><h2>Poslední jízda</h2><dl>
             <dt>Vzdálenost</dt><dd>${this._number(lastTrip?.state)} km</dd>
             <dt>Zákazník</dt><dd>${this._text(last.purpose)}</dd>
-            <dt>Typ</dt><dd>${last.trip_type === "private" ? "Soukromá" : this._text(last.trip_type)}</dd>
+            <dt>Typ</dt><dd>${last.journey_role === "return" ? "Služební návrat" : last.trip_type === "private" ? "Soukromá" : this._text(last.trip_type)}</dd>
             <dt>Start</dt><dd>${this._text(last.start_address)}</dd>
             <dt>Cíl</dt><dd>${this._text(last.end_address)}</dd>
             <dt>Konec</dt><dd>${this._text(last.ended_at)}</dd>

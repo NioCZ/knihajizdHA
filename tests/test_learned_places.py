@@ -80,7 +80,7 @@ class LearnedPlacesTest(unittest.TestCase):
             )
 
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 2)
+            self.assertEqual(document["version"], 3)
             self.assertEqual(len(document["places"]), 1)
             self.assertEqual(len(document["places"][0]["anchors"]), 2)
 
@@ -118,6 +118,44 @@ class LearnedPlacesTest(unittest.TestCase):
 
             self.assertIsNone(match)
             self.assertEqual(fallback["label"], "Laboratoř A")
+
+    def test_existing_private_place_can_become_contextual_return(self) -> None:
+        """Preserve one anchor while teaching home as a context-sensitive return."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository._learn_place_sync(
+                {
+                    "id": "home",
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "address": "Domov",
+                    "label": "Domov",
+                    "trip_type": "private",
+                }
+            )
+            repository._learn_place_sync(
+                {
+                    "id": "home",
+                    "latitude": 50.0001,
+                    "longitude": 14.0,
+                    "address": "Domov",
+                    "label": "Domov",
+                    "trip_type": "contextual",
+                    "place_role": "return",
+                }
+            )
+
+            match = repository._find_place_sync(50.0, 14.0, None, 1000)
+            document = json.loads(repository.places_path.read_text(encoding="utf-8"))
+            self.assertEqual(document["version"], 3)
+            self.assertEqual(len(document["places"]), 1)
+            self.assertEqual(match["place_role"], "return")
+            self.assertEqual(match["trip_type"], "contextual")
 
     def test_raw_statistics_for_entities_and_panel(self) -> None:
         """Calculate daily totals and the last trip from persisted segments."""

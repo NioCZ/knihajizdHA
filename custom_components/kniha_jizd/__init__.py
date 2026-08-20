@@ -26,11 +26,13 @@ from .const import (
     CONF_OVERPASS_URL,
     CONF_PLACE_RADIUS,
     CONF_RELEVANCE_KEYWORDS,
+    CONF_RETURN_CONTEXT_HOURS,
     DEFAULT_EXPORT_PATH,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_OVERPASS_URL,
     DEFAULT_PLACE_RADIUS,
     DEFAULT_RELEVANCE_KEYWORDS,
+    DEFAULT_RETURN_CONTEXT_HOURS,
     DOMAIN,
     SERVICE_EXPORT_EXCEL,
 )
@@ -103,6 +105,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     merged_config.setdefault(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL)
     merged_config.setdefault(CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS)
+    merged_config.setdefault(
+        CONF_RETURN_CONTEXT_HOURS, DEFAULT_RETURN_CONTEXT_HOURS
+    )
     repository = KnihaJizdRepository(hass)
     try:
         await repository.async_initialize()
@@ -147,8 +152,8 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate version 1 entries to institution-aware location matching."""
-    if entry.version >= 2:
+    """Migrate entries to institution and return-context matching."""
+    if entry.version >= 3:
         return True
 
     data = dict(entry.data)
@@ -156,19 +161,20 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     for values in (data, options):
         if not values:
             continue
-        if values.get(CONF_PLACE_RADIUS) == 150:
+        if entry.version < 2 and values.get(CONF_PLACE_RADIUS) == 150:
             values[CONF_PLACE_RADIUS] = DEFAULT_PLACE_RADIUS
         values.setdefault(
             CONF_INSTITUTION_SEARCH_RADIUS, DEFAULT_INSTITUTION_SEARCH_RADIUS
         )
         values.setdefault(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL)
         values.setdefault(CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS)
+        values.setdefault(CONF_RETURN_CONTEXT_HOURS, DEFAULT_RETURN_CONTEXT_HOURS)
 
     hass.config_entries.async_update_entry(
         entry,
         data=data,
         options=options,
-        version=2,
+        version=3,
     )
     return True
 
