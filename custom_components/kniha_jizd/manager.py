@@ -105,6 +105,8 @@ class KnihaJizdManager:
         self._last_error: str | None = None
         self._export: dict[str, Any] = {
             "state": "never",
+            "month": None,
+            "filename": None,
             "path": None,
             "download_url": None,
             "generated_at": None,
@@ -304,13 +306,24 @@ class KnihaJizdManager:
         }
 
     @callback
-    def set_export_running(self) -> None:
+    def set_export_running(self, month: str) -> None:
         """Expose a running Excel export to entities and the panel."""
-        self._export.update({"state": "generating", "error": None})
+        self._download_token = None
+        self._download_token_expires_at = None
+        self._export.update(
+            {
+                "state": "generating",
+                "month": month,
+                "filename": f"kniha_jizd_{month}.xlsx",
+                "download_url": None,
+                "expires_at": None,
+                "error": None,
+            }
+        )
         self._notify_listeners()
 
     @callback
-    def set_export_success(self, path: Path) -> None:
+    def set_export_success(self, path: Path, month: str) -> None:
         """Expose a finished export and create a temporary download link."""
         self._download_token = secrets.token_urlsafe(32)
         now = datetime.now(UTC)
@@ -318,6 +331,8 @@ class KnihaJizdManager:
         self._export.update(
             {
                 "state": "ready",
+                "month": month,
+                "filename": f"kniha_jizd_{month}.xlsx",
                 "path": str(path),
                 "download_url": (
                     f"/api/{DOMAIN}/download/{self._download_token}"

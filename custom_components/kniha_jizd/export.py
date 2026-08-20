@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -18,8 +19,10 @@ SUMMARY_COLUMNS = [
 ]
 
 
-def export_excel(raw_path: Path, output_path: Path) -> dict[str, Any]:
-    """Build a two-sheet xlsx file. This function must run in an executor."""
+def export_excel(
+    raw_path: Path, output_path: Path, month: str | None = None
+) -> dict[str, Any]:
+    """Build a two-sheet xlsx file, optionally restricted to one month."""
     import pandas as pd
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -29,6 +32,14 @@ def export_excel(raw_path: Path, output_path: Path) -> dict[str, Any]:
     segments = raw_document.get("segments", [])
     if not isinstance(segments, list):
         raise ValueError("Raw data file does not contain a 'segments' list")
+    if month is not None:
+        if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+            raise ValueError("Month must use the YYYY-MM format")
+        segments = [
+            segment
+            for segment in segments
+            if isinstance(segment, dict) and _segment_belongs_to_month(segment, month)
+        ]
 
     summary_rows = _build_summary_rows(segments)
     summary_frame = pd.DataFrame(summary_rows, columns=SUMMARY_COLUMNS)
@@ -75,9 +86,16 @@ def export_excel(raw_path: Path, output_path: Path) -> dict[str, Any]:
 
     return {
         "path": str(output_path),
+        "month": month,
         "days": len(summary_rows),
         "segments": len(segments),
     }
+
+
+def _segment_belongs_to_month(segment: dict[str, Any], month: str) -> bool:
+    """Return whether the segment's local date belongs to the selected month."""
+    date = str(segment.get("date") or _date_from_timestamp(segment.get("started_at")))
+    return date.startswith(f"{month}-")
 
 
 def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -14,8 +14,10 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ConfigEntryError, ServiceValidationError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import dt as dt_util
 
 from .const import (
+    ATTR_MONTH,
     ATTR_PATH,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_NOMINATIM_EMAIL,
@@ -42,7 +44,12 @@ from .storage import KnihaJizdRepository
 
 _LOGGER = logging.getLogger(__name__)
 
-EXPORT_SERVICE_SCHEMA = vol.Schema({vol.Optional(ATTR_PATH, default=DEFAULT_EXPORT_PATH): str})
+EXPORT_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_PATH, default=DEFAULT_EXPORT_PATH): str,
+        vol.Optional(ATTR_MONTH): vol.Match(r"^\d{4}-(0[1-9]|1[0-2])$"),
+    }
+)
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 
 
@@ -53,6 +60,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async def _async_export_service(call: ServiceCall) -> dict[str, Any]:
         manager = _get_loaded_manager(hass)
+        month = str(call.data.get(ATTR_MONTH) or dt_util.now().strftime("%Y-%m"))
         config_directory = Path(hass.config.config_dir).resolve()
         requested = Path(str(call.data[ATTR_PATH]))
         output_path = (
@@ -65,15 +73,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         if output_path.suffix.casefold() != ".xlsx":
             raise ServiceValidationError("Export path must end in .xlsx")
 
-        manager.set_export_running()
+        manager.set_export_running(month)
         try:
             result = await hass.async_add_executor_job(
-                export_excel, manager.repository.raw_path, output_path
+                export_excel, manager.repository.raw_path, output_path, month
             )
         except (ImportError, OSError, ValueError, TypeError) as err:
             manager.set_export_error(str(err))
             raise ServiceValidationError(f"Excel export failed: {err}") from err
-        manager.set_export_success(output_path)
+        manager.set_export_success(output_path, month)
         result["download_url"] = manager.export_status["download_url"]
         return result
 

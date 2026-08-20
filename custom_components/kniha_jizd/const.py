@@ -41,6 +41,7 @@ RUNTIME_STORE_VERSION: Final = 1
 
 SERVICE_EXPORT_EXCEL: Final = "export_excel"
 ATTR_PATH: Final = "path"
+ATTR_MONTH: Final = "month"
 DEFAULT_EXPORT_PATH: Final = "kniha_jizd.xlsx"
 
 EVENT_NOTIFICATION_ACTION: Final = "mobile_app_notification_action"

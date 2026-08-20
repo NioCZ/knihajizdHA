@@ -28,9 +28,10 @@ class ExportExcelTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
             output_path = Path(temporary_directory) / "kniha_jizd.xlsx"
             result = EXPORT_MODULE.export_excel(
-                ROOT / "tests/fixtures/raw_sample.json", output_path
+                ROOT / "tests/fixtures/raw_sample.json", output_path, "2026-08"
             )
 
+            self.assertEqual(result["month"], "2026-08")
             self.assertEqual(result["days"], 1)
             self.assertEqual(result["segments"], 3)
             workbook = load_workbook(output_path, data_only=False)
@@ -51,6 +52,31 @@ class ExportExcelTest(unittest.TestCase):
             self.assertIn("odometer_wait_timed_out", headers)
             self.assertIn("map_candidates", headers)
             self.assertIn("candidate_search_radius_m", headers)
+
+    def test_month_filter_excludes_other_periods(self) -> None:
+        """Keep both workbook sheets inside the requested calendar month."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            output_path = Path(temporary_directory) / "kniha_jizd_2026-07.xlsx"
+            result = EXPORT_MODULE.export_excel(
+                ROOT / "tests/fixtures/raw_sample.json", output_path, "2026-07"
+            )
+
+            self.assertEqual(result["days"], 0)
+            self.assertEqual(result["segments"], 0)
+            workbook = load_workbook(output_path, data_only=False)
+            self.assertEqual(workbook["Kniha jízd"].max_row, 1)
+            self.assertEqual(workbook["Raw data"].max_row, 1)
+
+    def test_month_filter_rejects_invalid_value(self) -> None:
+        """Reject ambiguous dates before creating a misleading report."""
+        with self.assertRaisesRegex(ValueError, "YYYY-MM"):
+            EXPORT_MODULE.export_excel(
+                ROOT / "tests/fixtures/raw_sample.json",
+                ROOT / "test-output/invalid.xlsx",
+                "08/2026",
+            )
 
 
 if __name__ == "__main__":

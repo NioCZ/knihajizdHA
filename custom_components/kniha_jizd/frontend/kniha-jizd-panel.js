@@ -5,6 +5,7 @@ class KnihaJizdPanel extends HTMLElement {
     this._hass = null;
     this._exporting = false;
     this._message = "";
+    this._month = this._currentMonth();
   }
 
   set hass(value) {
@@ -50,6 +51,11 @@ class KnihaJizdPanel extends HTMLElement {
     }).format(parsed);
   }
 
+  _currentMonth() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  }
+
   _statusLabel(value) {
     return {
       idle: "Připraveno",
@@ -67,11 +73,17 @@ class KnihaJizdPanel extends HTMLElement {
 
   async _exportExcel() {
     if (!this._hass || this._exporting) return;
+    const selectedMonth = this.shadowRoot.getElementById("month")?.value;
+    if (selectedMonth) this._month = selectedMonth;
     this._exporting = true;
-    this._message = "Generuji Excel…";
+    this._message = `Generuji Excel za ${this._month}…`;
     this._render();
     try {
-      await this._hass.callService("kniha_jizd", "export_excel", {});
+      await this._hass.callService(
+        "kniha_jizd",
+        "export_excel",
+        { month: this._month },
+      );
       let exportEntity = null;
       for (let attempt = 0; attempt < 20; attempt += 1) {
         exportEntity = this._entity("export");
@@ -83,7 +95,7 @@ class KnihaJizdPanel extends HTMLElement {
       this._message = "Excel je hotový. Stahování začíná…";
       const link = document.createElement("a");
       link.href = url;
-      link.download = "kniha_jizd.xlsx";
+      link.download = exportEntity?.attributes?.filename || `kniha_jizd_${this._month}.xlsx`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -118,6 +130,7 @@ class KnihaJizdPanel extends HTMLElement {
     const rawDownloadUrl = exportEntity?.attributes?.download_url;
     const expiresAt = Date.parse(exportEntity?.attributes?.expires_at || "");
     const downloadUrl = rawDownloadUrl && expiresAt > Date.now() ? rawDownloadUrl : null;
+    const downloadFilename = exportEntity?.attributes?.filename || "kniha_jizd.xlsx";
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -139,6 +152,9 @@ class KnihaJizdPanel extends HTMLElement {
         dl { display:grid; grid-template-columns:minmax(110px,160px) 1fr; gap:9px 14px; margin:0; }
         dt { color:var(--secondary-text-color); } dd { margin:0; overflow-wrap:anywhere; }
         .actions { display:flex; gap:12px; flex-wrap:wrap; margin-top:18px; }
+        .month-control { display:flex; flex-direction:column; gap:6px; max-width:220px; margin-top:16px; }
+        .month-control label { color:var(--secondary-text-color); }
+        input[type="month"] { color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; padding:10px 12px; font:inherit; }
         button, a.button { border:0; border-radius:10px; padding:12px 18px; font:inherit; font-weight:600; cursor:pointer; text-decoration:none; }
         button { color:var(--text-primary-color,#fff); background:var(--primary-color); }
         button:disabled { opacity:.6; cursor:wait; } a.button { color:var(--primary-color); background:var(--secondary-background-color); }
@@ -183,12 +199,16 @@ class KnihaJizdPanel extends HTMLElement {
           </dl></article>
         </section>
         <section class="card"><h2>Excel report</h2>
-          <div class="muted">Vygeneruje souhrnnou Knihu jízd a úplný list Raw data.</div>
+          <div class="muted">Oba listy budou obsahovat pouze jízdy z vybraného měsíce.</div>
+          <div class="month-control"><label for="month">Měsíc reportu</label><input id="month" type="month" value="${this._text(this._month)}"></div>
           <div class="actions"><button id="export" ${this._exporting ? "disabled" : ""}>${this._exporting ? "Generuji…" : "Vygenerovat a stáhnout Excel"}</button>
-          ${downloadUrl ? `<a class="button" href="${downloadUrl}" download="kniha_jizd.xlsx">Stáhnout poslední export</a>` : ""}</div>
-          <div class="message">${this._text(this._message, exportEntity?.attributes?.generated_at ? `Poslední export: ${exportEntity.attributes.generated_at}` : "Dosud nebyl vytvořen export.")}</div>
+          ${downloadUrl ? `<a class="button" href="${downloadUrl}" download="${this._text(downloadFilename)}">Stáhnout poslední export (${this._text(exportEntity?.attributes?.month)})</a>` : ""}</div>
+          <div class="message">${this._text(this._message, exportEntity?.attributes?.generated_at ? `Poslední export: ${exportEntity.attributes.generated_at}, měsíc ${exportEntity.attributes.month}` : "Dosud nebyl vytvořen export.")}</div>
         </section>
       </main>`;
+    this.shadowRoot.getElementById("month")?.addEventListener("change", (event) => {
+      if (event.target.value) this._month = event.target.value;
+    });
     this.shadowRoot.getElementById("export")?.addEventListener("click", () => this._exportExcel());
   }
 }

@@ -28,11 +28,12 @@ class KnihaJizdDownloadView(HomeAssistantView):
         path = manager.validate_download_token(token) if manager else None
         if path is None or not await self.hass.async_add_executor_job(path.is_file):
             raise web.HTTPNotFound(text="Export link is invalid or expired")
+        filename = str(manager.export_status.get("filename") or "kniha_jizd.xlsx")
         return web.FileResponse(
             path,
             headers={
                 "Cache-Control": "no-store",
-                "Content-Disposition": 'attachment; filename="kniha_jizd.xlsx"',
+                "Content-Disposition": f'attachment; filename="{filename}"',
             },
         )
 

@@ -1,7 +1,14 @@
 export_excel:
   name: Exportovat do Excelu
-  description: Vytvoří Excel se souhrnnou knihou jízd a nezměněnými raw daty.
+  description: Vytvoří Excel se souhrnem a raw segmenty z vybraného měsíce.
   fields:
+    month:
+      name: Měsíc
+      description: Měsíc reportu ve formátu YYYY-MM. Výchozí je aktuální měsíc.
+      required: false
+      example: "2026-08"
+      selector:
+        text:
     path:
       name: Cesta
       description: Relativní cesta uvnitř /config nebo absolutní cesta uvnitř /config.

@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 PANEL_URL_PATH = "kniha-jizd"
 PANEL_STATIC_URL = "/kniha_jizd/frontend"
 PANEL_COMPONENT = "kniha-jizd-panel"
-PANEL_MODULE_URL = f"{PANEL_STATIC_URL}/kniha-jizd-panel.js?v=1.2.1"
+PANEL_MODULE_URL = f"{PANEL_STATIC_URL}/kniha-jizd-panel.js?v=1.3.0"
 PANEL_DIRECTORY = Path(__file__).parent / "frontend"
 PANEL_STATIC_REGISTERED = "kniha_jizd_panel_static_registered"
 

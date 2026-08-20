@@ -53,8 +53,8 @@ existuje. Všechny entity jsou seskupené pod jedním zařízením.
 
 Integrace zároveň registruje administrační stránku **Kniha jízd** v levém panelu
 Home Assistantu. Ukazuje aktuální průběh, zdraví jednotlivých vstupů, dnešní
-součty, poslední jízdu a tlačítko **Vygenerovat a stáhnout Excel**. Stránka je
-dostupná pouze administrátorům.
+součty, poslední jízdu, výběr měsíce a tlačítko **Vygenerovat a stáhnout Excel**.
+Stránka je dostupná pouze administrátorům.
 
 ## Jak probíhá jízda
 
@@ -129,6 +129,7 @@ Zavolejte akci:
 ```yaml
 action: kniha_jizd.export_excel
 data:
+  month: "2026-08"
   path: kniha_jizd.xlsx
 ```
 
@@ -136,12 +137,15 @@ Cesta musí končit `.xlsx` a z bezpečnostních důvodů musí zůstat uvnitř 
 Výchozí soubor je `/config/kniha_jizd.xlsx`. Samotný pandas/openpyxl export
 běží přes `hass.async_add_executor_job`, takže neblokuje event loop.
 
+Parametr `month` používá formát `YYYY-MM`; pokud se neuvede, exportuje se aktuální
+měsíc podle časové zóny Home Assistantu. Filtr se vztahuje na souhrnný i raw list.
+
 Po exportu vznikne náhodný odkaz platný 15 minut. Díky tomu report s adresami
 nemusí ležet ve veřejně dostupném `/config/www`. Nový export starý odkaz zneplatní.
 
-- **Kniha jízd**: jeden řádek na den, trasa `Start/Odkud → Přes → Cíl/Kam`,
+- **Kniha jízd**: jeden řádek na den vybraného měsíce, trasa `Start/Odkud → Přes → Cíl/Kam`,
   unikátní zákazníci a součty služebních/soukromých kilometrů.
-- **Raw data**: všechny segmenty ve stejných polích jako JSON log.
+- **Raw data**: všechny segmenty vybraného měsíce ve stejných polích jako JSON log.
 
 ## Mapové služby a soukromí
 
