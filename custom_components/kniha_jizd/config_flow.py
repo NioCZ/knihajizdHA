@@ -7,7 +7,6 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
@@ -71,26 +70,16 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_WAIT_TIMEOUT,
                 default=defaults.get(CONF_WAIT_TIMEOUT, DEFAULT_WAIT_TIMEOUT),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=60,
-                    max=1800,
-                    step=30,
-                    mode=selector.NumberSelectorMode.BOX,
-                    unit_of_measurement="s",
-                )
+            ): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=60, max=1800),
             ),
             vol.Required(
                 CONF_PLACE_RADIUS,
                 default=defaults.get(CONF_PLACE_RADIUS, DEFAULT_PLACE_RADIUS),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=25,
-                    max=5000,
-                    step=25,
-                    mode=selector.NumberSelectorMode.BOX,
-                    unit_of_measurement="m",
-                )
+            ): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=25, max=5000),
             ),
             vol.Required(
                 CONF_INSTITUTION_SEARCH_RADIUS,
@@ -98,47 +87,34 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                     CONF_INSTITUTION_SEARCH_RADIUS,
                     DEFAULT_INSTITUTION_SEARCH_RADIUS,
                 ),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=500,
-                    max=10000,
-                    step=250,
-                    mode=selector.NumberSelectorMode.BOX,
-                    unit_of_measurement="m",
-                )
+            ): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=500, max=10000),
             ),
             vol.Required(
                 CONF_OVERPASS_URL,
                 default=defaults.get(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
-            ),
+            ): str,
             vol.Required(
                 CONF_RELEVANCE_KEYWORDS,
                 default=defaults.get(
                     CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS
                 ),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(multiline=True)
-            ),
+            ): str,
             vol.Required(
                 CONF_NOMINATIM_URL,
                 default=defaults.get(CONF_NOMINATIM_URL, DEFAULT_NOMINATIM_URL),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
-            ),
+            ): str,
             vol.Required(
                 CONF_NOMINATIM_USER_AGENT,
                 default=defaults.get(
                     CONF_NOMINATIM_USER_AGENT, DEFAULT_NOMINATIM_USER_AGENT
                 ),
-            ): selector.TextSelector(),
+            ): str,
             vol.Optional(
                 CONF_NOMINATIM_EMAIL,
                 default=defaults.get(CONF_NOMINATIM_EMAIL, ""),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(type=selector.TextSelectorType.EMAIL)
-            ),
+            ): str,
         }
     )
 
@@ -150,7 +126,7 @@ class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> dict[str, Any]:
         """Handle the initial step."""
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
@@ -166,18 +142,22 @@ class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> KnihaJizdOptionsFlow:
         """Create the options flow."""
-        return KnihaJizdOptionsFlow()
+        return KnihaJizdOptionsFlow(config_entry)
 
 
-class KnihaJizdOptionsFlow(OptionsFlowWithReload):
+class KnihaJizdOptionsFlow(config_entries.OptionsFlow):
     """Allow changing entities and behavior without reinstalling."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Store the entry without relying on newer OptionsFlow helpers."""
+        self._config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> dict[str, Any]:
         """Manage the options."""
         if user_input is not None:
             return self.async_create_entry(data=user_input)
 
-        current = {**self.config_entry.data, **self.config_entry.options}
+        current = {**self._config_entry.data, **self._config_entry.options}
         return self.async_show_form(step_id="init", data_schema=_schema(current))

@@ -1,0 +1,51 @@
+{
+  "title": "Logbook",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Logbook settings",
+        "description": "Confirmed places are matched locally. Overpass searches for new specialist institutions and Nominatim supplies their addresses. Public endpoints allow only light usage and require an identifying User-Agent.",
+        "data": {
+          "trigger_entity": "Android Auto",
+          "gps_entity": "Phone GPS entity",
+          "address_entity": "Phone geocoded address",
+          "odometer_entity": "Odometer",
+          "notify_service": "Notification service (without notify.)",
+          "wait_timeout": "Maximum odometer wait",
+          "place_radius": "Confirmed place radius",
+          "institution_search_radius": "New institution search radius",
+          "overpass_url": "Overpass API URL",
+          "relevance_keywords": "Specialist institution keywords",
+          "nominatim_url": "Reverse-geocoding endpoint URL",
+          "nominatim_user_agent": "Identifying User-Agent",
+          "nominatim_email": "Nominatim contact email (optional)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Logbook is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Logbook settings",
+        "data": {
+          "trigger_entity": "Android Auto",
+          "gps_entity": "Phone GPS entity",
+          "address_entity": "Phone geocoded address",
+          "odometer_entity": "Odometer",
+          "notify_service": "Notification service (without notify.)",
+          "wait_timeout": "Maximum odometer wait",
+          "place_radius": "Confirmed place radius",
+          "institution_search_radius": "New institution search radius",
+          "overpass_url": "Overpass API URL",
+          "relevance_keywords": "Specialist institution keywords",
+          "nominatim_url": "Reverse-geocoding endpoint URL",
+          "nominatim_user_agent": "Identifying User-Agent",
+          "nominatim_email": "Nominatim contact email (optional)"
+        }
+      }
+    }
+  }
+}
