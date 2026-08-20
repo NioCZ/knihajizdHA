@@ -6,7 +6,7 @@ export_excel:
       name: Cesta
       description: Relativní cesta uvnitř /config nebo absolutní cesta uvnitř /config.
       required: false
-      default: www/kniha_jizd.xlsx
-      example: www/kniha_jizd.xlsx
+      default: kniha_jizd.xlsx
+      example: kniha_jizd.xlsx
       selector:
         text:

@@ -8,6 +8,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ConfigEntryError, ServiceValidationError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -30,17 +31,22 @@ from .const import (
     DOMAIN,
     SERVICE_EXPORT_EXCEL,
 )
+from .download import KnihaJizdDownloadView
 from .export import export_excel
 from .geocoding import NominatimGeocoder
 from .manager import KnihaJizdManager
 from .nearby_search import NearbyInstitutionSearcher
+from .panel import async_register_panel, async_unregister_panel
 from .storage import KnihaJizdRepository
 
 EXPORT_SERVICE_SCHEMA = vol.Schema({vol.Optional(ATTR_PATH, default=DEFAULT_EXPORT_PATH): str})
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up integration-level services."""
+
+    hass.http.register_view(KnihaJizdDownloadView(hass))
 
     async def _async_export_service(call: ServiceCall) -> dict[str, Any]:
         manager = _get_loaded_manager(hass)
@@ -56,12 +62,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         if output_path.suffix.casefold() != ".xlsx":
             raise ServiceValidationError("Export path must end in .xlsx")
 
+        manager.set_export_running()
         try:
-            return await hass.async_add_executor_job(
+            result = await hass.async_add_executor_job(
                 export_excel, manager.repository.raw_path, output_path
             )
-        except (OSError, ValueError, TypeError) as err:
+        except (ImportError, OSError, ValueError, TypeError) as err:
+            manager.set_export_error(str(err))
             raise ServiceValidationError(f"Excel export failed: {err}") from err
+        manager.set_export_success(output_path)
+        result["download_url"] = manager.export_status["download_url"]
+        return result
 
     hass.services.async_register(
         DOMAIN,
@@ -111,6 +122,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.runtime_data = manager
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await manager.async_start()
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await async_register_panel(hass)
     return True
 
 
@@ -149,7 +162,11 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload Kniha jízd and preserve unfinished work."""
     manager: KnihaJizdManager = entry.runtime_data
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not unload_ok:
+        return False
     await manager.async_shutdown()
+    async_unregister_panel(hass)
     return True
 
 

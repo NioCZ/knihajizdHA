@@ -180,6 +180,17 @@ class KnihaJizdRepository:
         _write_json_atomic(self.raw_path, data)
         return True
 
+    async def async_get_statistics(self, local_date: str) -> dict[str, Any]:
+        """Return compact totals for diagnostic entities and the panel."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._get_statistics_sync, local_date
+            )
+
+    def _get_statistics_sync(self, local_date: str) -> dict[str, Any]:
+        """Calculate raw-log statistics in an executor."""
+        return calculate_statistics(self._load_raw_sync()["segments"], local_date)
+
     async def async_find_place(
         self,
         latitude: float | None,
@@ -345,3 +356,51 @@ class KnihaJizdRepository:
                 learned.pop(legacy_key, None)
             places[replacement_index] = learned
         _write_json_atomic(self.places_path, data)
+
+
+def calculate_statistics(
+    segments: list[dict[str, Any]], local_date: str
+) -> dict[str, Any]:
+    """Calculate stable totals from a raw segment list."""
+    valid_segments = [segment for segment in segments if isinstance(segment, dict)]
+    today_segments = [
+        segment for segment in valid_segments if str(segment.get("date")) == local_date
+    ]
+
+    def _distance(segment: dict[str, Any]) -> float:
+        value = _optional_float(segment.get("distance_km"))
+        return max(0.0, value) if value is not None else 0.0
+
+    def _sum_distance(items: list[dict[str, Any]], trip_type: str) -> float:
+        return round(
+            sum(
+                _distance(segment)
+                for segment in items
+                if segment.get("trip_type") == trip_type
+            ),
+            3,
+        )
+
+    last_segment = max(
+        valid_segments,
+        key=lambda segment: str(
+            segment.get("ended_at") or segment.get("started_at") or ""
+        ),
+        default=None,
+    )
+    return {
+        "segments_total": len(valid_segments),
+        "business_km_total": _sum_distance(valid_segments, "business"),
+        "private_km_total": _sum_distance(valid_segments, "private"),
+        "today_segments": len(today_segments),
+        "today_business_km": _sum_distance(today_segments, "business"),
+        "today_private_km": _sum_distance(today_segments, "private"),
+        "last_segment": deepcopy_json(last_segment),
+    }
+
+
+def deepcopy_json(value: Any) -> Any:
+    """Copy JSON-compatible data without sharing nested mutable objects."""
+    if value is None:
+        return None
+    return json.loads(json.dumps(value, ensure_ascii=False))

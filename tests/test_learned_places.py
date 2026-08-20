@@ -119,6 +119,22 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertIsNone(match)
             self.assertEqual(fallback["label"], "Laboratoř A")
 
+    def test_raw_statistics_for_entities_and_panel(self) -> None:
+        """Calculate daily totals and the last trip from persisted segments."""
+        document = json.loads(
+            (ROOT / "tests/fixtures/raw_sample.json").read_text(encoding="utf-8")
+        )
+
+        statistics = STORAGE_MODULE.calculate_statistics(
+            document["segments"], "2026-08-19"
+        )
+
+        self.assertEqual(statistics["segments_total"], 3)
+        self.assertEqual(statistics["today_segments"], 3)
+        self.assertEqual(statistics["today_business_km"], 32.65)
+        self.assertEqual(statistics["today_private_km"], 8.6)
+        self.assertEqual(statistics["last_segment"]["id"], "segment-c")
+
 
 if __name__ == "__main__":
     unittest.main()

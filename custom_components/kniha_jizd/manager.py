@@ -5,13 +5,22 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+import hmac
 import logging
+from pathlib import Path
 import re
+import secrets
 from typing import Any
 from uuid import uuid4
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import (
+    ATTR_DOMAIN,
+    ATTR_SERVICE,
+    EVENT_SERVICE_REGISTERED,
+    EVENT_SERVICE_REMOVED,
+)
 from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
@@ -83,6 +92,28 @@ class KnihaJizdManager:
         self._active: dict[str, Any] | None = None
         self._closing: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, dict[str, Any]] = {}
+        self._statistics: dict[str, Any] = {
+            "segments_total": 0,
+            "business_km_total": 0.0,
+            "private_km_total": 0.0,
+            "today_segments": 0,
+            "today_business_km": 0.0,
+            "today_private_km": 0.0,
+            "last_segment": None,
+        }
+        self._statistics_date: str | None = None
+        self._last_error: str | None = None
+        self._export: dict[str, Any] = {
+            "state": "never",
+            "path": None,
+            "download_url": None,
+            "generated_at": None,
+            "expires_at": None,
+            "error": None,
+        }
+        self._download_token: str | None = None
+        self._download_token_expires_at: datetime | None = None
+        self._listeners: set[Callable[[], None]] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._unsubscribers: list[Callable[[], None]] = []
         self._transition_lock = asyncio.Lock()
@@ -104,6 +135,7 @@ class KnihaJizdManager:
         self._active = active if isinstance(active, dict) else None
         self._closing = closing if isinstance(closing, dict) else {}
         self._pending = pending if isinstance(pending, dict) else {}
+        await self._async_refresh_statistics()
 
         self._unsubscribers.append(
             async_track_state_change_event(
@@ -113,6 +145,23 @@ class KnihaJizdManager:
         self._unsubscribers.append(
             self.hass.bus.async_listen(
                 EVENT_NOTIFICATION_ACTION, self._handle_notification_action
+            )
+        )
+        self._unsubscribers.extend(
+            (
+                self.hass.bus.async_listen(
+                    EVENT_SERVICE_REGISTERED, self._handle_service_registry_event
+                ),
+                self.hass.bus.async_listen(
+                    EVENT_SERVICE_REMOVED, self._handle_service_registry_event
+                ),
+            )
+        )
+        self._unsubscribers.append(
+            async_track_state_change_event(
+                self.hass,
+                [self.gps_entity, self.address_entity, self.odometer_entity],
+                self._handle_input_update,
             )
         )
 
@@ -143,6 +192,7 @@ class KnihaJizdManager:
                 else datetime.now(UTC)
             )
             await self._async_begin_end_segment(disconnected_at)
+        self._notify_listeners()
 
     async def async_shutdown(self) -> None:
         """Unsubscribe and cancel in-flight work, keeping state for reload."""
@@ -158,6 +208,160 @@ class KnihaJizdManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._listeners.clear()
+
+    @callback
+    def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Subscribe an entity to live manager updates."""
+        self._listeners.add(listener)
+
+        @callback
+        def _unsubscribe() -> None:
+            self._listeners.discard(listener)
+
+        return _unsubscribe
+
+    @callback
+    def _notify_listeners(self) -> None:
+        """Notify all diagnostic entities about a state change."""
+        for listener in list(self._listeners):
+            listener()
+
+    @property
+    def status(self) -> str:
+        """Return the most important current workflow state."""
+        if self._last_error:
+            return "error"
+        if self._active is not None:
+            return "driving"
+        if self._closing:
+            return "waiting_odometer"
+        if self._pending:
+            return "waiting_classification"
+        return "idle"
+
+    @property
+    def statistics(self) -> dict[str, Any]:
+        """Return a safe snapshot of raw-log statistics."""
+        return deepcopy(self._statistics)
+
+    @property
+    def export_status(self) -> dict[str, Any]:
+        """Return the latest Excel export state."""
+        return self._export.copy()
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        """Return current inputs and workflow counters for HA entities."""
+        trigger_state = self.hass.states.get(self.trigger_entity)
+        gps_state = self.hass.states.get(self.gps_entity)
+        address_state = self.hass.states.get(self.address_entity)
+        odometer_state = self.hass.states.get(self.odometer_entity)
+        latitude = _coordinate(gps_state, "latitude")
+        longitude = _coordinate(gps_state, "longitude")
+        odometer = _odometer_value(odometer_state)
+        trigger_ok = (
+            trigger_state is not None and trigger_state.state in {"on", "off"}
+        )
+        gps_ok = latitude is not None and longitude is not None
+        odometer_ok = odometer is not None
+        notify_ok = self.hass.services.has_service("notify", self.notify_service)
+        address = (
+            address_state.state
+            if address_state is not None
+            and address_state.state.casefold() not in UNAVAILABLE_STATES
+            else None
+        )
+        return {
+            "kniha_jizd_kind": "status",
+            "ready": trigger_ok and gps_ok and odometer_ok and notify_ok,
+            "status": self.status,
+            "active_segment_id": (
+                self._active.get("id") if self._active is not None else None
+            ),
+            "active_started_at": (
+                self._active.get("started_at") if self._active is not None else None
+            ),
+            "closing_count": len(self._closing),
+            "pending_count": len(self._pending),
+            "trigger_entity": self.trigger_entity,
+            "trigger_state": trigger_state.state if trigger_state else None,
+            "trigger_ok": trigger_ok,
+            "gps_entity": self.gps_entity,
+            "gps_ok": gps_ok,
+            "latitude": latitude,
+            "longitude": longitude,
+            "address_entity": self.address_entity,
+            "address": address,
+            "address_ok": address is not None,
+            "odometer_entity": self.odometer_entity,
+            "odometer_km": odometer,
+            "odometer_ok": odometer_ok,
+            "odometer_updated_at": _iso_utc(_odometer_updated_at(odometer_state)),
+            "notify_service": f"notify.{self.notify_service}",
+            "notify_ok": notify_ok,
+            "last_error": self._last_error,
+        }
+
+    @callback
+    def set_export_running(self) -> None:
+        """Expose a running Excel export to entities and the panel."""
+        self._export.update({"state": "generating", "error": None})
+        self._notify_listeners()
+
+    @callback
+    def set_export_success(self, path: Path) -> None:
+        """Expose a finished export and create a temporary download link."""
+        self._download_token = secrets.token_urlsafe(32)
+        now = datetime.now(UTC)
+        self._download_token_expires_at = now + timedelta(minutes=15)
+        self._export.update(
+            {
+                "state": "ready",
+                "path": str(path),
+                "download_url": (
+                    f"/api/{DOMAIN}/download/{self._download_token}"
+                ),
+                "generated_at": now.isoformat(),
+                "expires_at": self._download_token_expires_at.isoformat(),
+                "error": None,
+            }
+        )
+        self._notify_listeners()
+
+    @callback
+    def set_export_error(self, error: str) -> None:
+        """Expose an Excel export failure."""
+        self._export.update(
+            {
+                "state": "error",
+                "download_url": None,
+                "expires_at": None,
+                "error": error,
+            }
+        )
+        self._notify_listeners()
+
+    def validate_download_token(self, token: str) -> Path | None:
+        """Return the current export path for a valid temporary token."""
+        expires_at = self._download_token_expires_at
+        path = self._export.get("path")
+        if (
+            not self._download_token
+            or expires_at is None
+            or expires_at <= datetime.now(UTC)
+            or not isinstance(path, str)
+            or not hmac.compare_digest(token, self._download_token)
+        ):
+            return None
+        return Path(path)
+
+    async def _async_refresh_statistics(self) -> None:
+        """Refresh persisted totals without blocking the event loop."""
+        local_date = dt_util.now().date().isoformat()
+        self._statistics = await self.repository.async_get_statistics(local_date)
+        self._statistics_date = local_date
+        self._notify_listeners()
 
     @callback
     def _handle_trigger_event(self, event: Event) -> None:
@@ -178,6 +382,17 @@ class KnihaJizdManager:
                 self._async_begin_end_segment(event.time_fired),
                 f"{DOMAIN}_end_segment",
             )
+        self._notify_listeners()
+
+    @callback
+    def _handle_input_update(self, event: Event) -> None:
+        """Refresh diagnostic entities when a configured input changes."""
+        if self._statistics_date != dt_util.now().date().isoformat():
+            self._create_task(
+                self._async_refresh_statistics(),
+                f"{DOMAIN}_refresh_daily_statistics",
+            )
+        self._notify_listeners()
 
     @callback
     def _handle_notification_action(self, event: Event) -> None:
@@ -189,6 +404,15 @@ class KnihaJizdManager:
             self._async_process_notification_action(event.data),
             f"{DOMAIN}_notification_action",
         )
+
+    @callback
+    def _handle_service_registry_event(self, event: Event) -> None:
+        """Refresh readiness when the configured phone service changes."""
+        if (
+            event.data.get(ATTR_DOMAIN) == "notify"
+            and event.data.get(ATTR_SERVICE) == self.notify_service
+        ):
+            self._notify_listeners()
 
     def _create_task(self, coro: Coroutine[Any, Any, Any], name: str) -> None:
         """Create a tracked Home Assistant task."""
@@ -276,7 +500,9 @@ class KnihaJizdManager:
             await self._async_finish_segment(segment)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - preserve the segment for restart recovery
+        except Exception as err:  # noqa: BLE001 - preserve for restart recovery
+            self._last_error = f"{type(err).__name__}: {err}"
+            self._notify_listeners()
             _LOGGER.exception("Failed to finish trip segment %s", segment.get("id"))
 
     async def _async_finish_segment(self, segment: dict[str, Any]) -> None:
@@ -648,6 +874,8 @@ class KnihaJizdManager:
                     "updated_at": _iso_utc(datetime.now(UTC)),
                 }
             )
+        self._last_error = None
+        await self._async_refresh_statistics()
         _LOGGER.info(
             "Trip segment %s saved as %s (%s)", segment.get("id"), purpose, trip_type
         )
@@ -676,6 +904,7 @@ class KnihaJizdManager:
                     "pending": deepcopy(self._pending),
                 }
             )
+        self._notify_listeners()
 
 
 def _normalize_notify_service(value: str) -> str:

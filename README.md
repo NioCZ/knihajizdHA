@@ -34,6 +34,28 @@ Výchozí nastavení počítá s těmito objekty:
 Nastavení lze později změnit přes tlačítko **Konfigurovat** u integrace; změna
 integraci bezpečně reloaduje.
 
+## Stavové entity a vlastní stránka
+
+Po nastavení vznikne zařízení **Kniha jízd** s průběžně aktualizovanými entitami:
+
+- `sensor.kniha_jizd_stav` – `idle`, `driving`, `waiting_odometer`,
+  `waiting_classification` nebo `error`; v atributech jsou kontroly všech vstupů,
+- `binary_sensor.kniha_jizd_pripravena` – zapnuto, když funguje Android Auto,
+  GPS, tachometr a notifikační služba,
+- senzory dnešních služebních/soukromých km a počtu dnešních jízd,
+- počet čekajících, celkový počet jízd a celkové služební/soukromé kilometry,
+- poslední jízda včetně zákazníka, trasy, času a validačního výsledku,
+- stav posledního Excel exportu a jeho dočasný odkaz ke stažení,
+- `button.kniha_jizd_vygenerovat_excel` pro export z dashboardu či automatizace.
+
+Přesné `entity_id` může Home Assistant doplnit příponou, pokud už stejné ID
+existuje. Všechny entity jsou seskupené pod jedním zařízením.
+
+Integrace zároveň registruje administrační stránku **Kniha jízd** v levém panelu
+Home Assistantu. Ukazuje aktuální průběh, zdraví jednotlivých vstupů, dnešní
+součty, poslední jízdu a tlačítko **Vygenerovat a stáhnout Excel**. Stránka je
+dostupná pouze administrátorům.
+
 ## Jak probíhá jízda
 
 - Přechod Android Auto `off → on` uloží čas, stav tachometru a výchozí polohu.
@@ -107,12 +129,15 @@ Zavolejte akci:
 ```yaml
 action: kniha_jizd.export_excel
 data:
-  path: www/kniha_jizd.xlsx
+  path: kniha_jizd.xlsx
 ```
 
 Cesta musí končit `.xlsx` a z bezpečnostních důvodů musí zůstat uvnitř `/config`.
-Výchozí soubor je `/config/www/kniha_jizd.xlsx`. Samotný pandas/openpyxl export
+Výchozí soubor je `/config/kniha_jizd.xlsx`. Samotný pandas/openpyxl export
 běží přes `hass.async_add_executor_job`, takže neblokuje event loop.
+
+Po exportu vznikne náhodný odkaz platný 15 minut. Díky tomu report s adresami
+nemusí ležet ve veřejně dostupném `/config/www`. Nový export starý odkaz zneplatní.
 
 - **Kniha jízd**: jeden řádek na den, trasa `Start/Odkud → Přes → Cíl/Kam`,
   unikátní zákazníci a součty služebních/soukromých kilometrů.
