@@ -1,0 +1,45 @@
+{
+  "title": "Kniha jízd",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Nastavení knihy jízd",
+        "description": "Veřejný Nominatim povoluje jen malé zatížení, platný identifikující User-Agent a lokální cache. Pro firemní provoz zvažte vlastní nebo komerční endpoint.",
+        "data": {
+          "trigger_entity": "Android Auto",
+          "gps_entity": "GPS entita telefonu",
+          "address_entity": "Geokódovaná adresa telefonu",
+          "odometer_entity": "Tachometr",
+          "notify_service": "Notifikační služba (bez notify.)",
+          "wait_timeout": "Maximální čekání na tachometr",
+          "place_radius": "Poloměr známého místa",
+          "nominatim_url": "URL reverse-geocoding endpointu",
+          "nominatim_user_agent": "Identifikující User-Agent",
+          "nominatim_email": "Kontaktní e-mail pro Nominatim (volitelné)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Kniha jízd už je nastavena."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Nastavení knihy jízd",
+        "data": {
+          "trigger_entity": "Android Auto",
+          "gps_entity": "GPS entita telefonu",
+          "address_entity": "Geokódovaná adresa telefonu",
+          "odometer_entity": "Tachometr",
+          "notify_service": "Notifikační služba (bez notify.)",
+          "wait_timeout": "Maximální čekání na tachometr",
+          "place_radius": "Poloměr známého místa",
+          "nominatim_url": "URL reverse-geocoding endpointu",
+          "nominatim_user_agent": "Identifikující User-Agent",
+          "nominatim_email": "Kontaktní e-mail pro Nominatim (volitelné)"
+        }
+      }
+    }
+  }
+}

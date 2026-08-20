@@ -1,0 +1,14 @@
+{
+  "domain": "kniha_jizd",
+  "name": "Kniha jízd",
+  "codeowners": [],
+  "config_flow": true,
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "requirements": [
+    "pandas==3.0.5",
+    "openpyxl==3.1.5"
+  ],
+  "single_config_entry": true,
+  "version": "1.0.0"
+}

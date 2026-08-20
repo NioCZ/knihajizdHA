@@ -1,0 +1,12 @@
+export_excel:
+  name: Exportovat do Excelu
+  description: Vytvoří Excel se souhrnnou knihou jízd a nezměněnými raw daty.
+  fields:
+    path:
+      name: Cesta
+      description: Relativní cesta uvnitř /config nebo absolutní cesta uvnitř /config.
+      required: false
+      default: www/kniha_jizd.xlsx
+      example: www/kniha_jizd.xlsx
+      selector:
+        text:
