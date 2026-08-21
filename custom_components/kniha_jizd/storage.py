@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 import json
-from math import asin, cos, radians, sin, sqrt
+from math import asin, cos, floor, radians, sin, sqrt
 import os
 from pathlib import Path
 import re
@@ -18,7 +18,7 @@ from .address_rules import shorten_address
 from .const import LEARNED_PLACES_FILENAME, RAW_DATA_FILENAME
 
 _MAX_ANCHORS_PER_PLACE = 50
-_RAW_DATA_VERSION = 3
+_RAW_DATA_VERSION = 4
 _LEARNED_PLACES_VERSION = 3
 
 
@@ -103,11 +103,13 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
-def _trusted_odometer_end(segment: dict[str, Any]) -> float | None:
-    """Return an end anchor backed by a real post-disconnect cloud update."""
-    boundary = _optional_float(segment.get("odometer_reconciliation_boundary_km"))
-    if boundary is not None:
-        return boundary
+def _whole_km(value: float) -> int:
+    """Round a non-negative kilometre value to the nearest whole kilometre."""
+    return int(floor(max(0.0, value) + 0.5))
+
+
+def _raw_trusted_odometer_end(segment: dict[str, Any]) -> float | None:
+    """Return only a trustworthy raw post-disconnect odometer value."""
     source = str(segment.get("odometer_completion_source") or "")
     if (
         segment.get("odometer_wait_timed_out")
@@ -116,6 +118,16 @@ def _trusted_odometer_end(segment: dict[str, Any]) -> float | None:
     ):
         return None
     return _optional_float(segment.get("end_odometer_km"))
+
+
+def _trusted_odometer_end(segment: dict[str, Any]) -> float | None:
+    """Return a raw or retrospectively established odometer boundary."""
+    boundary = _optional_float(segment.get("odometer_reconciliation_boundary_km"))
+    if boundary is not None:
+        return boundary
+    if segment.get("odometer_anchor_ignored_due_to_daily_conflict"):
+        return None
+    return _raw_trusted_odometer_end(segment)
 
 
 def _segment_distance_weight(segment: dict[str, Any]) -> float:
@@ -142,39 +154,64 @@ def _set_if_changed(segment: dict[str, Any], key: str, value: Any) -> int:
     return 1
 
 
+def _set_integer_if_changed(segment: dict[str, Any], key: str, value: int) -> int:
+    """Persist whole kilometres as a JSON integer, not a decimal-looking float."""
+    current = segment.get(key)
+    if current == value and isinstance(current, int) and not isinstance(current, bool):
+        return 0
+    segment[key] = value
+    return 1
+
+
+def _integer_weighted_allocations(weights: list[float], total_km: int) -> list[int]:
+    """Allocate whole kilometres while preserving the exact requested total."""
+    if not weights:
+        return []
+    total_km = max(0, total_km)
+    minimums = [1 if total_km >= len(weights) else 0 for _ in weights]
+    remaining = total_km - sum(minimums)
+    weight_total = sum(weights) or float(len(weights))
+    quotas = [remaining * weight / weight_total for weight in weights]
+    allocations = [minimum + floor(quota) for minimum, quota in zip(minimums, quotas)]
+    leftover = total_km - sum(allocations)
+    order = sorted(
+        range(len(weights)),
+        key=lambda index: (quotas[index] - floor(quotas[index]), weights[index]),
+        reverse=True,
+    )
+    for index in order[:leftover]:
+        allocations[index] += 1
+    return allocations
+
+
 def _allocate_odometer_group(
     group: list[dict[str, Any]],
     anchor_start_km: float,
     anchor_end_km: float,
     boundary_source: str,
+    reconciliation_source: str | None = None,
 ) -> int:
-    """Distribute one trusted odometer delta over all unresolved legs."""
+    """Distribute one trusted odometer delta as whole kilometres."""
     total_km = anchor_end_km - anchor_start_km
     if total_km < -0.001 or not group:
         return 0
-    manual_total = sum(
-        max(0.0, _optional_float(segment.get("distance_km")) or 0.0)
+    total_whole_km = _whole_km(total_km)
+    manual_distances = [
+        _whole_km(_optional_float(segment.get("distance_km")) or 0.0)
         for segment in group
         if segment.get("manual_distance_override")
-    )
+    ]
+    manual_total = sum(manual_distances)
     adjustable = [
         segment for segment in group if not segment.get("manual_distance_override")
     ]
-    remaining_km = max(0.0, total_km - manual_total)
+    remaining_km = max(0, total_whole_km - manual_total)
     weights = [_segment_distance_weight(segment) for segment in adjustable]
-    weight_total = sum(weights) or float(len(adjustable) or 1)
-    allocations: list[float] = []
-    allocated = 0.0
-    for index, weight in enumerate(weights):
-        if index == len(weights) - 1:
-            allocation = max(0.0, remaining_km - allocated)
-        else:
-            allocation = remaining_km * weight / weight_total
-            allocated += allocation
-        allocations.append(round(allocation, 3))
+    allocations = _integer_weighted_allocations(weights, remaining_km)
 
     changed = 0
     allocation_index = 0
+    manual_index = 0
     for segment in group:
         if "distance_km_raw" not in segment:
             changed += _set_if_changed(
@@ -189,16 +226,23 @@ def _allocate_odometer_group(
             segment, "distance_anchor_end_km", round(anchor_end_km, 3)
         )
         if segment.get("manual_distance_override"):
+            changed += _set_integer_if_changed(
+                segment, "distance_km", manual_distances[manual_index]
+            )
+            manual_index += 1
             continue
         distance = allocations[allocation_index]
         allocation_index += 1
-        changed += _set_if_changed(segment, "distance_km", distance)
-        source = (
-            "odometer_anchor_exact"
+        changed += _set_integer_if_changed(segment, "distance_km", distance)
+        source = reconciliation_source or (
+            "odometer_anchor_exact_whole_km"
             if len(group) == 1
-            else "odometer_anchor_reconciled_gps_weighted"
+            else "odometer_anchor_reconciled_gps_weighted_whole_km"
         )
         changed += _set_if_changed(segment, "distance_reconciliation_source", source)
+        changed += _set_if_changed(
+            segment, "distance_rounding_method", "largest_remainder_whole_km"
+        )
     changed += _set_if_changed(
         group[-1],
         "odometer_reconciliation_boundary_km",
@@ -210,12 +254,119 @@ def _allocate_odometer_group(
     return changed
 
 
+def _pop_if_present(segment: dict[str, Any], key: str) -> int:
+    """Remove a field and report whether the document changed."""
+    if key not in segment:
+        return 0
+    segment.pop(key, None)
+    return 1
+
+
+def _apply_authoritative_daily_anchor(
+    ordered: list[dict[str, Any]],
+    boundary_index: int,
+    anchor_start_km: float,
+    anchor_end_km: float,
+    boundary_source: str,
+    reason: str,
+) -> int:
+    """Let the newest day boundary override contradictory intermediate values."""
+    prefix = ordered[: boundary_index + 1]
+    if not prefix:
+        return 0
+    target_km = _whole_km(anchor_end_km - anchor_start_km)
+    manual_total = sum(
+        _whole_km(_optional_float(segment.get("distance_km")) or 0.0)
+        for segment in prefix
+        if segment.get("manual_distance_override")
+    )
+    adjustable = [
+        segment for segment in prefix if not segment.get("manual_distance_override")
+    ]
+    if manual_total > target_km or (not adjustable and manual_total != target_km):
+        return 0
+
+    changed = 0
+    for index, segment in enumerate(prefix):
+        if index < len(prefix) - 1:
+            changed += _pop_if_present(
+                segment, "odometer_reconciliation_boundary_km"
+            )
+            changed += _pop_if_present(
+                segment, "odometer_reconciliation_boundary_source"
+            )
+            if _raw_trusted_odometer_end(segment) is not None:
+                changed += _set_if_changed(
+                    segment,
+                    "odometer_anchor_ignored_due_to_daily_conflict",
+                    True,
+                )
+        else:
+            changed += _pop_if_present(
+                segment, "odometer_anchor_ignored_due_to_daily_conflict"
+            )
+        changed += _set_if_changed(segment, "daily_odometer_override_reason", reason)
+        changed += _set_if_changed(
+            segment, "daily_odometer_authoritative_total_km", target_km
+        )
+    changed += _allocate_odometer_group(
+        prefix,
+        anchor_start_km,
+        anchor_end_km,
+        f"daily_authoritative_{boundary_source}",
+        "daily_odometer_reconciled_gps_weighted_whole_km",
+    )
+    return changed
+
+
 def reconcile_odometer_day(
     segments: list[dict[str, Any]], terminal_anchor_km: float | None = None
 ) -> tuple[int, dict[str, Any]]:
-    """Backfill zero/combined legs between trusted odometer anchors."""
+    """Backfill legs and make their whole-km sum match the final day counter."""
     ordered = sorted(segments, key=lambda item: str(item.get("started_at") or ""))
     changed = 0
+    first_start = next(
+        (
+            value
+            for segment in ordered
+            if (value := _optional_float(segment.get("start_odometer_km")))
+            is not None
+        ),
+        None,
+    )
+    candidates = [
+        (
+            index,
+            value,
+            str(
+                segment.get("odometer_reconciliation_boundary_source")
+                or "trusted_segment_end"
+            ),
+        )
+        for index, segment in enumerate(ordered)
+        if (value := _trusted_odometer_end(segment)) is not None
+    ]
+    terminal = _optional_float(terminal_anchor_km)
+    if terminal is not None and ordered:
+        candidates = [candidate for candidate in candidates if candidate[0] < len(ordered) - 1]
+        candidates.append((len(ordered) - 1, terminal, "next_segment_start"))
+    conflicting = any(
+        current[1] + 0.001 < previous[1]
+        for previous, current in zip(candidates, candidates[1:])
+    )
+    if conflicting and first_start is not None and candidates:
+        boundary_index, authoritative_end, boundary_source = candidates[-1]
+        if authoritative_end >= first_start:
+            changed += _apply_authoritative_daily_anchor(
+                ordered,
+                boundary_index,
+                first_start,
+                authoritative_end,
+                boundary_source,
+                "non_monotonic_odometer_anchors",
+            )
+            return changed, odometer_day_check(ordered)
+
     group: list[dict[str, Any]] = []
     anchor_start: float | None = None
     for segment in ordered:
@@ -234,12 +385,19 @@ def reconcile_odometer_day(
             or "trusted_segment_end"
         )
         changed += _allocate_odometer_group(
-            group, anchor_start, anchor_end, boundary_source
+            group,
+            anchor_start,
+            anchor_end,
+            boundary_source,
+            (
+                "daily_odometer_reconciled_gps_weighted_whole_km"
+                if boundary_source.startswith("daily_authoritative_")
+                else None
+            ),
         )
         group = []
         anchor_start = anchor_end
 
-    terminal = _optional_float(terminal_anchor_km)
     if group and anchor_start is not None and terminal is not None and terminal >= anchor_start:
         changed += _allocate_odometer_group(
             group, anchor_start, terminal, "next_segment_start"
@@ -256,7 +414,25 @@ def reconcile_odometer_day(
                 "distance_reconciliation_source",
                 "awaiting_future_odometer_anchor",
             )
-    return changed, odometer_day_check(ordered)
+    check = odometer_day_check(ordered)
+    if (
+        first_start is not None
+        and candidates
+        and check.get("unresolved_segments") == 0
+        and check.get("difference_km") not in (None, 0)
+    ):
+        boundary_index, authoritative_end, boundary_source = candidates[-1]
+        if authoritative_end >= first_start:
+            changed += _apply_authoritative_daily_anchor(
+                ordered,
+                boundary_index,
+                first_start,
+                authoritative_end,
+                boundary_source,
+                "daily_segment_sum_mismatch",
+            )
+            check = odometer_day_check(ordered)
+    return changed, check
 
 
 def odometer_day_check(segments: list[dict[str, Any]]) -> dict[str, Any]:
@@ -281,39 +457,37 @@ def odometer_day_check(segments: list[dict[str, Any]]) -> dict[str, Any]:
     verified_segments = (
         ordered[: last_boundary_index + 1] if last_boundary_index >= 0 else []
     )
-    assigned_km = round(
-        sum(
-            max(0.0, _optional_float(item.get("distance_km")) or 0.0)
-            for item in verified_segments
-        ),
-        3,
+    assigned_km = sum(
+        _whole_km(_optional_float(item.get("distance_km")) or 0.0)
+        for item in verified_segments
     )
-    pending_km = round(
-        sum(
-            max(0.0, _optional_float(item.get("distance_km")) or 0.0)
-            for item in ordered[last_boundary_index + 1 :]
-        ),
-        3,
+    pending_km = sum(
+        _whole_km(_optional_float(item.get("distance_km")) or 0.0)
+        for item in ordered[last_boundary_index + 1 :]
     )
-    anchor_delta = (
+    anchor_delta_raw = (
         round(max(0.0, last_end - first_start), 3)
         if first_start is not None and last_end is not None
         else None
     )
+    anchor_delta = (
+        _whole_km(anchor_delta_raw) if anchor_delta_raw is not None else None
+    )
     difference = (
-        round(assigned_km - anchor_delta, 3) if anchor_delta is not None else None
+        assigned_km - anchor_delta if anchor_delta is not None else None
     )
     unresolved = max(0, len(ordered) - last_boundary_index - 1)
     return {
         "start_odometer_km": first_start,
         "end_odometer_km": last_end,
         "odometer_delta_km": anchor_delta,
+        "odometer_delta_raw_km": anchor_delta_raw,
         "assigned_segment_km": assigned_km,
         "pending_segment_km": pending_km,
         "difference_km": difference,
         "unresolved_segments": unresolved,
         "consistent": (
-            difference is not None and abs(difference) <= 0.05 and unresolved == 0
+            difference == 0 and unresolved == 0
         ),
     }
 
@@ -345,6 +519,14 @@ class KnihaJizdRepository:
             for segment in raw_data["segments"]:
                 if not isinstance(segment, dict):
                     continue
+                stored_distance = _optional_float(segment.get("distance_km"))
+                if stored_distance is not None:
+                    if "distance_km_raw" not in segment:
+                        segment["distance_km_raw"] = stored_distance
+                        changed += 1
+                    changed += _set_integer_if_changed(
+                        segment, "distance_km", _whole_km(stored_distance)
+                    )
                 for side in ("start", "end"):
                     address_key = f"{side}_address"
                     raw_key = f"{side}_address_raw"
@@ -520,7 +702,9 @@ class KnihaJizdRepository:
             target["end_address_manual"] = True
         manual_distance = _optional_float(distance_km)
         if manual_distance is not None:
-            target["distance_km"] = round(max(0.0, manual_distance), 3)
+            if "distance_km_raw" not in target:
+                target["distance_km_raw"] = target.get("distance_km")
+            target["distance_km"] = _whole_km(manual_distance)
             target["manual_distance_override"] = True
             target["distance_reconciliation_source"] = "manual_panel"
         if changed:
@@ -745,14 +929,13 @@ def calculate_statistics(
         value = _optional_float(segment.get("distance_km"))
         return max(0.0, value) if value is not None else 0.0
 
-    def _sum_distance(items: list[dict[str, Any]], trip_type: str) -> float:
-        return round(
+    def _sum_distance(items: list[dict[str, Any]], trip_type: str) -> int:
+        return _whole_km(
             sum(
                 _distance(segment)
                 for segment in items
                 if segment.get("trip_type") == trip_type
-            ),
-            3,
+            )
         )
 
     last_segment = max(

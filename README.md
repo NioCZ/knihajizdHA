@@ -183,6 +183,15 @@ segmentů, rozdíl a počet dosud neuzavřených úseků. Raw data zachovávají
 `distance_km_raw` i způsob výsledku v `distance_reconciliation_source`. Ručně
 opravené km mají `manual_distance_override: true` a automatika je nepřepíše.
 
+Pokud některá dřívější cloudová hodnota odporuje novějšímu koncovému stavu
+(například segmenty dávají 163 km, ale rozdíl prvního a posledního odometru je
+156 km), přednost má nejnovější denní stav. Integrace přepočítá všechny dotčené
+úseky tak, aby daly přesně 156 km. Kilometry se ukládají a zobrazují jako celá
+čísla. Používá se rozdělení metodou největších zbytků, takže zaokrouhlení nikdy
+nezmění denní součet; skutečně ujeté úseky dostanou minimálně 1 km, pokud je
+celkový nájezd alespoň tak velký jako počet segmentů. Původní desetinný výpočet
+zůstává v `distance_km_raw`.
+
 ### Akce notifikace
 
 - **Potvrdit klienta** – použije nejpravděpodobnější mapový návrh.

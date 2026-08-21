@@ -45,7 +45,7 @@ class KnihaJizdPanel extends HTMLElement {
       .replaceAll("'", "&#039;");
   }
 
-  _number(value, digits = 1) {
+  _number(value, digits = 0) {
     if (value === undefined || value === null || value === "") return "—";
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return "—";
@@ -127,7 +127,7 @@ class KnihaJizdPanel extends HTMLElement {
         <td>${this._time(trip.started_at)}</td>
         <td><input class="trip-start" type="text" value="${this._text(trip.start_address, "")}" placeholder="Místo odjezdu" ${disabled ? "disabled" : ""}></td>
         <td><input class="trip-end" type="text" value="${this._text(trip.end_address, "")}" placeholder="Místo příjezdu" ${disabled ? "disabled" : ""}></td>
-        <td><input class="trip-distance" type="number" min="0" step="0.001" value="${trip.distance_km ?? ""}" ${disabled ? "disabled" : ""}></td>
+        <td><input class="trip-distance" type="number" min="0" step="1" value="${trip.distance_km ?? ""}" ${disabled ? "disabled" : ""}></td>
         <td><input class="trip-purpose" type="text" value="${this._text(trip.purpose, "")}" placeholder="Volitelný zákazník / účel" ${disabled ? "disabled" : ""}></td>
         <td><select class="trip-type" ${disabled ? "disabled" : ""}>
           <option value="business" ${privateSelected ? "" : "selected"}>Služební</option>

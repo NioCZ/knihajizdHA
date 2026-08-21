@@ -41,8 +41,8 @@ class ExportExcelTest(unittest.TestCase):
             self.assertEqual(
                 [cell.value for cell in summary[1]], EXPORT_MODULE.SUMMARY_COLUMNS
             )
-            self.assertEqual(summary["F2"].value, 32.65)
-            self.assertEqual(summary["G2"].value, 8.6)
+            self.assertEqual(summary["F2"].value, 33)
+            self.assertEqual(summary["G2"].value, 9)
             self.assertIn("Průmyslová 12", summary["C2"].value)
             self.assertNotIn("Vinohradská 50", summary["C2"].value)
 
@@ -73,7 +73,7 @@ class ExportExcelTest(unittest.TestCase):
         self.assertEqual(rows[0]["Přes"], "")
         self.assertEqual(rows[0]["Cíl/Kam"], "")
         self.assertEqual(rows[0]["Zákazník"], "")
-        self.assertEqual(rows[0]["Soukromé km"], 12.5)
+        self.assertEqual(rows[0]["Soukromé km"], 13)
 
     def test_month_filter_excludes_other_periods(self) -> None:
         """Keep both workbook sheets inside the requested calendar month."""

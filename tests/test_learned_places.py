@@ -213,8 +213,8 @@ class LearnedPlacesTest(unittest.TestCase):
 
         self.assertEqual(statistics["segments_total"], 3)
         self.assertEqual(statistics["today_segments"], 3)
-        self.assertEqual(statistics["today_business_km"], 32.65)
-        self.assertEqual(statistics["today_private_km"], 8.6)
+        self.assertEqual(statistics["today_business_km"], 33)
+        self.assertEqual(statistics["today_private_km"], 9)
         self.assertEqual(len(statistics["today_rows"]), 3)
         self.assertEqual(statistics["last_segment"]["id"], "segment-c")
 
@@ -318,7 +318,7 @@ class LearnedPlacesTest(unittest.TestCase):
 
             self.assertEqual(segment["start_address"], "Opravený start")
             self.assertEqual(segment["end_address"], "Opravený cíl")
-            self.assertEqual(segment["distance_km"], 14.25)
+            self.assertEqual(segment["distance_km"], 14)
             self.assertTrue(segment["manual_distance_override"])
 
     def test_combined_cloud_increment_is_reassigned_to_zero_leg(self) -> None:
@@ -385,12 +385,53 @@ class LearnedPlacesTest(unittest.TestCase):
 
         _, check = STORAGE_MODULE.reconcile_odometer_day(segments, 2012.5)
 
-        self.assertEqual(segments[0]["distance_km"], 12.5)
+        self.assertEqual(segments[0]["distance_km"], 13)
         self.assertEqual(
             segments[0]["odometer_reconciliation_boundary_source"],
             "next_segment_start",
         )
         self.assertTrue(check["consistent"])
+
+    def test_final_day_anchor_repairs_163_km_segments_to_real_156_km(self) -> None:
+        """The newest counter wins when an earlier cloud value was too high."""
+        displayed_distances = [72.815, 5.902, 75.8, 0.483, 7.0, 1.0]
+        segments = []
+        for index, distance in enumerate(displayed_distances):
+            segment = {
+                "id": f"segment-{index}",
+                "started_at": f"2026-08-21T{8 + index:02d}:00:00+00:00",
+                "start_odometer_km": 10000.0,
+                "end_odometer_km": 10000.0,
+                "distance_km": distance,
+                "distance_km_raw": distance,
+                "odometer_wait_timed_out": False,
+                "odometer_shared_update": index < 3,
+                "odometer_completion_source": (
+                    "post_disconnect_update_and_increase"
+                ),
+            }
+            segments.append(segment)
+        segments[3]["end_odometer_km"] = 10155.0
+        segments[4]["end_odometer_km"] = 10162.0
+        segments[5]["end_odometer_km"] = 10156.0
+        segments[5]["manual_distance_override"] = True
+
+        changed, check = STORAGE_MODULE.reconcile_odometer_day(segments)
+
+        self.assertGreater(changed, 0)
+        self.assertEqual(sum(segment["distance_km"] for segment in segments), 156)
+        self.assertTrue(all(isinstance(segment["distance_km"], int) for segment in segments))
+        self.assertTrue(all(segment["distance_km"] >= 1 for segment in segments))
+        self.assertEqual(check["odometer_delta_km"], 156)
+        self.assertEqual(check["difference_km"], 0)
+        self.assertTrue(check["consistent"])
+        self.assertEqual(
+            segments[0]["daily_odometer_override_reason"],
+            "non_monotonic_odometer_anchors",
+        )
+        changed_again, second_check = STORAGE_MODULE.reconcile_odometer_day(segments)
+        self.assertEqual(changed_again, 0)
+        self.assertTrue(second_check["consistent"])
 
 
 if __name__ == "__main__":

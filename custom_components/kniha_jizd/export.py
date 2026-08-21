@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from math import floor
 from pathlib import Path
 import re
 from typing import Any
@@ -81,8 +82,8 @@ def export_excel(
         summary_sheet = writer.book["Kniha jízd"]
         for row in range(2, summary_sheet.max_row + 1):
             summary_sheet.cell(row=row, column=1).number_format = "yyyy-mm-dd"
-            summary_sheet.cell(row=row, column=6).number_format = "0.00"
-            summary_sheet.cell(row=row, column=7).number_format = "0.00"
+            summary_sheet.cell(row=row, column=6).number_format = "0"
+            summary_sheet.cell(row=row, column=7).number_format = "0"
 
     return {
         "path": str(output_path),
@@ -147,8 +148,8 @@ def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "Přes": " → ".join(route_nodes[1:-1]),
                 "Cíl/Kam": route_nodes[-1] if route_nodes else "",
                 "Zákazník": ", ".join(customers),
-                "Služební km": round(business_km, 3),
-                "Soukromé km": round(private_km, 3),
+                "Služební km": _whole_km(business_km),
+                "Soukromé km": _whole_km(private_km),
             }
         )
     return rows
@@ -166,6 +167,11 @@ def _number(value: Any) -> float:
         return float(value) if value is not None else 0.0
     except (TypeError, ValueError):
         return 0.0
+
+
+def _whole_km(value: float) -> int:
+    """Round exported kilometre totals to a whole number."""
+    return int(floor(max(0.0, value) + 0.5))
 
 
 def _deduplicate_adjacent(values: list[str]) -> list[str]:
@@ -206,10 +212,14 @@ def _raw_columns() -> list[str]:
         "distance_km_raw",
         "distance_hint_km",
         "distance_reconciliation_source",
+        "distance_rounding_method",
         "distance_anchor_start_km",
         "distance_anchor_end_km",
         "odometer_reconciliation_boundary_km",
         "odometer_reconciliation_boundary_source",
+        "odometer_anchor_ignored_due_to_daily_conflict",
+        "daily_odometer_override_reason",
+        "daily_odometer_authoritative_total_km",
         "manual_distance_override",
         "start_address",
         "end_address",

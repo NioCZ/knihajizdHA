@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import hmac
 import logging
+from math import floor
 from pathlib import Path
 import re
 import secrets
@@ -544,7 +545,9 @@ class KnihaJizdManager:
                 runtime["end_address_manual"] = True
             manual_distance = _as_float(distance_km)
             if manual_distance is not None:
-                runtime["distance_km"] = round(max(0.0, manual_distance), 3)
+                if "distance_km_raw" not in runtime:
+                    runtime["distance_km_raw"] = runtime.get("distance_km")
+                runtime["distance_km"] = _whole_km(manual_distance)
                 runtime["manual_distance_override"] = True
                 runtime["distance_reconciliation_source"] = "manual_panel"
             if runtime.get("journey_role") == "transient_stop":
@@ -834,6 +837,7 @@ class KnihaJizdManager:
             and odometer_updated_at >= active_started
         )
 
+        raw_distance: float | None = None
         if start_odometer is None or end_odometer is None:
             segment["distance_km"] = None
             segment["validation_error"] = (
@@ -845,11 +849,12 @@ class KnihaJizdManager:
             segment["distance_km"] = None
             segment["validation_error"] = "odometer_decreased"
         else:
-            segment["distance_km"] = round(max(0.0, end_odometer - start_odometer), 3)
+            raw_distance = round(max(0.0, end_odometer - start_odometer), 3)
+            segment["distance_km"] = _whole_km(raw_distance)
             segment["validation_error"] = None
-        segment["distance_km_raw"] = segment.get("distance_km")
+        segment["distance_km_raw"] = raw_distance
         if manual_distance is not None:
-            segment["distance_km"] = round(max(0.0, manual_distance), 3)
+            segment["distance_km"] = _whole_km(manual_distance)
             segment["distance_reconciliation_source"] = "manual_panel"
         else:
             if segment.get("odometer_shared_update"):
@@ -2158,6 +2163,11 @@ def _as_float(value: Any) -> float | None:
     """Parse numbers with either a decimal dot or comma."""
     if value is None or isinstance(value, bool):
         return None
+
+
+def _whole_km(value: float) -> int:
+    """Round a non-negative kilometre value to a whole kilometre."""
+    return int(floor(max(0.0, value) + 0.5))
     try:
         return float(str(value).strip().replace(" ", "").replace(",", "."))
     except (TypeError, ValueError):
