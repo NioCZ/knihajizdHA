@@ -66,6 +66,7 @@ from .const import (
     UNAVAILABLE_STATES,
 )
 from .geocoding import NominatimGeocoder
+from .input_parsing import coordinates_from_state, odometer_from_state
 from .journey_chain import (
     apply_journey_classification,
     continuation_details,
@@ -345,9 +346,10 @@ class KnihaJizdManager:
         gps_state = self.hass.states.get(self.gps_entity)
         address_state = self.hass.states.get(self.address_entity)
         odometer_state = self.hass.states.get(self.odometer_entity)
-        latitude = _coordinate(gps_state, "latitude")
-        longitude = _coordinate(gps_state, "longitude")
-        odometer = _odometer_value(odometer_state)
+        latitude, longitude, gps_source = _location_coordinates(
+            gps_state, address_state
+        )
+        odometer, odometer_source = _odometer_details(odometer_state)
         trigger_ok = (
             trigger_state is not None and trigger_state.state in {"on", "off"}
         )
@@ -394,12 +396,16 @@ class KnihaJizdManager:
             "gps_ok": gps_ok,
             "latitude": latitude,
             "longitude": longitude,
+            "gps_coordinate_source": gps_source,
+            "gps_state": gps_state.state if gps_state else None,
             "address_entity": self.address_entity,
             "address": address,
             "address_ok": address is not None,
             "odometer_entity": self.odometer_entity,
             "odometer_km": odometer,
             "odometer_ok": odometer_ok,
+            "odometer_value_source": odometer_source,
+            "odometer_state": odometer_state.state if odometer_state else None,
             "odometer_updated_at": _iso_utc(_odometer_updated_at(odometer_state)),
             "notify_service": f"notify.{self.notify_service}",
             "notify_ok": notify_ok,
@@ -2061,10 +2067,8 @@ class KnihaJizdManager:
     def _capture_location(self) -> dict[str, float | str | None]:
         """Capture GPS attributes and the full geocoded address."""
         gps_state = self.hass.states.get(self.gps_entity)
-        latitude = _coordinate(gps_state, "latitude")
-        longitude = _coordinate(gps_state, "longitude")
-
         address_state = self.hass.states.get(self.address_entity)
+        latitude, longitude, _ = _location_coordinates(gps_state, address_state)
         address_raw: str | None = None
         if address_state is not None and address_state.state.casefold() not in UNAVAILABLE_STATES:
             address_raw = address_state.state.strip()
@@ -2106,18 +2110,34 @@ def _action_id(action: str, segment_id: str) -> str:
     return f"{ACTION_PREFIX}_{action}_{segment_id}"
 
 
-def _coordinate(state: State | None, key: str) -> float | None:
-    """Read one coordinate attribute."""
+def _location_coordinates(
+    gps_state: State | None, address_state: State | None
+) -> tuple[float | None, float | None, str | None]:
+    """Read GPS first and use Companion geocoded Location as a fallback."""
+    for source, state in (("gps_entity", gps_state), ("address_entity", address_state)):
+        if state is None or state.state.casefold() in UNAVAILABLE_STATES:
+            continue
+        coordinates = coordinates_from_state(state.state, state.attributes)
+        if coordinates is not None:
+            latitude, longitude, representation = coordinates
+            return latitude, longitude, f"{source}:{representation}"
+    return None, None, None
+
+
+def _odometer_details(state: State | None) -> tuple[float | None, str | None]:
+    """Parse a numeric state or a known odometer attribute."""
     if state is None:
-        return None
-    return _as_float(state.attributes.get(key))
+        return None, None
+    primary_state = (
+        None if state.state.casefold() in UNAVAILABLE_STATES else state.state
+    )
+    parsed = odometer_from_state(primary_state, state.attributes)
+    return parsed if parsed is not None else (None, None)
 
 
 def _odometer_value(state: State | None) -> float | None:
     """Parse the odometer state as kilometres."""
-    if state is None or state.state.casefold() in UNAVAILABLE_STATES:
-        return None
-    return _as_float(state.state)
+    return _odometer_details(state)[0]
 
 
 def _odometer_updated_at(state: State | None) -> datetime | None:

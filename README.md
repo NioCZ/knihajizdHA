@@ -63,6 +63,13 @@ součty, poslední jízdu, editovatelnou tabulku dnešních jízd, výběr měs�
 tlačítko **Vygenerovat a stáhnout Excel**. Stránka je dostupná pouze
 administrátorům.
 
+Kontrola GPS přijímá standardní atributy `latitude`/`longitude` vybrané GPS
+entity. Pokud je novější model `device_tracker` neposkytuje, automaticky použije
+atribut `location` ze senzoru geokódované adresy Companion aplikace. Tachometr
+umí kromě čistého číselného stavu přečíst také hodnotu s jednotkou nebo oddělovači
+(například `98 332 km`) a běžné atributy `odometer`, `mileage` či
+`total_distance`. Panel u obou vstupů zobrazuje skutečně použitý zdroj hodnoty.
+
 ## Jak probíhá jízda
 
 - Přechod Android Auto `off → on` uloží čas, stav tachometru a výchozí polohu.

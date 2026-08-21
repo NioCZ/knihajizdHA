@@ -206,6 +206,12 @@ class KnihaJizdPanel extends HTMLElement {
     const expiresAt = Date.parse(exportEntity?.attributes?.expires_at || "");
     const downloadUrl = rawDownloadUrl && expiresAt > Date.now() ? rawDownloadUrl : null;
     const downloadFilename = exportEntity?.attributes?.filename || "kniha_jizd.xlsx";
+    const gpsDetail = attrs.gps_ok
+      ? `${attrs.gps_entity}: ${attrs.latitude}, ${attrs.longitude} · ${attrs.gps_coordinate_source}`
+      : `${attrs.gps_entity}: stav ${attrs.gps_state ?? "—"} · souřadnice nenalezeny ani v ${attrs.address_entity}`;
+    const odometerDetail = attrs.odometer_ok
+      ? `${attrs.odometer_entity}: ${attrs.odometer_km} km · ${attrs.odometer_value_source}`
+      : `${attrs.odometer_entity}: stav ${attrs.odometer_state ?? "—"} · číselná hodnota nenalezena`;
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -259,9 +265,9 @@ class KnihaJizdPanel extends HTMLElement {
         <section class="grid">
           <article class="card"><h2>Kontrola vstupů</h2>
             ${this._check("Android Auto", attrs.trigger_ok, `${attrs.trigger_entity}: ${attrs.trigger_state}`)}
-            ${this._check("GPS telefonu", attrs.gps_ok, attrs.gps_entity)}
+            ${this._check("GPS telefonu", attrs.gps_ok, gpsDetail)}
             ${this._check("Geokódovaná adresa", attrs.address_ok, attrs.address_entity)}
-            ${this._check("Tachometr", attrs.odometer_ok, `${attrs.odometer_entity}: ${this._text(attrs.odometer_km)} km`)}
+            ${this._check("Tachometr", attrs.odometer_ok, odometerDetail)}
             ${this._check("Notifikace", attrs.notify_ok, attrs.notify_service)}
           </article>
           <article class="card"><h2>Aktuální zpracování</h2><dl>
