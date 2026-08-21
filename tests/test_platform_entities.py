@@ -52,6 +52,7 @@ class _Manager:
         "ready": True,
         "closing_count": 1,
         "pending_count": 2,
+        "transient_count": 3,
     }
     statistics = {
         "today_business_km": 12.5,
@@ -142,7 +143,7 @@ class PlatformEntityTest(unittest.TestCase):
 
         self.assertEqual(status.native_value, "idle")
         self.assertEqual(business.native_value, 12.5)
-        self.assertEqual(pending.native_value, 3)
+        self.assertEqual(pending.native_value, 6)
         self.assertEqual(last_trip.native_value, 4.5)
 
     def test_binary_sensor_button_and_export_sensor_import(self) -> None:

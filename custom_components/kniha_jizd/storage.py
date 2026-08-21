@@ -275,6 +275,7 @@ class KnihaJizdRepository:
         normalized_address = _normalize_address(place.get("address"))
         normalized_label = _normalize_label(place.get("label"))
         trip_type = place.get("trip_type")
+        place_role = place.get("place_role")
 
         replacement_index: int | None = None
         for index, existing in enumerate(places):
@@ -285,6 +286,7 @@ class KnihaJizdRepository:
                 normalized_label
                 and _normalize_label(existing.get("label")) == normalized_label
                 and existing.get("trip_type") == trip_type
+                and existing.get("place_role") == place_role
             ):
                 replacement_index = index
                 break
@@ -302,6 +304,7 @@ class KnihaJizdRepository:
                 "label": place.get("label"),
                 "trip_type": trip_type,
                 "place_role": place.get("place_role"),
+                "radius_m": place.get("radius_m"),
                 "map_name": place.get("map_name"),
                 "updated_at": place.get("updated_at"),
                 "anchors": [new_anchor],
@@ -309,6 +312,7 @@ class KnihaJizdRepository:
             places.append(learned)
         else:
             learned = places[replacement_index].copy()
+            previous_place_role = learned.get("place_role")
             anchors = _place_anchors(learned)
             new_latitude = _optional_float(new_anchor.get("latitude"))
             new_longitude = _optional_float(new_anchor.get("longitude"))
@@ -354,6 +358,16 @@ class KnihaJizdRepository:
                     "trip_type": trip_type,
                     "place_role": (
                         place.get("place_role") or learned.get("place_role")
+                    ),
+                    "radius_m": (
+                        place.get("radius_m")
+                        if "radius_m" in place
+                        else (
+                            None
+                            if place_role
+                            and place_role != previous_place_role
+                            else learned.get("radius_m")
+                        )
                     ),
                     "map_name": place.get("map_name") or learned.get("map_name"),
                     "updated_at": place.get("updated_at"),

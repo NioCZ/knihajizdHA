@@ -23,6 +23,7 @@ from .const import (
     CONF_PLACE_RADIUS,
     CONF_RELEVANCE_KEYWORDS,
     CONF_RETURN_CONTEXT_HOURS,
+    CONF_TRANSIENT_STOP_MINUTES,
     CONF_TRIGGER_ENTITY,
     CONF_WAIT_TIMEOUT,
     DEFAULT_ADDRESS_ENTITY,
@@ -36,6 +37,7 @@ from .const import (
     DEFAULT_PLACE_RADIUS,
     DEFAULT_RELEVANCE_KEYWORDS,
     DEFAULT_RETURN_CONTEXT_HOURS,
+    DEFAULT_TRANSIENT_STOP_MINUTES,
     DEFAULT_TRIGGER_ENTITY,
     DEFAULT_WAIT_TIMEOUT,
     DOMAIN,
@@ -86,6 +88,15 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 vol.Range(min=1, max=72),
             ),
             vol.Required(
+                CONF_TRANSIENT_STOP_MINUTES,
+                default=defaults.get(
+                    CONF_TRANSIENT_STOP_MINUTES, DEFAULT_TRANSIENT_STOP_MINUTES
+                ),
+            ): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=5, max=180),
+            ),
+            vol.Required(
                 CONF_PLACE_RADIUS,
                 default=defaults.get(CONF_PLACE_RADIUS, DEFAULT_PLACE_RADIUS),
             ): vol.All(
@@ -133,7 +144,7 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
 class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kniha jízd."""
 
-    VERSION = 3
+    VERSION = 4
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

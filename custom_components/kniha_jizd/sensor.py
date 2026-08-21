@@ -112,8 +112,10 @@ class KnihaJizdPendingSensor(KnihaJizdEntity, SensorEntity):
     def native_value(self) -> int:
         """Return the total unfinished trip count."""
         diagnostics = self.manager.diagnostics
-        return int(diagnostics["closing_count"]) + int(
-            diagnostics["pending_count"]
+        return (
+            int(diagnostics["closing_count"])
+            + int(diagnostics["pending_count"])
+            + int(diagnostics["transient_count"])
         )
 
     @property
@@ -124,6 +126,7 @@ class KnihaJizdPendingSensor(KnihaJizdEntity, SensorEntity):
             **self._kind_attributes(),
             "waiting_odometer": diagnostics["closing_count"],
             "waiting_classification": diagnostics["pending_count"],
+            "waiting_journey_destination": diagnostics["transient_count"],
         }
 
 
@@ -162,6 +165,13 @@ class KnihaJizdLastTripSensor(KnihaJizdEntity, SensorEntity):
             "purpose",
             "trip_type",
             "journey_role",
+            "journey_id",
+            "journey_segment_count",
+            "journey_distance_km",
+            "journey_distance_complete",
+            "journey_inherited_from_segment_id",
+            "transient_stop",
+            "transient_continuation",
             "return_of_segment_id",
             "return_context",
             "distance_km",

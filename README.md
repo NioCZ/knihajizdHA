@@ -90,6 +90,39 @@ Maximální čas návaznosti lze změnit přes **Konfigurovat** u integrace v ro
 1–72 hodin. Volnější hodnota je vhodná pro přenocování v hotelu, kratší omezuje
 riziko, že se za návrat nabídne pozdější nesouvisející cesta.
 
+### Celá jízda a krátké mezizastávky
+
+Odpojení Android Auto na benzince, odpočívadle, při nabíjení,
+občerstvení nebo rychlém nákupu samo o sobě neurčuje účel jízdy. Nominatim vrací
+vedle názvu také OSM kategorii a typ místa. Integrace z nich vytvoří dočasnou
+mezizastávku a čeká na pokračování celé cesty.
+
+Segmenty se spojí do jednoho `journey_id`, pouze když:
+
+- další jízda začne nejpozději do 60 minut (nastavitelné 5–180 minut),
+- začne nejvýše 500 m od místa zastavení; pokud je užší poloměr potvrzených míst,
+  použije se tato užší hodnota,
+- známý konečný a nový počáteční stav tachometru se neliší o více než 1 km.
+
+Skutečný cíl následně zařadí celý řetězec. Například `firma → benzinka → klient`
+převezme zákazníka i služební typ z klienta; `domov → obchod → domov` převezme
+soukromý typ z domova. Totéž funguje při návratu `klient → odpočívadlo → hotel`.
+Mezizastávky se v agregovaném Excelu zachovají ve sloupci **Přes**, ale jejich
+kilometry se započítají ke konečnému účelu.
+
+Obyčejné parkoviště se samo o sobě nepovažuje za tranzitní zastávku, aby nezmizela
+skutečná návštěva zákazníka, který ještě není dobře zakreslený v OpenStreetMap.
+Výjimkou je parkoviště pojmenované jako odpočívadlo či servisní místo. Potvrzená
+tranzitní místa se učí jen s malým poloměrem 200 m.
+Pokud po předpokládané mezizastávce v časovém limitu žádná jízda nezačne,
+integrace pošle běžnou otázku a segment lze zařadit samostatně.
+
+V raw datech jsou pro audit dostupná pole `journey_id`,
+`journey_role: transient_stop`, `transient_stop`, `continuation` a
+`journey_inherited_from_segment_id`. Pole `journey_segment_count` a
+`journey_distance_km` obsahují počet segmentů a celkovou délku analyzované cesty.
+Rozpracovaný řetězec je uložen v HA Store a přežije restart Home Assistantu.
+
 Aktivní jízda, čekající ukončení i nezodpovězená notifikace jsou uloženy v interním
 HA Store. Restart Home Assistantu proto rozpracovanou jízdu nezahodí. Pokud začne
 další jízda dříve, než cloud doplní předchozí tachometr, její počáteční stav se po

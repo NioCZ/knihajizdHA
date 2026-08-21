@@ -157,6 +157,50 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertEqual(match["place_role"], "return")
             self.assertEqual(match["trip_type"], "contextual")
 
+    def test_transient_place_uses_its_small_stored_radius(self) -> None:
+        """Keep a learned fuel stop from swallowing a nearby customer."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository._learn_place_sync(
+                {
+                    "id": "fuel",
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "address": "Benzinka",
+                    "label": "ORLEN",
+                    "trip_type": "contextual",
+                    "place_role": "transient",
+                    "radius_m": 200,
+                }
+            )
+
+            close = repository._find_place_sync(50.001, 14.0, None, 1000)
+            outside = repository._find_place_sync(50.003, 14.0, None, 1000)
+
+            self.assertEqual(close["place_role"], "transient")
+            self.assertIsNone(outside)
+
+            repository._learn_place_sync(
+                {
+                    "id": "fuel",
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "address": "Benzinka",
+                    "label": "Soukromá",
+                    "trip_type": "private",
+                    "place_role": "client",
+                }
+            )
+            converted = repository._find_place_sync(50.003, 14.0, None, 1000)
+
+            self.assertEqual(converted["trip_type"], "private")
+            self.assertIsNone(converted.get("radius_m"))
+
     def test_raw_statistics_for_entities_and_panel(self) -> None:
         """Calculate daily totals and the last trip from persisted segments."""
         document = json.loads(

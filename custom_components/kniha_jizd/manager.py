@@ -39,12 +39,16 @@ from .const import (
     CONF_ODOMETER_ENTITY,
     CONF_PLACE_RADIUS,
     CONF_RETURN_CONTEXT_HOURS,
+    CONF_TRANSIENT_STOP_MINUTES,
     CONF_TRIGGER_ENTITY,
     CONF_WAIT_TIMEOUT,
+    DEFAULT_TRANSIENT_STOP_RADIUS,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
+    LEARNED_TRANSIENT_RADIUS,
     PLACE_ROLE_CLIENT,
     PLACE_ROLE_RETURN,
+    PLACE_ROLE_TRANSIENT,
     RUNTIME_STORE_VERSION,
     TRIP_TYPE_BUSINESS,
     TRIP_TYPE_CONTEXTUAL,
@@ -52,6 +56,11 @@ from .const import (
     UNAVAILABLE_STATES,
 )
 from .geocoding import NominatimGeocoder
+from .journey_chain import (
+    apply_journey_classification,
+    continuation_details,
+    detect_transient_stop,
+)
 from .nearby_search import NearbyInstitutionSearcher
 from .storage import KnihaJizdRepository
 from .trip_context import infer_return_context
@@ -92,6 +101,7 @@ class KnihaJizdManager:
         )
         self.wait_timeout = float(config[CONF_WAIT_TIMEOUT])
         self.return_context_hours = float(config[CONF_RETURN_CONTEXT_HOURS])
+        self.transient_stop_minutes = float(config[CONF_TRANSIENT_STOP_MINUTES])
         self.place_radius = float(config[CONF_PLACE_RADIUS])
         self.institution_search_radius = float(
             config[CONF_INSTITUTION_SEARCH_RADIUS]
@@ -100,6 +110,7 @@ class KnihaJizdManager:
         self._active: dict[str, Any] | None = None
         self._closing: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, dict[str, Any]] = {}
+        self._transient: dict[str, dict[str, Any]] = {}
         self._statistics: dict[str, Any] = {
             "segments_total": 0,
             "business_km_total": 0.0,
@@ -128,6 +139,7 @@ class KnihaJizdManager:
         self._unsubscribers: list[Callable[[], None]] = []
         self._transition_lock = asyncio.Lock()
         self._resolution_lock = asyncio.Lock()
+        self._journey_lock = asyncio.Lock()
         self._runtime_lock = asyncio.Lock()
         self._stopping = False
         self._runtime_store: Store[dict[str, Any]] = Store(
@@ -142,9 +154,11 @@ class KnihaJizdManager:
         active = runtime.get("active")
         closing = runtime.get("closing")
         pending = runtime.get("pending")
+        transient = runtime.get("transient")
         self._active = active if isinstance(active, dict) else None
         self._closing = closing if isinstance(closing, dict) else {}
         self._pending = pending if isinstance(pending, dict) else {}
+        self._transient = transient if isinstance(transient, dict) else {}
         await self._async_refresh_statistics()
 
         self._unsubscribers.append(
@@ -186,6 +200,13 @@ class KnihaJizdManager:
                 self._async_send_classification_notification(segment),
                 f"{DOMAIN}_restore_notification_{segment.get('id', 'unknown')}",
             )
+
+        for segment in list(self._transient.values()):
+            if not segment.get("continued_by_segment_id"):
+                self._create_task(
+                    self._async_expire_transient_segment(str(segment.get("id"))),
+                    f"{DOMAIN}_restore_transient_{segment.get('id', 'unknown')}",
+                )
 
         trigger_state = self.hass.states.get(self.trigger_entity)
         if trigger_state is not None and trigger_state.state == "on":
@@ -248,6 +269,8 @@ class KnihaJizdManager:
             return "waiting_odometer"
         if self._pending:
             return "waiting_classification"
+        if self._transient:
+            return "waiting_journey"
         return "idle"
 
     @property
@@ -294,7 +317,9 @@ class KnihaJizdManager:
             ),
             "closing_count": len(self._closing),
             "pending_count": len(self._pending),
+            "transient_count": len(self._transient),
             "return_context_hours": self.return_context_hours,
+            "transient_stop_minutes": self.transient_stop_minutes,
             "trigger_entity": self.trigger_entity,
             "trigger_state": trigger_state.state if trigger_state else None,
             "trigger_ok": trigger_ok,
@@ -464,6 +489,10 @@ class KnihaJizdManager:
             local_started = dt_util.as_local(started_at)
             self._active = {
                 "id": uuid4().hex,
+                "journey_id": uuid4().hex,
+                "journey_segment_count": None,
+                "journey_distance_km": None,
+                "journey_distance_complete": None,
                 "date": local_started.date().isoformat(),
                 "started_at": _iso_utc(started_at),
                 "ended_at": None,
@@ -484,6 +513,9 @@ class KnihaJizdManager:
                 "trip_type": None,
                 "classification_source": None,
                 "journey_role": None,
+                "journey_inherited_from_segment_id": None,
+                "transient_stop": None,
+                "transient_continuation": None,
                 "return_of_segment_id": None,
                 "return_context": None,
                 "matched_place_id": None,
@@ -498,6 +530,7 @@ class KnihaJizdManager:
                     None if start_odometer is not None else "missing_start_odometer"
                 ),
             }
+            self._link_transient_continuation(self._active)
             await self._async_save_runtime()
             _LOGGER.info("Trip segment %s started", self._active["id"])
 
@@ -579,11 +612,15 @@ class KnihaJizdManager:
                 if start_map_result is not None and start_map_result.get("display_name"):
                     segment["start_address"] = start_map_result["display_name"]
 
-        segment["return_context"] = infer_return_context(
-            segment,
-            self._statistics.get("last_segment"),
-            self.return_context_hours,
-            self.place_radius,
+        segment["return_context"] = (
+            infer_return_context(
+                segment,
+                self._statistics.get("last_segment"),
+                self.return_context_hours,
+                self.place_radius,
+            )
+            or segment.get("return_context")
+            or self._journey_return_context(segment)
         )
         learned_place = await self.repository.async_find_place(
             _as_float(segment.get("end_latitude")),
@@ -602,6 +639,15 @@ class KnihaJizdManager:
             ) and learned_place.get("matched_address"):
                 segment["end_address"] = learned_place["matched_address"]
             place_role = learned_place.get("place_role")
+            if place_role == PLACE_ROLE_TRANSIENT:
+                segment["transient_stop"] = {
+                    "detected": True,
+                    "kind": "learned",
+                    "name": str(learned_place.get("label") or "Mezizastávka"),
+                    "detection_source": "learned_place",
+                }
+                await self._async_hold_transient(segment)
+                return
             if place_role == PLACE_ROLE_RETURN and segment.get("return_context"):
                 await self._async_finalize_return(
                     segment,
@@ -670,6 +716,13 @@ class KnihaJizdManager:
             ):
                 segment["end_address"] = map_result["display_name"]
 
+        transient_stop = detect_transient_stop(map_result, candidates)
+        if transient_stop is not None:
+            segment["transient_stop"] = transient_stop
+            segment["map_estimate"] = transient_stop["name"]
+            await self._async_hold_transient(segment)
+            return
+
         if not segment.get("map_estimate"):
             segment["map_estimate"] = (
                 segment.get("map_address")
@@ -683,9 +736,138 @@ class KnihaJizdManager:
         """Move a completed segment to the notification decision queue."""
         segment_id = str(segment["id"])
         self._closing.pop(segment_id, None)
+        self._transient.pop(segment_id, None)
         self._pending[segment_id] = segment
         await self._async_save_runtime()
         await self._async_send_classification_notification(segment)
+
+    async def _async_hold_transient(self, segment: dict[str, Any]) -> None:
+        """Hold a likely intermediate stop until the whole journey is known."""
+        segment_id = str(segment["id"])
+        segment["journey_id"] = segment.get("journey_id") or uuid4().hex
+        segment["journey_role"] = "transient_stop"
+        self._closing.pop(segment_id, None)
+        self._pending.pop(segment_id, None)
+        self._transient[segment_id] = segment
+
+        continuation = self._find_runtime_continuation(segment)
+        if continuation is not None:
+            self._link_transient_continuation(continuation, segment)
+        await self._async_save_runtime()
+
+        if not segment.get("continued_by_segment_id"):
+            self._create_task(
+                self._async_expire_transient_segment(segment_id),
+                f"{DOMAIN}_expire_transient_{segment_id}",
+            )
+        _LOGGER.info(
+            "Trip segment %s held as a possible intermediate stop", segment_id
+        )
+
+    async def _async_expire_transient_segment(self, segment_id: str) -> None:
+        """Ask for classification if no continuing leg starts in time."""
+        while True:
+            segment = self._transient.get(segment_id)
+            if segment is None or segment.get("continued_by_segment_id"):
+                return
+            ended_at = _parse_datetime(segment.get("ended_at"))
+            if ended_at is None:
+                remaining = 0.0
+            else:
+                deadline = ended_at + timedelta(minutes=self.transient_stop_minutes)
+                remaining = (deadline - datetime.now(UTC)).total_seconds()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 60.0))
+
+        segment = self._transient.get(segment_id)
+        if segment is None or segment.get("continued_by_segment_id"):
+            return
+        stop = segment.get("transient_stop")
+        if isinstance(stop, dict):
+            stop["expired"] = True
+            stop["max_duration_minutes"] = self.transient_stop_minutes
+        segment["journey_role"] = "destination"
+        await self._async_queue_pending(segment)
+
+    def _find_runtime_continuation(
+        self, transient: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Find a segment that started while transient analysis was running."""
+        candidates: list[dict[str, Any]] = []
+        if self._active is not None:
+            candidates.append(self._active)
+        candidates.extend(self._closing.values())
+        candidates.extend(self._pending.values())
+        candidates.sort(key=lambda item: str(item.get("started_at") or ""))
+        for current in candidates:
+            if current.get("id") == transient.get("id"):
+                continue
+            if self._continuation_details(transient, current) is not None:
+                return current
+        return None
+
+    def _link_transient_continuation(
+        self,
+        current: dict[str, Any],
+        preferred: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Attach a new segment to the latest compatible intermediate stop."""
+        candidates = [preferred] if preferred is not None else list(
+            self._transient.values()
+        )
+        candidates = [
+            item
+            for item in candidates
+            if isinstance(item, dict) and not item.get("continued_by_segment_id")
+        ]
+        candidates.sort(
+            key=lambda item: str(item.get("ended_at") or ""), reverse=True
+        )
+        for transient in candidates:
+            details = self._continuation_details(transient, current)
+            if details is None:
+                continue
+            current["journey_id"] = transient.get("journey_id") or uuid4().hex
+            current["transient_continuation"] = details
+            current["return_context"] = (
+                current.get("return_context") or transient.get("return_context")
+            )
+            transient["continued_by_segment_id"] = current.get("id")
+            transient["continuation"] = details
+            return transient
+        return None
+
+    def _continuation_details(
+        self, transient: dict[str, Any], current: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Apply configured limits to a possible journey continuation."""
+        return continuation_details(
+            transient,
+            current,
+            self.transient_stop_minutes,
+            min(self.place_radius, DEFAULT_TRANSIENT_STOP_RADIUS),
+        )
+
+    def _journey_return_context(
+        self, segment: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Carry return evidence across fuel, rest or shopping stops."""
+        journey_id = segment.get("journey_id")
+        if not journey_id:
+            return None
+        matching = sorted(
+            (
+                item
+                for item in self._transient.values()
+                if item.get("journey_id") == journey_id
+                and isinstance(item.get("return_context"), dict)
+            ),
+            key=lambda item: str(item.get("started_at") or ""),
+        )
+        if not matching:
+            return None
+        return deepcopy(matching[0]["return_context"])
 
     async def _async_wait_for_odometer(
         self, disconnected_at: datetime
@@ -790,6 +972,7 @@ class KnihaJizdManager:
             for index, candidate in enumerate(candidates[:3], start=1)
         ]
         return_context = segment.get("return_context")
+        transient_stop = segment.get("transient_stop")
         if isinstance(return_context, dict) and return_context.get("suggested"):
             previous_purpose = return_context.get("previous_purpose")
             if previous_purpose:
@@ -803,6 +986,12 @@ class KnihaJizdManager:
                     f"Cíl {estimate} je uložený jako návratové místo, ale "
                     "nenavazuje na známou služební jízdu. Jak cestu zařadit?"
                 )
+        elif isinstance(transient_stop, dict) and transient_stop.get("expired"):
+            base_message = (
+                f"Zastavení {estimate} vypadalo jako mezizastávka, ale další "
+                f"jízda nezačala do {self.transient_stop_minutes:g} minut. "
+                "Jak tento samostatný segment zařadit?"
+            )
         elif candidate_lines:
             base_message = (
                 f"Jízda ukončena. Nejpravděpodobnější cíl: {estimate}. "
@@ -898,12 +1087,17 @@ class KnihaJizdManager:
             place_role: str | None = None
             learn_place = True
             return_context = segment.get("return_context")
+            transient_stop = segment.get("transient_stop")
+            expired_transient = (
+                isinstance(transient_stop, dict)
+                and bool(transient_stop.get("expired"))
+            )
 
             if action == ACTION_RETURN:
                 await self._async_finalize_return(
                     segment,
                     source="notification_return",
-                    learn_place=True,
+                    learn_place=not expired_transient,
                 )
                 self._pending.pop(segment_id, None)
                 await self._async_save_runtime()
@@ -950,6 +1144,14 @@ class KnihaJizdManager:
                 purpose = "Soukromá"
                 trip_type = TRIP_TYPE_PRIVATE
                 learn_place = not bool(segment.get("matched_place_id"))
+
+            if expired_transient:
+                # Fuel stations, shops and rest areas are inherently contextual.
+                # One long stop must not make every future visit permanently
+                # business or private.
+                learn_place = False
+                place_role = None
+                learned_label = None
 
             if selected_candidate is not None:
                 segment["map_estimate"] = purpose
@@ -1017,44 +1219,110 @@ class KnihaJizdManager:
         place_role: str | None = None,
     ) -> None:
         """Write a fully classified segment and optionally learn its destination."""
-        segment["purpose"] = purpose
-        segment["trip_type"] = trip_type
-        segment["classification_source"] = source
-        segment["journey_role"] = segment.get("journey_role") or "destination"
-        await self.repository.async_append_segment(segment)
+        async with self._journey_lock:
+            segment["journey_id"] = segment.get("journey_id") or uuid4().hex
+            inherited = self._journey_transient_segments(segment)
+            apply_journey_classification(
+                inherited, segment, purpose, trip_type, source
+            )
+            for transient in inherited:
+                await self._async_learn_transient_place(transient)
+                await self.repository.async_append_segment(transient)
+                self._transient.pop(str(transient.get("id")), None)
 
-        if learn_place and (
+            await self.repository.async_append_segment(segment)
+
+            if learn_place and (
+                segment.get("end_address")
+                or (
+                    segment.get("end_latitude") is not None
+                    and segment.get("end_longitude") is not None
+                )
+            ):
+                await self.repository.async_learn_place(
+                    {
+                        "id": (
+                            segment.get("matched_place_id")
+                            if place_role is not None
+                            and segment.get("matched_place_id")
+                            else uuid4().hex
+                        ),
+                        "latitude": segment.get("end_latitude"),
+                        "longitude": segment.get("end_longitude"),
+                        "address": segment.get("end_address"),
+                        "label": learned_label or purpose,
+                        "trip_type": (
+                            TRIP_TYPE_CONTEXTUAL
+                            if place_role == PLACE_ROLE_RETURN
+                            else trip_type
+                        ),
+                        "place_role": place_role,
+                        "map_name": segment.get("map_estimate"),
+                        "updated_at": _iso_utc(datetime.now(UTC)),
+                    }
+                )
+            await self._async_save_runtime()
+        self._last_error = None
+        await self._async_refresh_statistics()
+        _LOGGER.info(
+            "Trip segment %s and %s intermediate stops saved as %s (%s)",
+            segment.get("id"),
+            len(inherited),
+            purpose,
+            trip_type,
+        )
+
+    def _journey_transient_segments(
+        self, destination: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Return unresolved stops belonging to the destination's journey."""
+        journey_id = destination.get("journey_id")
+        if not journey_id:
+            return []
+        return sorted(
+            (
+                item
+                for item in self._transient.values()
+                if item.get("journey_id") == journey_id
+                and item.get("id") != destination.get("id")
+            ),
+            key=lambda item: str(item.get("started_at") or ""),
+        )
+
+    async def _async_learn_transient_place(
+        self, segment: dict[str, Any]
+    ) -> None:
+        """Learn a confirmed intermediate POI using a deliberately small radius."""
+        stop = segment.get("transient_stop")
+        if not isinstance(stop, dict):
+            return
+        if not (
             segment.get("end_address")
             or (
                 segment.get("end_latitude") is not None
                 and segment.get("end_longitude") is not None
             )
         ):
-            await self.repository.async_learn_place(
-                {
-                    "id": (
-                        segment.get("matched_place_id")
-                        if place_role is not None and segment.get("matched_place_id")
-                        else uuid4().hex
-                    ),
-                    "latitude": segment.get("end_latitude"),
-                    "longitude": segment.get("end_longitude"),
-                    "address": segment.get("end_address"),
-                    "label": learned_label or purpose,
-                    "trip_type": (
-                        TRIP_TYPE_CONTEXTUAL
-                        if place_role == PLACE_ROLE_RETURN
-                        else trip_type
-                    ),
-                    "place_role": place_role,
-                    "map_name": segment.get("map_estimate"),
-                    "updated_at": _iso_utc(datetime.now(UTC)),
-                }
-            )
-        self._last_error = None
-        await self._async_refresh_statistics()
-        _LOGGER.info(
-            "Trip segment %s saved as %s (%s)", segment.get("id"), purpose, trip_type
+            return
+        place_id = str(segment.get("matched_place_id") or uuid4().hex)
+        segment["matched_place_id"] = place_id
+        await self.repository.async_learn_place(
+            {
+                "id": place_id,
+                "latitude": segment.get("end_latitude"),
+                "longitude": segment.get("end_longitude"),
+                "address": segment.get("end_address"),
+                "label": (
+                    stop.get("name")
+                    or segment.get("map_estimate")
+                    or "Mezizastávka"
+                ),
+                "trip_type": TRIP_TYPE_CONTEXTUAL,
+                "place_role": PLACE_ROLE_TRANSIENT,
+                "radius_m": LEARNED_TRANSIENT_RADIUS,
+                "map_name": segment.get("map_estimate"),
+                "updated_at": _iso_utc(datetime.now(UTC)),
+            }
         )
 
     def _capture_location(self) -> dict[str, float | str | None]:
@@ -1072,13 +1340,14 @@ class KnihaJizdManager:
         return {"latitude": latitude, "longitude": longitude, "address": address}
 
     async def _async_save_runtime(self) -> None:
-        """Persist active, closing and pending state across HA restarts."""
+        """Persist all unfinished journey state across HA restarts."""
         async with self._runtime_lock:
             await self._runtime_store.async_save(
                 {
                     "active": deepcopy(self._active),
                     "closing": deepcopy(self._closing),
                     "pending": deepcopy(self._pending),
+                    "transient": deepcopy(self._transient),
                 }
             )
         self._notify_listeners()

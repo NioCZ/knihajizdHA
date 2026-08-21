@@ -27,12 +27,14 @@ from .const import (
     CONF_PLACE_RADIUS,
     CONF_RELEVANCE_KEYWORDS,
     CONF_RETURN_CONTEXT_HOURS,
+    CONF_TRANSIENT_STOP_MINUTES,
     DEFAULT_EXPORT_PATH,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_OVERPASS_URL,
     DEFAULT_PLACE_RADIUS,
     DEFAULT_RELEVANCE_KEYWORDS,
     DEFAULT_RETURN_CONTEXT_HOURS,
+    DEFAULT_TRANSIENT_STOP_MINUTES,
     DOMAIN,
     SERVICE_EXPORT_EXCEL,
 )
@@ -108,6 +110,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     merged_config.setdefault(
         CONF_RETURN_CONTEXT_HOURS, DEFAULT_RETURN_CONTEXT_HOURS
     )
+    merged_config.setdefault(
+        CONF_TRANSIENT_STOP_MINUTES, DEFAULT_TRANSIENT_STOP_MINUTES
+    )
     repository = KnihaJizdRepository(hass)
     try:
         await repository.async_initialize()
@@ -152,8 +157,8 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate entries to institution and return-context matching."""
-    if entry.version >= 3:
+    """Migrate entries to institution, return and journey-chain matching."""
+    if entry.version >= 4:
         return True
 
     data = dict(entry.data)
@@ -169,12 +174,15 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         values.setdefault(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL)
         values.setdefault(CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS)
         values.setdefault(CONF_RETURN_CONTEXT_HOURS, DEFAULT_RETURN_CONTEXT_HOURS)
+        values.setdefault(
+            CONF_TRANSIENT_STOP_MINUTES, DEFAULT_TRANSIENT_STOP_MINUTES
+        )
 
     hass.config_entries.async_update_entry(
         entry,
         data=data,
         options=options,
-        version=3,
+        version=4,
     )
     return True
 

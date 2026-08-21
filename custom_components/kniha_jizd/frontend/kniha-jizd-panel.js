@@ -62,6 +62,7 @@ class KnihaJizdPanel extends HTMLElement {
       driving: "Probíhá jízda",
       waiting_odometer: "Čeká se na tachometr",
       waiting_classification: "Čeká na zařazení",
+      waiting_journey: "Čeká na pokračování jízdy",
       error: "Chyba",
     }[value] || this._text(value);
   }
@@ -187,11 +188,14 @@ class KnihaJizdPanel extends HTMLElement {
             <dt>Aktivní segment</dt><dd>${this._text(attrs.active_segment_id)}</dd>
             <dt>Čeká tachometr</dt><dd>${this._text(attrs.closing_count, "0")}</dd>
             <dt>Čeká zařazení</dt><dd>${this._text(attrs.pending_count, "0")}</dd>
+            <dt>Čeká na cíl celé jízdy</dt><dd>${this._text(attrs.transient_count, "0")}</dd>
             <dt>Návaznost návratu</dt><dd>${this._text(attrs.return_context_hours)} h</dd>
+            <dt>Limit mezizastávky</dt><dd>${this._text(attrs.transient_stop_minutes)} min</dd>
             <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
           </dl></article>
           <article class="card"><h2>Poslední jízda</h2><dl>
             <dt>Vzdálenost</dt><dd>${this._number(lastTrip?.state)} km</dd>
+            <dt>Celá cesta</dt><dd>${this._number(last.journey_distance_km)} km / ${this._text(last.journey_segment_count, "1")} segmentů</dd>
             <dt>Zákazník</dt><dd>${this._text(last.purpose)}</dd>
             <dt>Typ</dt><dd>${last.journey_role === "return" ? "Služební návrat" : last.trip_type === "private" ? "Soukromá" : this._text(last.trip_type)}</dd>
             <dt>Start</dt><dd>${this._text(last.start_address)}</dd>
