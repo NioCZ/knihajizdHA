@@ -215,7 +215,67 @@ class LearnedPlacesTest(unittest.TestCase):
         self.assertEqual(statistics["today_segments"], 3)
         self.assertEqual(statistics["today_business_km"], 32.65)
         self.assertEqual(statistics["today_private_km"], 8.6)
+        self.assertEqual(len(statistics["today_rows"]), 3)
         self.assertEqual(statistics["last_segment"]["id"], "segment-c")
+
+    def test_manual_edit_updates_the_whole_persisted_journey(self) -> None:
+        """Keep all legs consistent when one daily-table row is corrected."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.raw_path = Path(temporary_directory) / "raw.json"
+            repository.raw_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "segments": [
+                            {
+                                "id": "fuel",
+                                "journey_id": "journey",
+                                "purpose": "Původní",
+                                "trip_type": "business",
+                            },
+                            {
+                                "id": "destination",
+                                "journey_id": "journey",
+                                "purpose": "Původní",
+                                "trip_type": "business",
+                            },
+                            {
+                                "id": "other",
+                                "journey_id": "other-journey",
+                                "purpose": "Jiné",
+                                "trip_type": "business",
+                            },
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            changed = repository._update_trip_sync(
+                "fuel", "Soukromá", "private"
+            )
+            document = json.loads(
+                repository.raw_path.read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(changed, 2)
+            self.assertTrue(
+                all(
+                    segment["trip_type"] == "private"
+                    for segment in document["segments"][:2]
+                )
+            )
+            self.assertEqual(
+                document["segments"][0]["classification_source"],
+                "manual_panel",
+            )
+            self.assertEqual(document["segments"][2]["purpose"], "Jiné")
 
 
 if __name__ == "__main__":

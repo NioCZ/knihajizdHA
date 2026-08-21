@@ -5,6 +5,7 @@ class KnihaJizdPanel extends HTMLElement {
     this._hass = null;
     this._exporting = false;
     this._message = "";
+    this._savingTrip = null;
     this._month = this._currentMonth();
   }
 
@@ -43,6 +44,7 @@ class KnihaJizdPanel extends HTMLElement {
   }
 
   _number(value, digits = 1) {
+    if (value === undefined || value === null || value === "") return "—";
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return "—";
     return new Intl.NumberFormat("cs-CZ", {
@@ -63,8 +65,69 @@ class KnihaJizdPanel extends HTMLElement {
       waiting_odometer: "Čeká se na tachometr",
       waiting_classification: "Čeká na zařazení",
       waiting_journey: "Čeká na pokračování jízdy",
+      processing_destination: "Určuje se cíl",
+      saved: "Uloženo",
       error: "Chyba",
     }[value] || this._text(value);
+  }
+
+  _time(value) {
+    const parsed = new Date(value || "");
+    if (Number.isNaN(parsed.getTime())) return "—";
+    return new Intl.DateTimeFormat("cs-CZ", {
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(parsed);
+  }
+
+  async _saveTrip(button) {
+    if (!this._hass || this._savingTrip) return;
+    const row = button.closest("tr");
+    const segmentId = row?.dataset?.segmentId;
+    const purpose = row?.querySelector(".trip-purpose")?.value?.trim() || "";
+    const tripType = row?.querySelector(".trip-type")?.value || "business";
+    if (!segmentId) return;
+    this._savingTrip = segmentId;
+    this._message = "Ukládám opravu jízdy…";
+    this._render();
+    try {
+      await this._hass.callService("kniha_jizd", "update_trip", {
+        segment_id: segmentId,
+        purpose,
+        trip_type: tripType,
+      });
+      this._message = "Jízda byla upravena. Pokud tachometr ještě čeká, dokončí se automaticky.";
+    } catch (error) {
+      this._message = `Úprava se nezdařila: ${error.message || error}`;
+    } finally {
+      this._savingTrip = null;
+      this._render();
+    }
+  }
+
+  _tripTable(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return '<div class="muted">Dnes zatím není zaznamenána žádná jízda.</div>';
+    }
+    return `<div class="table-wrap"><table><thead><tr>
+      <th>Čas</th><th>Odkud</th><th>Kam</th><th>km</th><th>Zákazník / účel</th><th>Typ</th><th>Stav</th><th></th>
+    </tr></thead><tbody>${rows.map((trip) => {
+      const privateSelected = trip.trip_type === "private";
+      const disabled = !trip.editable || this._savingTrip === trip.id;
+      return `<tr data-segment-id="${this._text(trip.id)}">
+        <td>${this._time(trip.started_at)}</td>
+        <td>${this._text(trip.start_address)}</td>
+        <td>${this._text(trip.end_address)}</td>
+        <td>${this._number(trip.distance_km)}</td>
+        <td><input class="trip-purpose" type="text" value="${this._text(trip.purpose, "")}" placeholder="Zákazník nebo účel" ${disabled ? "disabled" : ""}></td>
+        <td><select class="trip-type" ${disabled ? "disabled" : ""}>
+          <option value="business" ${privateSelected ? "" : "selected"}>Služební</option>
+          <option value="private" ${privateSelected ? "selected" : ""}>Soukromá</option>
+        </select></td>
+        <td>${this._statusLabel(trip.status)}${trip.odometer_ready ? "" : " · čeká km"}</td>
+        <td><button class="save-trip" ${disabled ? "disabled" : ""}>Uložit</button></td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
   }
 
   _check(label, ok, detail) {
@@ -127,6 +190,7 @@ class KnihaJizdPanel extends HTMLElement {
     const lastTrip = this._entity("last_trip");
     const exportEntity = this._entity("export");
     const attrs = status?.attributes || {};
+    const todayTripRows = attrs.today_trips || [];
     const last = lastTrip?.attributes || {};
     const rawDownloadUrl = exportEntity?.attributes?.download_url;
     const expiresAt = Date.parse(exportEntity?.attributes?.expires_at || "");
@@ -156,10 +220,16 @@ class KnihaJizdPanel extends HTMLElement {
         .month-control { display:flex; flex-direction:column; gap:6px; max-width:220px; margin-top:16px; }
         .month-control label { color:var(--secondary-text-color); }
         input[type="month"] { color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; padding:10px 12px; font:inherit; }
+        input[type="text"], select { width:100%; min-width:130px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:7px; padding:8px; font:inherit; }
         button, a.button { border:0; border-radius:10px; padding:12px 18px; font:inherit; font-weight:600; cursor:pointer; text-decoration:none; }
         button { color:var(--text-primary-color,#fff); background:var(--primary-color); }
         button:disabled { opacity:.6; cursor:wait; } a.button { color:var(--primary-color); background:var(--secondary-background-color); }
         .message { margin-top:12px; color:var(--secondary-text-color); }
+        .table-wrap { overflow-x:auto; } table { width:100%; border-collapse:collapse; margin-top:12px; }
+        th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--divider-color); padding:9px 8px; min-width:75px; }
+        th { color:var(--secondary-text-color); font-weight:600; } td:nth-child(2), td:nth-child(3) { min-width:180px; }
+        .save-trip { padding:9px 13px; white-space:nowrap; }
+        .daily-trips { margin-bottom:16px; }
         @media (max-width:600px) { main { padding:16px; } dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:8px; } }
       </style>
       <main>
@@ -203,6 +273,10 @@ class KnihaJizdPanel extends HTMLElement {
             <dt>Konec</dt><dd>${this._text(last.ended_at)}</dd>
           </dl></article>
         </section>
+        <section class="card daily-trips"><h2>Dnešní jízdy</h2>
+          <div class="muted">Uložené i čekající jízdy lze opravit. Segmenty stejné celé cesty se upraví společně.</div>
+          ${this._tripTable(todayTripRows)}
+        </section>
         <section class="card"><h2>Excel report</h2>
           <div class="muted">Oba listy budou obsahovat pouze jízdy z vybraného měsíce.</div>
           <div class="month-control"><label for="month">Měsíc reportu</label><input id="month" type="month" value="${this._text(this._month)}"></div>
@@ -215,6 +289,9 @@ class KnihaJizdPanel extends HTMLElement {
       if (event.target.value) this._month = event.target.value;
     });
     this.shadowRoot.getElementById("export")?.addEventListener("click", () => this._exportExcel());
+    this.shadowRoot.querySelectorAll(".save-trip").forEach((button) => {
+      button.addEventListener("click", () => this._saveTrip(button));
+    });
   }
 }
 

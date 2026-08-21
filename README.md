@@ -53,19 +53,28 @@ existuje. Všechny entity jsou seskupené pod jedním zařízením.
 
 Integrace zároveň registruje administrační stránku **Kniha jízd** v levém panelu
 Home Assistantu. Ukazuje aktuální průběh, zdraví jednotlivých vstupů, dnešní
-součty, poslední jízdu, výběr měsíce a tlačítko **Vygenerovat a stáhnout Excel**.
-Stránka je dostupná pouze administrátorům.
+součty, poslední jízdu, editovatelnou tabulku dnešních jízd, výběr měsíce a
+tlačítko **Vygenerovat a stáhnout Excel**. Stránka je dostupná pouze
+administrátorům.
 
 ## Jak probíhá jízda
 
 - Přechod Android Auto `off → on` uloží čas, stav tachometru a výchozí polohu.
-- Přechod `on → off` okamžitě zachytí cílovou polohu, ale zápis zatím neuzavře.
-- Integrace poslouchá změny tachometru a přijme až stav, jehož explicitní atribut
-  `last_updated` (nebo HA metadata `State.last_updated`) je **po** čase odpojení.
-- Po timeoutu (výchozí 600 s) použije poslední dostupnou hodnotu a v raw datech
-  nastaví `odometer_wait_timed_out: true`.
+- Přechod `on → off` okamžitě zachytí cílovou polohu. Mapové rozpoznání a
+  actionable notification se spustí ihned, souběžně s tachometrem.
+- Primární signál finálního tachometru vyžaduje čas `last_updated` (nebo HA
+  metadata `State.last_updated`) **po** odpojení a současně vyšší stav počitadla
+  než na začátku segmentu. U chybějícího počátečního stavu stačí nový čas a
+  platná hodnota.
+- Pokud oba primární signály nepřijdou, použije se po timeoutu (výchozí 600 s)
+  poslední dostupná hodnota. Raw data pak obsahují
+  `odometer_wait_timed_out: true` a
+  `odometer_completion_source: timeout_latest_value`.
 - Potvrzené místo v okruhu 1 000 m se zařadí automaticky. U neznámého cíle se
   v okruhu 3 000 m vyhledají a obodují odborné instituce a odešle se notifikace.
+
+Na notifikaci lze odpovědět ještě před dokončením tachometru. Klasifikace se uloží
+do HA Store a segment se automaticky zapíše, jakmile získá finální kilometry.
 
 ### Služební návraty domů, na firmu nebo do hotelu
 
@@ -139,6 +148,28 @@ a **Jiný klient**. Návratové místo se učí kontextově, nikoli napevno jako
 
 Volba se spolu se souřadnicemi a typem jízdy uloží do
 `/config/learned_places.json`. Příští cíl v nastaveném poloměru se už neptá.
+
+### Denní tabulka a dodatečné opravy
+
+Panel **Kniha jízd** zobrazuje všechny dnešní uložené i rozpracované segmenty.
+U každého ukazuje adresy, kilometry, zákazníka, typ a stav zpracování. Pole
+**Zákazník / účel** a **Typ** lze upravit tlačítkem **Uložit**.
+
+To funguje také v případě, kdy byla mobilní notifikace omylem smazána: segment
+zůstane ve stavu **Čeká na zařazení** a lze jej dokončit přímo v tabulce. Pokud
+ještě čeká tachometr, ruční volba se uloží a finální zápis proběhne později.
+Oprava již uložené cesty změní všechny segmenty se stejným `journey_id`, takže
+benzinka či odpočívadlo nezůstanou v jiném typu než konečný cíl.
+
+Stejnou opravu lze volat jako HA akci:
+
+```yaml
+action: kniha_jizd.update_trip
+data:
+  segment_id: "ID_Z_TABULKY_NEBO_RAW_DAT"
+  purpose: "Genetická laboratoř"
+  trip_type: business
+```
 
 ## Rozpoznání nemocnic a výzkumných pracovišť
 

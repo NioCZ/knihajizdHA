@@ -46,8 +46,12 @@ LEARNED_PLACES_FILENAME: Final = "learned_places.json"
 RUNTIME_STORE_VERSION: Final = 1
 
 SERVICE_EXPORT_EXCEL: Final = "export_excel"
+SERVICE_UPDATE_TRIP: Final = "update_trip"
 ATTR_PATH: Final = "path"
 ATTR_MONTH: Final = "month"
+ATTR_SEGMENT_ID: Final = "segment_id"
+ATTR_PURPOSE: Final = "purpose"
+ATTR_TRIP_TYPE: Final = "trip_type"
 DEFAULT_EXPORT_PATH: Final = "kniha_jizd.xlsx"
 
 EVENT_NOTIFICATION_ACTION: Final = "mobile_app_notification_action"

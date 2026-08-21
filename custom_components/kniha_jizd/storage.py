@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import json
 from math import asin, cos, radians, sin, sqrt
 import os
@@ -183,6 +184,44 @@ class KnihaJizdRepository:
         data["version"] = _RAW_DATA_VERSION
         _write_json_atomic(self.raw_path, data)
         return True
+
+    async def async_update_trip(
+        self, segment_id: str, purpose: str, trip_type: str
+    ) -> int:
+        """Update one persisted journey and return the number of changed rows."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._update_trip_sync, segment_id, purpose, trip_type
+            )
+
+    def _update_trip_sync(
+        self, segment_id: str, purpose: str, trip_type: str
+    ) -> int:
+        """Apply a manual correction to every segment of the same journey."""
+        data = self._load_raw_sync()
+        segments: list[dict[str, Any]] = data["segments"]
+        target = next(
+            (segment for segment in segments if segment.get("id") == segment_id),
+            None,
+        )
+        if target is None:
+            return 0
+        journey_id = target.get("journey_id")
+        changed = 0
+        edited_at = datetime.now(UTC).isoformat()
+        for segment in segments:
+            if segment.get("id") != segment_id and (
+                not journey_id or segment.get("journey_id") != journey_id
+            ):
+                continue
+            segment["purpose"] = purpose
+            segment["trip_type"] = trip_type
+            segment["classification_source"] = "manual_panel"
+            segment["manually_edited_at"] = edited_at
+            changed += 1
+        if changed:
+            _write_json_atomic(self.raw_path, data)
+        return changed
 
     async def async_get_statistics(self, local_date: str) -> dict[str, Any]:
         """Return compact totals for diagnostic entities and the panel."""
@@ -417,6 +456,7 @@ def calculate_statistics(
         "today_segments": len(today_segments),
         "today_business_km": _sum_distance(today_segments, "business"),
         "today_private_km": _sum_distance(today_segments, "private"),
+        "today_rows": deepcopy_json(today_segments),
         "last_segment": deepcopy_json(last_segment),
     }
 

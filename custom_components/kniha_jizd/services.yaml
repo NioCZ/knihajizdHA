@@ -17,3 +17,28 @@ export_excel:
       example: kniha_jizd.xlsx
       selector:
         text:
+update_trip:
+  name: Upravit jízdu
+  description: Opraví uloženou nebo čekající jízdu; u řetězce upraví všechny jeho segmenty.
+  fields:
+    segment_id:
+      name: ID segmentu
+      required: true
+      selector:
+        text:
+    purpose:
+      name: Účel / zákazník
+      description: U soukromé jízdy může zůstat prázdný.
+      required: false
+      selector:
+        text:
+    trip_type:
+      name: Typ jízdy
+      required: true
+      selector:
+        select:
+          options:
+            - label: Služební
+              value: business
+            - label: Soukromá
+              value: private

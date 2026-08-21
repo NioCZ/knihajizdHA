@@ -19,6 +19,9 @@ from homeassistant.util import dt as dt_util
 from .const import (
     ATTR_MONTH,
     ATTR_PATH,
+    ATTR_PURPOSE,
+    ATTR_SEGMENT_ID,
+    ATTR_TRIP_TYPE,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_NOMINATIM_EMAIL,
     CONF_NOMINATIM_URL,
@@ -37,6 +40,7 @@ from .const import (
     DEFAULT_TRANSIENT_STOP_MINUTES,
     DOMAIN,
     SERVICE_EXPORT_EXCEL,
+    SERVICE_UPDATE_TRIP,
 )
 from .download import KnihaJizdDownloadView
 from .export import export_excel
@@ -52,6 +56,13 @@ EXPORT_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_PATH, default=DEFAULT_EXPORT_PATH): str,
         vol.Optional(ATTR_MONTH): vol.Match(r"^\d{4}-(0[1-9]|1[0-2])$"),
+    }
+)
+UPDATE_TRIP_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_SEGMENT_ID): str,
+        vol.Optional(ATTR_PURPOSE, default=""): str,
+        vol.Required(ATTR_TRIP_TYPE): vol.In(["business", "private"]),
     }
 )
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
@@ -94,6 +105,25 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_EXPORT_EXCEL,
         _async_export_service,
         schema=EXPORT_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_update_trip_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_update_trip(
+                str(call.data[ATTR_SEGMENT_ID]),
+                str(call.data[ATTR_PURPOSE]),
+                str(call.data[ATTR_TRIP_TYPE]),
+            )
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_UPDATE_TRIP,
+        _async_update_trip_service,
+        schema=UPDATE_TRIP_SERVICE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     return True
