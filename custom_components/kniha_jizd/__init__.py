@@ -18,9 +18,12 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_MONTH,
+    ATTR_DISTANCE_KM,
+    ATTR_END_ADDRESS,
     ATTR_PATH,
     ATTR_PURPOSE,
     ATTR_SEGMENT_ID,
+    ATTR_START_ADDRESS,
     ATTR_TRIP_TYPE,
     CONF_COMPANY_ADDRESS,
     CONF_COMPANY_LATITUDE,
@@ -30,6 +33,7 @@ from .const import (
     CONF_HOME_LATITUDE,
     CONF_HOME_LONGITUDE,
     CONF_INSTITUTION_SEARCH_RADIUS,
+    CONF_LOCATION_SETTLE_SECONDS,
     CONF_NOMINATIM_EMAIL,
     CONF_NOMINATIM_URL,
     CONF_NOMINATIM_USER_AGENT,
@@ -47,6 +51,7 @@ from .const import (
     DEFAULT_HOME_LATITUDE,
     DEFAULT_HOME_LONGITUDE,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
+    DEFAULT_LOCATION_SETTLE_SECONDS,
     DEFAULT_OVERPASS_URL,
     DEFAULT_PLACE_RADIUS,
     DEFAULT_RELEVANCE_KEYWORDS,
@@ -77,6 +82,9 @@ UPDATE_TRIP_SERVICE_SCHEMA = vol.Schema(
         vol.Required(ATTR_SEGMENT_ID): str,
         vol.Optional(ATTR_PURPOSE, default=""): str,
         vol.Required(ATTR_TRIP_TYPE): vol.In(["business", "private"]),
+        vol.Optional(ATTR_START_ADDRESS): str,
+        vol.Optional(ATTR_END_ADDRESS): str,
+        vol.Optional(ATTR_DISTANCE_KM): vol.All(vol.Coerce(float), vol.Range(min=0)),
     }
 )
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
@@ -129,6 +137,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 str(call.data[ATTR_SEGMENT_ID]),
                 str(call.data[ATTR_PURPOSE]),
                 str(call.data[ATTR_TRIP_TYPE]),
+                call.data.get(ATTR_START_ADDRESS),
+                call.data.get(ATTR_END_ADDRESS),
+                call.data.get(ATTR_DISTANCE_KM),
             )
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
@@ -148,6 +159,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     merged_config = {**entry.data, **entry.options}
     merged_config.setdefault(
         CONF_INSTITUTION_SEARCH_RADIUS, DEFAULT_INSTITUTION_SEARCH_RADIUS
+    )
+    merged_config.setdefault(
+        CONF_LOCATION_SETTLE_SECONDS, DEFAULT_LOCATION_SETTLE_SECONDS
     )
     merged_config.setdefault(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL)
     merged_config.setdefault(CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS)
@@ -209,7 +223,7 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate entries to configured places and current journey matching."""
-    if entry.version >= 6:
+    if entry.version >= 7:
         return True
 
     data = dict(entry.data)
@@ -221,6 +235,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             values[CONF_PLACE_RADIUS] = DEFAULT_PLACE_RADIUS
         values.setdefault(
             CONF_INSTITUTION_SEARCH_RADIUS, DEFAULT_INSTITUTION_SEARCH_RADIUS
+        )
+        values.setdefault(
+            CONF_LOCATION_SETTLE_SECONDS, DEFAULT_LOCATION_SETTLE_SECONDS
         )
         values.setdefault(CONF_OVERPASS_URL, DEFAULT_OVERPASS_URL)
         values.setdefault(CONF_RELEVANCE_KEYWORDS, DEFAULT_RELEVANCE_KEYWORDS)
@@ -240,7 +257,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry,
         data=data,
         options=options,
-        version=6,
+        version=7,
     )
     return True
 

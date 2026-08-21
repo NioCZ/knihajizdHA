@@ -277,6 +277,121 @@ class LearnedPlacesTest(unittest.TestCase):
             )
             self.assertEqual(document["segments"][2]["purpose"], "Jiné")
 
+    def test_manual_edit_can_override_addresses_and_distance(self) -> None:
+        """Keep an explicit panel correction stable for one selected segment."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.raw_path = Path(temporary_directory) / "raw.json"
+            repository.raw_path.write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "segments": [
+                            {
+                                "id": "segment",
+                                "date": "2026-08-21",
+                                "purpose": "Původní",
+                                "trip_type": "business",
+                                "distance_km": 0.0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            repository._update_trip_sync(
+                "segment",
+                "Bez zákazníka",
+                "business",
+                "Opravený start",
+                "Opravený cíl",
+                14.25,
+            )
+            segment = json.loads(
+                repository.raw_path.read_text(encoding="utf-8")
+            )["segments"][0]
+
+            self.assertEqual(segment["start_address"], "Opravený start")
+            self.assertEqual(segment["end_address"], "Opravený cíl")
+            self.assertEqual(segment["distance_km"], 14.25)
+            self.assertTrue(segment["manual_distance_override"])
+
+    def test_combined_cloud_increment_is_reassigned_to_zero_leg(self) -> None:
+        """Split one later trusted counter increase across both driven legs."""
+        segments = [
+            {
+                "id": "first",
+                "started_at": "2026-08-21T08:00:00+00:00",
+                "start_odometer_km": 1000.0,
+                "end_odometer_km": 1000.0,
+                "distance_km": 0.0,
+                "odometer_wait_timed_out": False,
+                "odometer_shared_update": True,
+                "odometer_completion_source": (
+                    "post_disconnect_update_and_increase"
+                ),
+                "start_latitude": 50.0,
+                "start_longitude": 14.0,
+                "end_latitude": 50.09,
+                "end_longitude": 14.0,
+            },
+            {
+                "id": "second",
+                "started_at": "2026-08-21T10:00:00+00:00",
+                "start_odometer_km": 1000.0,
+                "end_odometer_km": 1020.0,
+                "distance_km": 20.0,
+                "odometer_wait_timed_out": False,
+                "odometer_completion_source": (
+                    "post_disconnect_update_and_increase"
+                ),
+                "start_latitude": 50.09,
+                "start_longitude": 14.0,
+                "end_latitude": 50.18,
+                "end_longitude": 14.0,
+            },
+        ]
+
+        changed, check = STORAGE_MODULE.reconcile_odometer_day(segments)
+
+        self.assertGreater(changed, 0)
+        self.assertGreater(segments[0]["distance_km"], 0)
+        self.assertGreater(segments[1]["distance_km"], 0)
+        self.assertAlmostEqual(
+            segments[0]["distance_km"] + segments[1]["distance_km"],
+            20.0,
+            places=3,
+        )
+        self.assertTrue(check["consistent"])
+
+    def test_next_start_anchor_backfills_previous_timeout(self) -> None:
+        """A fresh counter at the next departure exactly closes one zero leg."""
+        segments = [
+            {
+                "id": "previous",
+                "started_at": "2026-08-21T08:00:00+00:00",
+                "start_odometer_km": 2000.0,
+                "end_odometer_km": 2000.0,
+                "distance_km": 0.0,
+                "odometer_wait_timed_out": True,
+                "odometer_completion_source": "timeout_latest_value",
+            }
+        ]
+
+        _, check = STORAGE_MODULE.reconcile_odometer_day(segments, 2012.5)
+
+        self.assertEqual(segments[0]["distance_km"], 12.5)
+        self.assertEqual(
+            segments[0]["odometer_reconciliation_boundary_source"],
+            "next_segment_start",
+        )
+        self.assertTrue(check["consistent"])
+
 
 if __name__ == "__main__":
     unittest.main()

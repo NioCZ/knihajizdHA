@@ -8,6 +8,8 @@ import unicodedata
 from math import asin, cos, radians, sin, sqrt
 from typing import Any
 
+_CZECH_COUNTRIES = {"cesko", "ceska republika", "czechia", "czech republic"}
+
 
 def address_matches_reference(observed: Any, reference: Any) -> bool:
     """Match a short configured address inside a full geocoded address safely."""
@@ -16,6 +18,35 @@ def address_matches_reference(observed: Any, reference: Any) -> bool:
     return bool(reference_tokens) and all(
         token in observed_tokens for token in reference_tokens
     )
+
+
+def shorten_address(value: Any) -> str | None:
+    """Shorten a domestic address while preserving foreign addresses verbatim."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    original = value.strip()
+    parts = [part.strip() for part in original.split(",") if part.strip()]
+    if not parts:
+        return original
+    country_present = _ascii_text(parts[-1]) in _CZECH_COUNTRIES
+    domestic = country_present or any(
+        re.search(r"\b\d{3}\s?\d{2}\b", part) for part in parts
+    )
+    if not domestic:
+        return original
+    if country_present:
+        parts.pop()
+    shortened: list[str] = []
+    for part in parts:
+        without_postcode = re.sub(r"\b\d{3}\s?\d{2}\b", "", part).strip(" -")
+        normalized = _ascii_text(without_postcode)
+        if not without_postcode or normalized.startswith(("okres ", "kraj ")):
+            continue
+        if normalized.endswith(" kraj"):
+            continue
+        if normalized not in {_ascii_text(existing) for existing in shortened}:
+            shortened.append(without_postcode)
+    return ", ".join(shortened[:3]) or original
 
 
 def coordinate_distance_m(
@@ -74,8 +105,12 @@ def configured_place_match(
 
 def _address_tokens(value: Any) -> list[str]:
     """Normalize accents and punctuation while preserving house numbers."""
+    return re.findall(r"[a-z0-9]+", _ascii_text(value))
+
+
+def _ascii_text(value: Any) -> str:
+    """Normalize accents and case for comparisons."""
     text = unicodedata.normalize("NFKD", str(value or "").casefold())
-    without_accents = "".join(
+    return "".join(
         character for character in text if not unicodedata.combining(character)
     )
-    return re.findall(r"[a-z0-9]+", without_accents)

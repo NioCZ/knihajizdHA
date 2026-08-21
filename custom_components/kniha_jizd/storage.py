@@ -14,10 +14,11 @@ from uuid import uuid4
 
 from homeassistant.core import HomeAssistant
 
+from .address_rules import shorten_address
 from .const import LEARNED_PLACES_FILENAME, RAW_DATA_FILENAME
 
 _MAX_ANCHORS_PER_PLACE = 50
-_RAW_DATA_VERSION = 2
+_RAW_DATA_VERSION = 3
 _LEARNED_PLACES_VERSION = 3
 
 
@@ -102,6 +103,221 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _trusted_odometer_end(segment: dict[str, Any]) -> float | None:
+    """Return an end anchor backed by a real post-disconnect cloud update."""
+    boundary = _optional_float(segment.get("odometer_reconciliation_boundary_km"))
+    if boundary is not None:
+        return boundary
+    source = str(segment.get("odometer_completion_source") or "")
+    if (
+        segment.get("odometer_wait_timed_out")
+        or segment.get("odometer_shared_update")
+        or not source.startswith("post_disconnect_update")
+    ):
+        return None
+    return _optional_float(segment.get("end_odometer_km"))
+
+
+def _segment_distance_weight(segment: dict[str, Any]) -> float:
+    """Estimate only the relative share of a combined odometer increment."""
+    coordinates = (
+        _optional_float(segment.get("start_latitude")),
+        _optional_float(segment.get("start_longitude")),
+        _optional_float(segment.get("end_latitude")),
+        _optional_float(segment.get("end_longitude")),
+    )
+    if all(value is not None for value in coordinates):
+        return max(0.1, _haversine_meters(*coordinates) / 1000)  # type: ignore[arg-type]
+    raw_distance = _optional_float(
+        segment.get("distance_km_raw", segment.get("distance_km"))
+    )
+    return max(0.1, raw_distance or 0.0)
+
+
+def _set_if_changed(segment: dict[str, Any], key: str, value: Any) -> int:
+    """Set one JSON field and report whether it changed."""
+    if segment.get(key) == value:
+        return 0
+    segment[key] = value
+    return 1
+
+
+def _allocate_odometer_group(
+    group: list[dict[str, Any]],
+    anchor_start_km: float,
+    anchor_end_km: float,
+    boundary_source: str,
+) -> int:
+    """Distribute one trusted odometer delta over all unresolved legs."""
+    total_km = anchor_end_km - anchor_start_km
+    if total_km < -0.001 or not group:
+        return 0
+    manual_total = sum(
+        max(0.0, _optional_float(segment.get("distance_km")) or 0.0)
+        for segment in group
+        if segment.get("manual_distance_override")
+    )
+    adjustable = [
+        segment for segment in group if not segment.get("manual_distance_override")
+    ]
+    remaining_km = max(0.0, total_km - manual_total)
+    weights = [_segment_distance_weight(segment) for segment in adjustable]
+    weight_total = sum(weights) or float(len(adjustable) or 1)
+    allocations: list[float] = []
+    allocated = 0.0
+    for index, weight in enumerate(weights):
+        if index == len(weights) - 1:
+            allocation = max(0.0, remaining_km - allocated)
+        else:
+            allocation = remaining_km * weight / weight_total
+            allocated += allocation
+        allocations.append(round(allocation, 3))
+
+    changed = 0
+    allocation_index = 0
+    for segment in group:
+        if "distance_km_raw" not in segment:
+            changed += _set_if_changed(
+                segment, "distance_km_raw", segment.get("distance_km")
+            )
+        hint = round(_segment_distance_weight(segment), 3)
+        changed += _set_if_changed(segment, "distance_hint_km", hint)
+        changed += _set_if_changed(
+            segment, "distance_anchor_start_km", round(anchor_start_km, 3)
+        )
+        changed += _set_if_changed(
+            segment, "distance_anchor_end_km", round(anchor_end_km, 3)
+        )
+        if segment.get("manual_distance_override"):
+            continue
+        distance = allocations[allocation_index]
+        allocation_index += 1
+        changed += _set_if_changed(segment, "distance_km", distance)
+        source = (
+            "odometer_anchor_exact"
+            if len(group) == 1
+            else "odometer_anchor_reconciled_gps_weighted"
+        )
+        changed += _set_if_changed(segment, "distance_reconciliation_source", source)
+    changed += _set_if_changed(
+        group[-1],
+        "odometer_reconciliation_boundary_km",
+        round(anchor_end_km, 3),
+    )
+    changed += _set_if_changed(
+        group[-1], "odometer_reconciliation_boundary_source", boundary_source
+    )
+    return changed
+
+
+def reconcile_odometer_day(
+    segments: list[dict[str, Any]], terminal_anchor_km: float | None = None
+) -> tuple[int, dict[str, Any]]:
+    """Backfill zero/combined legs between trusted odometer anchors."""
+    ordered = sorted(segments, key=lambda item: str(item.get("started_at") or ""))
+    changed = 0
+    group: list[dict[str, Any]] = []
+    anchor_start: float | None = None
+    for segment in ordered:
+        start_value = _optional_float(segment.get("start_odometer_km"))
+        if not group:
+            if anchor_start is None or (
+                start_value is not None and abs(start_value - anchor_start) > 1.0
+            ):
+                anchor_start = start_value
+        group.append(segment)
+        anchor_end = _trusted_odometer_end(segment)
+        if anchor_start is None or anchor_end is None or anchor_end < anchor_start:
+            continue
+        boundary_source = str(
+            segment.get("odometer_reconciliation_boundary_source")
+            or "trusted_segment_end"
+        )
+        changed += _allocate_odometer_group(
+            group, anchor_start, anchor_end, boundary_source
+        )
+        group = []
+        anchor_start = anchor_end
+
+    terminal = _optional_float(terminal_anchor_km)
+    if group and anchor_start is not None and terminal is not None and terminal >= anchor_start:
+        changed += _allocate_odometer_group(
+            group, anchor_start, terminal, "next_segment_start"
+        )
+        group = []
+        anchor_start = terminal
+    for segment in group:
+        if (
+            not segment.get("manual_distance_override")
+            and (_optional_float(segment.get("distance_km")) or 0.0) <= 0.001
+        ):
+            changed += _set_if_changed(
+                segment,
+                "distance_reconciliation_source",
+                "awaiting_future_odometer_anchor",
+            )
+    return changed, odometer_day_check(ordered)
+
+
+def odometer_day_check(segments: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare assigned segment kilometres with the latest trusted day anchor."""
+    ordered = sorted(segments, key=lambda item: str(item.get("started_at") or ""))
+    first_start = next(
+        (
+            value
+            for segment in ordered
+            if (value := _optional_float(segment.get("start_odometer_km")))
+            is not None
+        ),
+        None,
+    )
+    last_end: float | None = None
+    last_boundary_index = -1
+    for index, segment in enumerate(ordered):
+        boundary = _trusted_odometer_end(segment)
+        if boundary is not None:
+            last_end = boundary
+            last_boundary_index = index
+    verified_segments = (
+        ordered[: last_boundary_index + 1] if last_boundary_index >= 0 else []
+    )
+    assigned_km = round(
+        sum(
+            max(0.0, _optional_float(item.get("distance_km")) or 0.0)
+            for item in verified_segments
+        ),
+        3,
+    )
+    pending_km = round(
+        sum(
+            max(0.0, _optional_float(item.get("distance_km")) or 0.0)
+            for item in ordered[last_boundary_index + 1 :]
+        ),
+        3,
+    )
+    anchor_delta = (
+        round(max(0.0, last_end - first_start), 3)
+        if first_start is not None and last_end is not None
+        else None
+    )
+    difference = (
+        round(assigned_km - anchor_delta, 3) if anchor_delta is not None else None
+    )
+    unresolved = max(0, len(ordered) - last_boundary_index - 1)
+    return {
+        "start_odometer_km": first_start,
+        "end_odometer_km": last_end,
+        "odometer_delta_km": anchor_delta,
+        "assigned_segment_km": assigned_km,
+        "pending_segment_km": pending_km,
+        "difference_km": difference,
+        "unresolved_segments": unresolved,
+        "consistent": (
+            difference is not None and abs(difference) <= 0.05 and unresolved == 0
+        ),
+    }
+
+
 class KnihaJizdRepository:
     """Serialize access to the two user-visible JSON files."""
 
@@ -124,7 +340,41 @@ class KnihaJizdRepository:
                 self.raw_path, {"version": _RAW_DATA_VERSION, "segments": []}
             )
         else:
-            self._load_raw_sync()
+            raw_data = self._load_raw_sync()
+            changed = 0
+            for segment in raw_data["segments"]:
+                if not isinstance(segment, dict):
+                    continue
+                for side in ("start", "end"):
+                    address_key = f"{side}_address"
+                    raw_key = f"{side}_address_raw"
+                    current_address = segment.get(address_key)
+                    if raw_key not in segment and current_address:
+                        segment[raw_key] = current_address
+                        changed += 1
+                    if segment.get(f"{side}_address_manual"):
+                        continue
+                    shortened = shorten_address(segment.get(raw_key) or current_address)
+                    if shortened and current_address != shortened:
+                        segment[address_key] = shortened
+                        changed += 1
+            dates = {
+                str(segment.get("date"))
+                for segment in raw_data["segments"]
+                if isinstance(segment, dict) and segment.get("date")
+            }
+            for local_date in dates:
+                day_segments = [
+                    segment
+                    for segment in raw_data["segments"]
+                    if isinstance(segment, dict)
+                    and str(segment.get("date")) == local_date
+                ]
+                day_changed, _ = reconcile_odometer_day(day_segments)
+                changed += day_changed
+            if changed or raw_data.get("version") != _RAW_DATA_VERSION:
+                raw_data["version"] = _RAW_DATA_VERSION
+                _write_json_atomic(self.raw_path, raw_data)
 
         if not self.places_path.exists():
             _write_json_atomic(
@@ -185,17 +435,60 @@ class KnihaJizdRepository:
         _write_json_atomic(self.raw_path, data)
         return True
 
+    async def async_reconcile_day(
+        self, local_date: str, terminal_anchor_km: float | None = None
+    ) -> dict[str, Any]:
+        """Reconcile one day in the executor and return its odometer check."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._reconcile_day_sync, local_date, terminal_anchor_km
+            )
+
+    def _reconcile_day_sync(
+        self, local_date: str, terminal_anchor_km: float | None = None
+    ) -> dict[str, Any]:
+        """Backfill combined cloud increments without blocking Home Assistant."""
+        data = self._load_raw_sync()
+        day_segments = [
+            segment
+            for segment in data["segments"]
+            if isinstance(segment, dict) and str(segment.get("date")) == local_date
+        ]
+        changed, check = reconcile_odometer_day(day_segments, terminal_anchor_km)
+        if changed:
+            data["version"] = _RAW_DATA_VERSION
+            _write_json_atomic(self.raw_path, data)
+        return check
+
     async def async_update_trip(
-        self, segment_id: str, purpose: str, trip_type: str
+        self,
+        segment_id: str,
+        purpose: str,
+        trip_type: str,
+        start_address: Any = None,
+        end_address: Any = None,
+        distance_km: Any = None,
     ) -> int:
         """Update one persisted journey and return the number of changed rows."""
         async with self._lock:
             return await self.hass.async_add_executor_job(
-                self._update_trip_sync, segment_id, purpose, trip_type
+                self._update_trip_sync,
+                segment_id,
+                purpose,
+                trip_type,
+                start_address,
+                end_address,
+                distance_km,
             )
 
     def _update_trip_sync(
-        self, segment_id: str, purpose: str, trip_type: str
+        self,
+        segment_id: str,
+        purpose: str,
+        trip_type: str,
+        start_address: Any = None,
+        end_address: Any = None,
+        distance_km: Any = None,
     ) -> int:
         """Apply a manual correction to every segment of the same journey."""
         data = self._load_raw_sync()
@@ -219,7 +512,27 @@ class KnihaJizdRepository:
             segment["classification_source"] = "manual_panel"
             segment["manually_edited_at"] = edited_at
             changed += 1
+        if start_address is not None:
+            target["start_address"] = str(start_address).strip()
+            target["start_address_manual"] = True
+        if end_address is not None:
+            target["end_address"] = str(end_address).strip()
+            target["end_address_manual"] = True
+        manual_distance = _optional_float(distance_km)
+        if manual_distance is not None:
+            target["distance_km"] = round(max(0.0, manual_distance), 3)
+            target["manual_distance_override"] = True
+            target["distance_reconciliation_source"] = "manual_panel"
         if changed:
+            target_date = str(target.get("date") or "")
+            if target_date:
+                reconcile_odometer_day(
+                    [
+                        segment
+                        for segment in segments
+                        if str(segment.get("date")) == target_date
+                    ]
+                )
             _write_json_atomic(self.raw_path, data)
         return changed
 
@@ -457,6 +770,7 @@ def calculate_statistics(
         "today_business_km": _sum_distance(today_segments, "business"),
         "today_private_km": _sum_distance(today_segments, "private"),
         "today_rows": deepcopy_json(today_segments),
+        "today_odometer_check": odometer_day_check(today_segments),
         "last_segment": deepcopy_json(last_segment),
     }
 

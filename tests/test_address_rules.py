@@ -106,6 +106,20 @@ class AddressRulesTest(unittest.TestCase):
 
         self.assertEqual(match["method"], "address")
 
+    def test_czech_address_is_shortened(self) -> None:
+        """Drop domestic postcode, country and administrative region."""
+        shortened = MODULE.shorten_address(
+            "Vrchlického 699, 767 01 Kroměříž, okres Kroměříž, Zlínský kraj, Česko"
+        )
+
+        self.assertEqual(shortened, "Vrchlického 699, Kroměříž")
+
+    def test_foreign_address_stays_complete(self) -> None:
+        """Keep country and postcode when they identify a foreign destination."""
+        address = "Universitätsstraße 1, 1010 Wien, Österreich"
+
+        self.assertEqual(MODULE.shorten_address(address), address)
+
 
 if __name__ == "__main__":
     unittest.main()

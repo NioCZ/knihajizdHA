@@ -66,8 +66,10 @@ administrátorům.
 ## Jak probíhá jízda
 
 - Přechod Android Auto `off → on` uloží čas, stav tachometru a výchozí polohu.
-- Přechod `on → off` okamžitě zachytí cílovou polohu. Mapové rozpoznání a
-  actionable notification se spustí ihned, souběžně s tachometrem.
+- Přechod `on → off` okamžitě zachytí záložní cílovou polohu, požádá Companion
+  aplikaci o aktualizaci GPS a výchozích 60 sekund čeká na její ustálení. Potom
+  spustí mapové rozpoznání a actionable notification. Tachometr se po celou dobu
+  zpracovává souběžně.
 - Primární signál finálního tachometru vyžaduje čas `last_updated` (nebo HA
   metadata `State.last_updated`) **po** odpojení a současně vyšší stav počitadla
   než na začátku segmentu. U chybějícího počátečního stavu stačí nový čas a
@@ -80,7 +82,14 @@ administrátorům.
   v okruhu 3 000 m vyhledají a obodují odborné instituce a odešle se notifikace.
 
 Na notifikaci lze odpovědět ještě před dokončením tachometru. Klasifikace se uloží
-do HA Store a segment se automaticky zapíše, jakmile získá finální kilometry.
+do HA Store a segment se automaticky zapíše, jakmile získá finální kilometry. Po
+úspěšné volbě integrace odešle pro stejný `tag` příkaz `clear_notification`, takže
+původní otázka z telefonu zmizí.
+
+Pokud další jízda začne během čekání na polohu, její start se použije jako přesný
+cíl předchozího úseku. Také později se blízký start srovná s předchozím cílem,
+aby řetězec neměl dvě odlišné adresy pro stejné parkování. Při restartu dlouho po
+ukončení se použije původní záložní poloha místo aktuální polohy telefonu.
 
 ### Nastavený domov a firma
 
@@ -156,7 +165,23 @@ Rozpracovaný řetězec je uložen v HA Store a přežije restart Home Assistant
 Aktivní jízda, čekající ukončení i nezodpovězená notifikace jsou uloženy v interním
 HA Store. Restart Home Assistantu proto rozpracovanou jízdu nezahodí. Pokud začne
 další jízda dříve, než cloud doplní předchozí tachometr, její počáteční stav se po
-doručení předchozí finální hodnoty opraví na tuto hodnotu.
+doručení důvěryhodné předchozí finální hodnoty opraví na tuto hodnotu. Aktualizace
+doručená až po startu další jízdy se označí jako sdílená a čeká na zpětné
+vyrovnání, aby se celý přírůstek nepřipsal nesprávnému úseku.
+
+### Zpětná kontrola kilometrů
+
+Cloud může jednu aktualizaci tachometru doručit až po zahájení dalšího úseku.
+Taková hodnota se už nepřiřadí celá prvnímu nebo druhému úseku. Segmenty mezi
+posledním a následujícím důvěryhodným stavem odometru se zpětně vyhodnotí jako
+skupina. Celkový přírůstek se rozdělí podle poměru jejich GPS vzdáleností a součet
+musí odpovídat rozdílu obou stavů tachometru. Čerstvý stav při příštím odjezdu
+může předchozí úsek uzavřít přesně ještě před další jízdou.
+
+Panel ukazuje **Denní kontrolu km**: přírůstek odometru, součet přiřazených
+segmentů, rozdíl a počet dosud neuzavřených úseků. Raw data zachovávají původní
+`distance_km_raw` i způsob výsledku v `distance_reconciliation_source`. Ručně
+opravené km mají `manual_distance_override: true` a automatika je nepřepíše.
 
 ### Akce notifikace
 
@@ -174,8 +199,10 @@ Volba se spolu se souřadnicemi a typem jízdy uloží do
 
 Panel **Kniha jízd** zobrazuje všechny dnešní uložené i rozpracované segmenty.
 U každého ukazuje adresy, kilometry, zákazníka, typ a stav zpracování. Pole
-**Zákazník / účel** a **Typ** lze upravit tlačítkem **Uložit**. Zákazník je u
-služební cesty volitelný; prázdná hodnota se v souhrnném Excelu nezobrazí.
+**Odkud**, **Kam**, **km**, **Zákazník / účel** a **Typ** lze upravit tlačítkem
+**Uložit**. Zákazník je u služební cesty volitelný; prázdná hodnota se v
+souhrnném Excelu nezobrazí. Příchozí aktualizace HA během psaní ani otevřený
+výběr typu už tabulku nepřekreslí.
 
 To funguje také v případě, kdy byla mobilní notifikace omylem smazána: segment
 zůstane ve stavu **Čeká na zařazení** a lze jej dokončit přímo v tabulce. Pokud
@@ -228,6 +255,9 @@ zákazníkovi přepsat globální poloměr.
 `segments`. Každý segment obsahuje stabilní ID, lokální datum, přesné UTC časy,
 oba raw stavy tachometru, čas finální aktualizace, příznak timeoutu, celé adresy,
 GPS, účel, typ jízdy, zdroj klasifikace a mapový odhad.
+Pro české cíle se v běžných sloupcích odstraní PSČ, stát a administrativní kraj;
+plná původní hodnota zůstává v `start_address_raw` a `end_address_raw`. Zahraniční
+adresa se nezkracuje.
 U nových míst navíc obsahuje seřazené `map_candidates`, použitý vyhledávací okruh
 a případně vybraného mapového kandidáta.
 

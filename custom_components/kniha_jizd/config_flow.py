@@ -21,6 +21,7 @@ from .const import (
     CONF_HOME_LATITUDE,
     CONF_HOME_LONGITUDE,
     CONF_INSTITUTION_SEARCH_RADIUS,
+    CONF_LOCATION_SETTLE_SECONDS,
     CONF_NOMINATIM_EMAIL,
     CONF_NOMINATIM_URL,
     CONF_NOMINATIM_USER_AGENT,
@@ -43,6 +44,7 @@ from .const import (
     DEFAULT_HOME_LATITUDE,
     DEFAULT_HOME_LONGITUDE,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
+    DEFAULT_LOCATION_SETTLE_SECONDS,
     DEFAULT_NOMINATIM_URL,
     DEFAULT_NOMINATIM_USER_AGENT,
     DEFAULT_NOTIFY_SERVICE,
@@ -91,6 +93,15 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             ): vol.All(
                 vol.Coerce(int),
                 vol.Range(min=60, max=1800),
+            ),
+            vol.Required(
+                CONF_LOCATION_SETTLE_SECONDS,
+                default=defaults.get(
+                    CONF_LOCATION_SETTLE_SECONDS, DEFAULT_LOCATION_SETTLE_SECONDS
+                ),
+            ): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=0, max=180),
             ),
             vol.Required(
                 CONF_RETURN_CONTEXT_HOURS,
@@ -190,7 +201,7 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
 class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kniha jízd."""
 
-    VERSION = 6
+    VERSION = 7
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

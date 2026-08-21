@@ -42,3 +42,23 @@ update_trip:
               value: business
             - label: Soukromá
               value: private
+    start_address:
+      name: Místo odjezdu
+      required: false
+      selector:
+        text:
+    end_address:
+      name: Místo příjezdu
+      required: false
+      selector:
+        text:
+    distance_km:
+      name: Kilometry
+      description: Volitelná ruční oprava délky konkrétního segmentu.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 5000
+          step: 0.001
+          unit_of_measurement: km

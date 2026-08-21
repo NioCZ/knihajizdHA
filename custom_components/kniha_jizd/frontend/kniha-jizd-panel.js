@@ -11,6 +11,8 @@ class KnihaJizdPanel extends HTMLElement {
 
   set hass(value) {
     this._hass = value;
+    const activeElement = this.shadowRoot?.activeElement;
+    if (activeElement?.matches?.("input, select, textarea")) return;
     this._render();
   }
 
@@ -86,6 +88,10 @@ class KnihaJizdPanel extends HTMLElement {
     const segmentId = row?.dataset?.segmentId;
     const purpose = row?.querySelector(".trip-purpose")?.value?.trim() || "";
     const tripType = row?.querySelector(".trip-type")?.value || "business";
+    const startAddress = row?.querySelector(".trip-start")?.value?.trim() || "";
+    const endAddress = row?.querySelector(".trip-end")?.value?.trim() || "";
+    const distanceValue = row?.querySelector(".trip-distance")?.value;
+    const distanceKm = distanceValue === "" ? undefined : Number(distanceValue);
     if (!segmentId) return;
     this._savingTrip = segmentId;
     this._message = "Ukládám opravu jízdy…";
@@ -95,6 +101,9 @@ class KnihaJizdPanel extends HTMLElement {
         segment_id: segmentId,
         purpose,
         trip_type: tripType,
+        start_address: startAddress,
+        end_address: endAddress,
+        ...(Number.isFinite(distanceKm) ? { distance_km: distanceKm } : {}),
       });
       this._message = "Jízda byla upravena. Pokud tachometr ještě čeká, dokončí se automaticky.";
     } catch (error) {
@@ -116,15 +125,15 @@ class KnihaJizdPanel extends HTMLElement {
       const disabled = !trip.editable || this._savingTrip === trip.id;
       return `<tr data-segment-id="${this._text(trip.id)}">
         <td>${this._time(trip.started_at)}</td>
-        <td>${this._text(trip.start_address)}</td>
-        <td>${this._text(trip.end_address)}</td>
-        <td>${this._number(trip.distance_km)}</td>
+        <td><input class="trip-start" type="text" value="${this._text(trip.start_address, "")}" placeholder="Místo odjezdu" ${disabled ? "disabled" : ""}></td>
+        <td><input class="trip-end" type="text" value="${this._text(trip.end_address, "")}" placeholder="Místo příjezdu" ${disabled ? "disabled" : ""}></td>
+        <td><input class="trip-distance" type="number" min="0" step="0.001" value="${trip.distance_km ?? ""}" ${disabled ? "disabled" : ""}></td>
         <td><input class="trip-purpose" type="text" value="${this._text(trip.purpose, "")}" placeholder="Volitelný zákazník / účel" ${disabled ? "disabled" : ""}></td>
         <td><select class="trip-type" ${disabled ? "disabled" : ""}>
           <option value="business" ${privateSelected ? "" : "selected"}>Služební</option>
           <option value="private" ${privateSelected ? "selected" : ""}>Soukromá</option>
         </select></td>
-        <td>${this._statusLabel(trip.status)}${trip.odometer_ready ? "" : " · čeká km"}</td>
+        <td>${this._statusLabel(trip.status)}${trip.odometer_ready ? "" : " · čeká km"}<small>${this._text(trip.distance_reconciliation_source)}</small></td>
         <td><button class="save-trip" ${disabled ? "disabled" : ""}>Uložit</button></td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
@@ -190,6 +199,7 @@ class KnihaJizdPanel extends HTMLElement {
     const lastTrip = this._entity("last_trip");
     const exportEntity = this._entity("export");
     const attrs = status?.attributes || {};
+    const odometerCheck = attrs.odometer_day_check || {};
     const todayTripRows = attrs.today_trips || [];
     const last = lastTrip?.attributes || {};
     const rawDownloadUrl = exportEntity?.attributes?.download_url;
@@ -220,7 +230,8 @@ class KnihaJizdPanel extends HTMLElement {
         .month-control { display:flex; flex-direction:column; gap:6px; max-width:220px; margin-top:16px; }
         .month-control label { color:var(--secondary-text-color); }
         input[type="month"] { color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; padding:10px 12px; font:inherit; }
-        input[type="text"], select { width:100%; min-width:130px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:7px; padding:8px; font:inherit; }
+        input[type="text"], input[type="number"], select { width:100%; min-width:130px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:7px; padding:8px; font:inherit; }
+        .trip-distance { min-width:85px !important; width:95px !important; }
         button, a.button { border:0; border-radius:10px; padding:12px 18px; font:inherit; font-weight:600; cursor:pointer; text-decoration:none; }
         button { color:var(--text-primary-color,#fff); background:var(--primary-color); }
         button:disabled { opacity:.6; cursor:wait; } a.button { color:var(--primary-color); background:var(--secondary-background-color); }
@@ -261,8 +272,11 @@ class KnihaJizdPanel extends HTMLElement {
             <dt>Čeká na cíl celé jízdy</dt><dd>${this._text(attrs.transient_count, "0")}</dd>
             <dt>Návaznost návratu</dt><dd>${this._text(attrs.return_context_hours)} h</dd>
             <dt>Limit mezizastávky</dt><dd>${this._text(attrs.transient_stop_minutes)} min</dd>
+            <dt>Ustálení cíle</dt><dd>${this._text(attrs.location_settle_seconds)} s</dd>
+            <dt>Denní kontrola km</dt><dd>${odometerCheck.consistent ? "Sedí" : "Čeká / rozdíl"} · odometer ${this._number(odometerCheck.odometer_delta_km)} km · potvrzené segmenty ${this._number(odometerCheck.assigned_segment_km)} km · čekající ${this._number(odometerCheck.pending_segment_km)} km · rozdíl ${this._number(odometerCheck.difference_km)} km</dd>
             <dt>Domov</dt><dd>${this._text(attrs.home_address)} · ${this._text(attrs.home_latitude)}, ${this._text(attrs.home_longitude)}</dd>
             <dt>Firma</dt><dd>${this._text(attrs.company_address)} · ${this._text(attrs.company_latitude)}, ${this._text(attrs.company_longitude)} → ${this._text(attrs.company_label)}</dd>
+            <dt>Poslední volba z telefonu</dt><dd>${attrs.last_notification_action ? `${this._text(attrs.last_notification_action.action)} · ${this._text(attrs.last_notification_action.processed_at)}` : "—"}</dd>
             <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
           </dl></article>
           <article class="card"><h2>Poslední jízda</h2><dl>
