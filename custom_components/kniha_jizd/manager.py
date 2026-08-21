@@ -26,6 +26,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .address_rules import configured_place_match
 from .const import (
     ACTION_CONFIRM,
     ACTION_NEW,
@@ -33,7 +34,14 @@ from .const import (
     ACTION_PRIVATE,
     ACTION_RETURN,
     CONF_ADDRESS_ENTITY,
+    CONF_COMPANY_ADDRESS,
+    CONF_COMPANY_LATITUDE,
+    CONF_COMPANY_LABEL,
+    CONF_COMPANY_LONGITUDE,
     CONF_GPS_ENTITY,
+    CONF_HOME_ADDRESS,
+    CONF_HOME_LATITUDE,
+    CONF_HOME_LONGITUDE,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_NOTIFY_SERVICE,
     CONF_ODOMETER_ENTITY,
@@ -103,6 +111,13 @@ class KnihaJizdManager:
         self.wait_timeout = float(config[CONF_WAIT_TIMEOUT])
         self.return_context_hours = float(config[CONF_RETURN_CONTEXT_HOURS])
         self.transient_stop_minutes = float(config[CONF_TRANSIENT_STOP_MINUTES])
+        self.home_address = str(config.get(CONF_HOME_ADDRESS, "")).strip()
+        self.home_latitude = _as_float(config.get(CONF_HOME_LATITUDE))
+        self.home_longitude = _as_float(config.get(CONF_HOME_LONGITUDE))
+        self.company_address = str(config.get(CONF_COMPANY_ADDRESS, "")).strip()
+        self.company_latitude = _as_float(config.get(CONF_COMPANY_LATITUDE))
+        self.company_longitude = _as_float(config.get(CONF_COMPANY_LONGITUDE))
+        self.company_label = str(config.get(CONF_COMPANY_LABEL, "")).strip()
         self.place_radius = float(config[CONF_PLACE_RADIUS])
         self.institution_search_radius = float(
             config[CONF_INSTITUTION_SEARCH_RADIUS]
@@ -352,6 +367,13 @@ class KnihaJizdManager:
             "transient_count": len(self._transient),
             "return_context_hours": self.return_context_hours,
             "transient_stop_minutes": self.transient_stop_minutes,
+            "home_address": self.home_address or None,
+            "home_latitude": self.home_latitude,
+            "home_longitude": self.home_longitude,
+            "company_address": self.company_address or None,
+            "company_latitude": self.company_latitude,
+            "company_longitude": self.company_longitude,
+            "company_label": self.company_label or None,
             "today_trips": self._today_trip_rows(),
             "trigger_entity": self.trigger_entity,
             "trigger_state": trigger_state.state if trigger_state else None,
@@ -483,9 +505,7 @@ class KnihaJizdManager:
             raise ValueError("trip_type must be business or private")
         selected_purpose = purpose.strip()
         if trip_type == TRIP_TYPE_PRIVATE:
-            selected_purpose = selected_purpose or "Soukromá"
-        elif not selected_purpose:
-            raise ValueError("purpose is required for a business trip")
+            selected_purpose = "Soukromá"
 
         runtime = self._find_runtime_segment(segment_id)
         if runtime is not None:
@@ -509,9 +529,9 @@ class KnihaJizdManager:
                 purpose=selected_purpose,
                 trip_type=trip_type,
                 source="manual_panel",
-                learn_place=True,
-                learned_label=selected_purpose,
-                place_role=PLACE_ROLE_CLIENT,
+                learn_place=bool(selected_purpose),
+                learned_label=selected_purpose or None,
+                place_role=PLACE_ROLE_CLIENT if selected_purpose else None,
             )
             return {
                 "updated": 1,
@@ -671,6 +691,8 @@ class KnihaJizdManager:
                 "map_candidates": [],
                 "candidate_search_radius_m": None,
                 "selected_map_candidate": None,
+                "configured_place": None,
+                "configured_place_match": None,
                 "validation_error": (
                     None if start_odometer is not None else "missing_start_odometer"
                 ),
@@ -786,6 +808,8 @@ class KnihaJizdManager:
             or segment.get("return_context")
             or self._journey_return_context(segment)
         )
+        if await self._async_handle_configured_destination(segment):
+            return
         learned_place = await self.repository.async_find_place(
             _as_float(segment.get("end_latitude")),
             _as_float(segment.get("end_longitude")),
@@ -876,6 +900,9 @@ class KnihaJizdManager:
             ):
                 segment["end_address"] = map_result["display_name"]
 
+        if await self._async_handle_configured_destination(segment):
+            return
+
         transient_stop = detect_transient_stop(map_result, candidates)
         if transient_stop is not None:
             segment["transient_stop"] = transient_stop
@@ -891,6 +918,67 @@ class KnihaJizdManager:
             )
 
         await self._async_queue_pending(segment)
+
+    async def _async_handle_configured_destination(
+        self, segment: dict[str, Any]
+    ) -> bool:
+        """Apply the configured home/company rules to a completed destination."""
+        addresses = (segment.get("end_address"), segment.get("map_address"))
+        home_match = configured_place_match(
+            segment.get("end_latitude"),
+            segment.get("end_longitude"),
+            addresses,
+            self.home_address,
+            self.home_latitude,
+            self.home_longitude,
+            self.place_radius,
+        )
+        if home_match is not None:
+            segment["configured_place"] = "home"
+            segment["configured_place_match"] = home_match
+            segment["map_estimate"] = "Domov"
+            segment["return_destination_label"] = "Domov"
+            if segment.get("return_context"):
+                await self._async_finalize_return(
+                    segment,
+                    source="configured_home_return",
+                    learn_place=True,
+                )
+                return True
+            segment["return_context"] = {
+                "suggested": True,
+                "reason": "configured_home_destination",
+                "previous_segment_id": None,
+                "previous_purpose": None,
+            }
+            await self._async_queue_pending(segment)
+            return True
+
+        company_match = configured_place_match(
+            segment.get("end_latitude"),
+            segment.get("end_longitude"),
+            addresses,
+            self.company_address,
+            self.company_latitude,
+            self.company_longitude,
+            self.place_radius,
+        )
+        if company_match is not None:
+            label = self.company_label or "Firma"
+            segment["configured_place"] = "company"
+            segment["configured_place_match"] = company_match
+            segment["map_estimate"] = label
+            await self._async_finalize_segment(
+                segment,
+                purpose=label,
+                trip_type=TRIP_TYPE_BUSINESS,
+                source="configured_company",
+                learn_place=True,
+                learned_label=label,
+                place_role=PLACE_ROLE_CLIENT,
+            )
+            return True
+        return False
 
     async def _async_queue_pending(self, segment: dict[str, Any]) -> None:
         """Move a completed segment to the notification decision queue."""
@@ -1378,7 +1466,7 @@ class KnihaJizdManager:
         previous_purpose = (
             context.get("previous_purpose") if isinstance(context, dict) else None
         )
-        purpose = str(previous_purpose or "Služební návrat")
+        purpose = str(previous_purpose or "")
         segment["journey_role"] = "return"
         segment["return_of_segment_id"] = (
             context.get("previous_segment_id") if isinstance(context, dict) else None
@@ -1454,7 +1542,7 @@ class KnihaJizdManager:
             try:
                 await self._async_persist_segment(
                     segment,
-                    purpose=str(segment.get("purpose") or "Neznámý účel"),
+                    purpose=str(segment.get("purpose") or ""),
                     trip_type=str(segment.get("trip_type") or TRIP_TYPE_PRIVATE),
                     source=str(segment.get("classification_source") or "unknown"),
                     learn_place=bool(options.get("learn_place")),

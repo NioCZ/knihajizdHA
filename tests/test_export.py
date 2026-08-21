@@ -44,7 +44,7 @@ class ExportExcelTest(unittest.TestCase):
             self.assertEqual(summary["F2"].value, 32.65)
             self.assertEqual(summary["G2"].value, 8.6)
             self.assertIn("Průmyslová 12", summary["C2"].value)
-            self.assertIn("Vinohradská 50", summary["C2"].value)
+            self.assertNotIn("Vinohradská 50", summary["C2"].value)
 
             raw = workbook["Raw data"]
             headers = [cell.value for cell in raw[1]]
@@ -52,6 +52,28 @@ class ExportExcelTest(unittest.TestCase):
             self.assertIn("odometer_wait_timed_out", headers)
             self.assertIn("map_candidates", headers)
             self.assertIn("candidate_search_radius_m", headers)
+
+    def test_private_only_day_hides_route_and_customer(self) -> None:
+        """A private report row contains only its date and private kilometres."""
+        rows = EXPORT_MODULE._build_summary_rows(
+            [
+                {
+                    "date": "2026-08-20",
+                    "started_at": "2026-08-20T08:00:00+00:00",
+                    "start_address": "Soukromý domov",
+                    "end_address": "Soukromý cíl",
+                    "purpose": "Soukromá",
+                    "trip_type": "private",
+                    "distance_km": 12.5,
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["Start/Odkud"], "")
+        self.assertEqual(rows[0]["Přes"], "")
+        self.assertEqual(rows[0]["Cíl/Kam"], "")
+        self.assertEqual(rows[0]["Zákazník"], "")
+        self.assertEqual(rows[0]["Soukromé km"], 12.5)
 
     def test_month_filter_excludes_other_periods(self) -> None:
         """Keep both workbook sheets inside the requested calendar month."""

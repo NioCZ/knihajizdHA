@@ -31,6 +31,12 @@ Výchozí nastavení počítá s těmito objekty:
 - `sensor.skoda_odometer`
 - `notify.mobile_app_telefon`
 
+Jako výchozí zvláštní místa jsou nastavená adresa domova
+`Vrchlického 699, Kroměříž` a adresa firmy `Na Jetelce 69` se štítkem
+`Altium`. Domov používá bod `49.2958889, 17.3934167`, firma bod
+`50.1135278, 14.4978056`. Adresy, souřadnice i název lze změnit přes
+**Konfigurovat**.
+
 Nastavení lze později změnit přes tlačítko **Konfigurovat** u integrace; změna
 integraci bezpečně reloaduje.
 
@@ -75,6 +81,21 @@ administrátorům.
 
 Na notifikaci lze odpovědět ještě před dokončením tachometru. Klasifikace se uloží
 do HA Store a segment se automaticky zapíše, jakmile získá finální kilometry.
+
+### Nastavený domov a firma
+
+Je-li dostupná GPS, integrace porovná cíl se zadanými souřadnicemi a použije
+**Poloměr potvrzeného místa** (výchozí 1 000 m). Text telefonu pak nemůže
+přebít GPS mimo tento okruh. Jen při chybějící GPS se krátká nastavená adresa
+porovnává s celou geokódovanou adresou: musí souhlasit ulice, číslo domu a
+všechny další zadané části. PSČ, stát, interpunkce ani diakritika shodu
+neovlivní. Použitá metoda a vzdálenost se ukládají do
+`configured_place_match` v raw datech.
+
+- `Vrchlického 699, Kroměříž` se rozpozná jako **Domov**. Při platné návaznosti
+  na předchozího zákazníka se automaticky použije služební návrat; bez návaznosti
+  se integrace zeptá, protože cesta domů může být také soukromá.
+- `Na Jetelce 69` se automaticky uloží jako služební cíl **Altium**.
 
 ### Služební návraty domů, na firmu nebo do hotelu
 
@@ -153,7 +174,8 @@ Volba se spolu se souřadnicemi a typem jízdy uloží do
 
 Panel **Kniha jízd** zobrazuje všechny dnešní uložené i rozpracované segmenty.
 U každého ukazuje adresy, kilometry, zákazníka, typ a stav zpracování. Pole
-**Zákazník / účel** a **Typ** lze upravit tlačítkem **Uložit**.
+**Zákazník / účel** a **Typ** lze upravit tlačítkem **Uložit**. Zákazník je u
+služební cesty volitelný; prázdná hodnota se v souhrnném Excelu nezobrazí.
 
 To funguje také v případě, kdy byla mobilní notifikace omylem smazána: segment
 zůstane ve stavu **Čeká na zařazení** a lze jej dokončit přímo v tabulce. Pokud
@@ -234,8 +256,12 @@ Po exportu vznikne náhodný odkaz platný 15 minut. Díky tomu report s adresam
 nemusí ležet ve veřejně dostupném `/config/www`. Nový export starý odkaz zneplatní.
 
 - **Kniha jízd**: jeden řádek na den vybraného měsíce, trasa `Start/Odkud → Přes → Cíl/Kam`,
-  unikátní zákazníci a součty služebních/soukromých kilometrů.
+  unikátní zákazníci a součty služebních/soukromých kilometrů. Soukromé segmenty
+  přispívají pouze do **Soukromé km**; jejich adresy ani interní účel se do
+  souhrnné trasy a zákazníků nevkládají. U čistě soukromého dne proto zůstávají
+  sloupce Odkud/Přes/Kam/Zákazník prázdné.
 - **Raw data**: všechny segmenty vybraného měsíce ve stejných polích jako JSON log.
+  Zde zůstávají původní adresy i u soukromých jízd pro případný audit a opravu.
 
 ## Mapové služby a soukromí
 

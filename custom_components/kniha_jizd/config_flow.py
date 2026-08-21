@@ -12,7 +12,14 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_ADDRESS_ENTITY,
+    CONF_COMPANY_ADDRESS,
+    CONF_COMPANY_LATITUDE,
+    CONF_COMPANY_LABEL,
+    CONF_COMPANY_LONGITUDE,
     CONF_GPS_ENTITY,
+    CONF_HOME_ADDRESS,
+    CONF_HOME_LATITUDE,
+    CONF_HOME_LONGITUDE,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_NOMINATIM_EMAIL,
     CONF_NOMINATIM_URL,
@@ -27,7 +34,14 @@ from .const import (
     CONF_TRIGGER_ENTITY,
     CONF_WAIT_TIMEOUT,
     DEFAULT_ADDRESS_ENTITY,
+    DEFAULT_COMPANY_ADDRESS,
+    DEFAULT_COMPANY_LATITUDE,
+    DEFAULT_COMPANY_LABEL,
+    DEFAULT_COMPANY_LONGITUDE,
     DEFAULT_GPS_ENTITY,
+    DEFAULT_HOME_ADDRESS,
+    DEFAULT_HOME_LATITUDE,
+    DEFAULT_HOME_LONGITUDE,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_NOMINATIM_URL,
     DEFAULT_NOMINATIM_USER_AGENT,
@@ -96,6 +110,38 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 vol.Coerce(int),
                 vol.Range(min=5, max=180),
             ),
+            vol.Optional(
+                CONF_HOME_ADDRESS,
+                default=defaults.get(CONF_HOME_ADDRESS, DEFAULT_HOME_ADDRESS),
+            ): selector.TextSelector(),
+            vol.Optional(
+                CONF_HOME_LATITUDE,
+                default=defaults.get(CONF_HOME_LATITUDE, DEFAULT_HOME_LATITUDE),
+            ): vol.All(vol.Coerce(float), vol.Range(min=-90, max=90)),
+            vol.Optional(
+                CONF_HOME_LONGITUDE,
+                default=defaults.get(CONF_HOME_LONGITUDE, DEFAULT_HOME_LONGITUDE),
+            ): vol.All(vol.Coerce(float), vol.Range(min=-180, max=180)),
+            vol.Optional(
+                CONF_COMPANY_ADDRESS,
+                default=defaults.get(CONF_COMPANY_ADDRESS, DEFAULT_COMPANY_ADDRESS),
+            ): selector.TextSelector(),
+            vol.Optional(
+                CONF_COMPANY_LATITUDE,
+                default=defaults.get(
+                    CONF_COMPANY_LATITUDE, DEFAULT_COMPANY_LATITUDE
+                ),
+            ): vol.All(vol.Coerce(float), vol.Range(min=-90, max=90)),
+            vol.Optional(
+                CONF_COMPANY_LONGITUDE,
+                default=defaults.get(
+                    CONF_COMPANY_LONGITUDE, DEFAULT_COMPANY_LONGITUDE
+                ),
+            ): vol.All(vol.Coerce(float), vol.Range(min=-180, max=180)),
+            vol.Optional(
+                CONF_COMPANY_LABEL,
+                default=defaults.get(CONF_COMPANY_LABEL, DEFAULT_COMPANY_LABEL),
+            ): selector.TextSelector(),
             vol.Required(
                 CONF_PLACE_RADIUS,
                 default=defaults.get(CONF_PLACE_RADIUS, DEFAULT_PLACE_RADIUS),
@@ -144,7 +190,7 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
 class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kniha jízd."""
 
-    VERSION = 4
+    VERSION = 6
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

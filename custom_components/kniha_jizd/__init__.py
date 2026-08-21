@@ -22,6 +22,13 @@ from .const import (
     ATTR_PURPOSE,
     ATTR_SEGMENT_ID,
     ATTR_TRIP_TYPE,
+    CONF_COMPANY_ADDRESS,
+    CONF_COMPANY_LATITUDE,
+    CONF_COMPANY_LABEL,
+    CONF_COMPANY_LONGITUDE,
+    CONF_HOME_ADDRESS,
+    CONF_HOME_LATITUDE,
+    CONF_HOME_LONGITUDE,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_NOMINATIM_EMAIL,
     CONF_NOMINATIM_URL,
@@ -31,7 +38,14 @@ from .const import (
     CONF_RELEVANCE_KEYWORDS,
     CONF_RETURN_CONTEXT_HOURS,
     CONF_TRANSIENT_STOP_MINUTES,
+    DEFAULT_COMPANY_ADDRESS,
+    DEFAULT_COMPANY_LATITUDE,
+    DEFAULT_COMPANY_LABEL,
+    DEFAULT_COMPANY_LONGITUDE,
     DEFAULT_EXPORT_PATH,
+    DEFAULT_HOME_ADDRESS,
+    DEFAULT_HOME_LATITUDE,
+    DEFAULT_HOME_LONGITUDE,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_OVERPASS_URL,
     DEFAULT_PLACE_RADIUS,
@@ -143,6 +157,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     merged_config.setdefault(
         CONF_TRANSIENT_STOP_MINUTES, DEFAULT_TRANSIENT_STOP_MINUTES
     )
+    merged_config.setdefault(CONF_HOME_ADDRESS, DEFAULT_HOME_ADDRESS)
+    merged_config.setdefault(CONF_HOME_LATITUDE, DEFAULT_HOME_LATITUDE)
+    merged_config.setdefault(CONF_HOME_LONGITUDE, DEFAULT_HOME_LONGITUDE)
+    merged_config.setdefault(CONF_COMPANY_ADDRESS, DEFAULT_COMPANY_ADDRESS)
+    merged_config.setdefault(CONF_COMPANY_LATITUDE, DEFAULT_COMPANY_LATITUDE)
+    merged_config.setdefault(CONF_COMPANY_LONGITUDE, DEFAULT_COMPANY_LONGITUDE)
+    merged_config.setdefault(CONF_COMPANY_LABEL, DEFAULT_COMPANY_LABEL)
     repository = KnihaJizdRepository(hass)
     try:
         await repository.async_initialize()
@@ -187,8 +208,8 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate entries to institution, return and journey-chain matching."""
-    if entry.version >= 4:
+    """Migrate entries to configured places and current journey matching."""
+    if entry.version >= 6:
         return True
 
     data = dict(entry.data)
@@ -207,12 +228,19 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         values.setdefault(
             CONF_TRANSIENT_STOP_MINUTES, DEFAULT_TRANSIENT_STOP_MINUTES
         )
+        values.setdefault(CONF_HOME_ADDRESS, DEFAULT_HOME_ADDRESS)
+        values.setdefault(CONF_HOME_LATITUDE, DEFAULT_HOME_LATITUDE)
+        values.setdefault(CONF_HOME_LONGITUDE, DEFAULT_HOME_LONGITUDE)
+        values.setdefault(CONF_COMPANY_ADDRESS, DEFAULT_COMPANY_ADDRESS)
+        values.setdefault(CONF_COMPANY_LATITUDE, DEFAULT_COMPANY_LATITUDE)
+        values.setdefault(CONF_COMPANY_LONGITUDE, DEFAULT_COMPANY_LONGITUDE)
+        values.setdefault(CONF_COMPANY_LABEL, DEFAULT_COMPANY_LABEL)
 
     hass.config_entries.async_update_entry(
         entry,
         data=data,
         options=options,
-        version=4,
+        version=6,
     )
     return True
 

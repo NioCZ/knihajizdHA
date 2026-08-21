@@ -110,23 +110,29 @@ def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         day_segments = sorted(
             by_date[date], key=lambda item: str(item.get("started_at", ""))
         )
+        business_segments = [
+            segment
+            for segment in day_segments
+            if segment.get("trip_type") == "business"
+        ]
         route_nodes: list[str] = []
-        if day_segments:
-            route_nodes.append(str(day_segments[0].get("start_address") or ""))
+        if business_segments:
+            route_nodes.append(
+                str(business_segments[0].get("start_address") or "")
+            )
             route_nodes.extend(
-                str(segment.get("end_address") or "") for segment in day_segments
+                str(segment.get("end_address") or "")
+                for segment in business_segments
             )
         route_nodes = _deduplicate_adjacent(route_nodes)
 
         customers = _unique_nonempty(
             str(segment.get("purpose") or "")
-            for segment in day_segments
-            if segment.get("trip_type") != "private"
+            for segment in business_segments
         )
         business_km = sum(
             _number(segment.get("distance_km"))
-            for segment in day_segments
-            if segment.get("trip_type") == "business"
+            for segment in business_segments
         )
         private_km = sum(
             _number(segment.get("distance_km"))
@@ -230,5 +236,7 @@ def _raw_columns() -> list[str]:
         "map_candidates",
         "candidate_search_radius_m",
         "selected_map_candidate",
+        "configured_place",
+        "configured_place_match",
         "validation_error",
     ]

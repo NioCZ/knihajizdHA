@@ -119,7 +119,7 @@ class KnihaJizdPanel extends HTMLElement {
         <td>${this._text(trip.start_address)}</td>
         <td>${this._text(trip.end_address)}</td>
         <td>${this._number(trip.distance_km)}</td>
-        <td><input class="trip-purpose" type="text" value="${this._text(trip.purpose, "")}" placeholder="Zákazník nebo účel" ${disabled ? "disabled" : ""}></td>
+        <td><input class="trip-purpose" type="text" value="${this._text(trip.purpose, "")}" placeholder="Volitelný zákazník / účel" ${disabled ? "disabled" : ""}></td>
         <td><select class="trip-type" ${disabled ? "disabled" : ""}>
           <option value="business" ${privateSelected ? "" : "selected"}>Služební</option>
           <option value="private" ${privateSelected ? "selected" : ""}>Soukromá</option>
@@ -261,6 +261,8 @@ class KnihaJizdPanel extends HTMLElement {
             <dt>Čeká na cíl celé jízdy</dt><dd>${this._text(attrs.transient_count, "0")}</dd>
             <dt>Návaznost návratu</dt><dd>${this._text(attrs.return_context_hours)} h</dd>
             <dt>Limit mezizastávky</dt><dd>${this._text(attrs.transient_stop_minutes)} min</dd>
+            <dt>Domov</dt><dd>${this._text(attrs.home_address)} · ${this._text(attrs.home_latitude)}, ${this._text(attrs.home_longitude)}</dd>
+            <dt>Firma</dt><dd>${this._text(attrs.company_address)} · ${this._text(attrs.company_latitude)}, ${this._text(attrs.company_longitude)} → ${this._text(attrs.company_label)}</dd>
             <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
           </dl></article>
           <article class="card"><h2>Poslední jízda</h2><dl>
@@ -274,7 +276,7 @@ class KnihaJizdPanel extends HTMLElement {
           </dl></article>
         </section>
         <section class="card daily-trips"><h2>Dnešní jízdy</h2>
-          <div class="muted">Uložené i čekající jízdy lze opravit. Segmenty stejné celé cesty se upraví společně.</div>
+          <div class="muted">Uložené i čekající jízdy lze opravit. Zákazník je u služební jízdy volitelný. Segmenty stejné celé cesty se upraví společně.</div>
           ${this._tripTable(todayTripRows)}
         </section>
         <section class="card"><h2>Excel report</h2>

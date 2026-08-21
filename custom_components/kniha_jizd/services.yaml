@@ -28,7 +28,7 @@ update_trip:
         text:
     purpose:
       name: Účel / zákazník
-      description: U soukromé jízdy může zůstat prázdný.
+      description: Volitelné. Prázdná služební jízda se uloží bez zákazníka; soukromá dostane interní účel Soukromá.
       required: false
       selector:
         text:
