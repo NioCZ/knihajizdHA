@@ -32,14 +32,26 @@ def _normalized_attributes(attributes: Mapping[str, Any] | None) -> dict[str, An
     }
 
 
-def _coordinate(value: Any) -> float | None:
-    """Parse one coordinate without interpreting punctuation as thousands."""
+def parse_decimal(value: Any) -> float | None:
+    """Parse one decimal without interpreting punctuation as thousands."""
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(str(value).strip().replace("\u00a0", "").replace(",", "."))
+        return float(
+            str(value)
+            .strip()
+            .replace(" ", "")
+            .replace("\u00a0", "")
+            .replace("\u202f", "")
+            .replace(",", ".")
+        )
     except (TypeError, ValueError):
         return None
+
+
+def _coordinate(value: Any) -> float | None:
+    """Parse one coordinate without interpreting punctuation as thousands."""
+    return parse_decimal(value)
 
 
 def _valid_coordinates(latitude: Any, longitude: Any) -> tuple[float, float] | None:

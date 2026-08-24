@@ -1,3 +1,5 @@
+import "./kniha-jizd-map.js?v=1.9.0";
+
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
     super();
@@ -6,11 +8,31 @@ class KnihaJizdPanel extends HTMLElement {
     this._exporting = false;
     this._message = "";
     this._savingTrip = null;
+    this._tableScrollLeft = 0;
+    this._activeTab = "overview";
+    this._mapData = null;
+    this._mapLoading = false;
+    this._mapError = "";
+    this._mapLoadedAt = 0;
+    this._mapRefreshTimer = null;
     this._month = this._currentMonth();
   }
 
   set hass(value) {
     this._hass = value;
+    if (this._activeTab === "map" && this.shadowRoot?.querySelector("kniha-jizd-map")) {
+      if (
+        !this._mapLoading
+        && !this._mapRefreshTimer
+        && Date.now() - this._mapLoadedAt > 10000
+      ) {
+        this._mapRefreshTimer = setTimeout(() => {
+          this._mapRefreshTimer = null;
+          this._loadMapData();
+        }, 750);
+      }
+      return;
+    }
     const activeElement = this.shadowRoot?.activeElement;
     if (activeElement?.matches?.("input, select, textarea")) return;
     this._render();
@@ -26,6 +48,11 @@ class KnihaJizdPanel extends HTMLElement {
 
   connectedCallback() {
     this._render();
+  }
+
+  disconnectedCallback() {
+    if (this._mapRefreshTimer) clearTimeout(this._mapRefreshTimer);
+    this._mapRefreshTimer = null;
   }
 
   _entity(kind) {
@@ -180,8 +207,50 @@ class KnihaJizdPanel extends HTMLElement {
     }
   }
 
+  async _selectTab(tab) {
+    if (!new Set(["overview", "map"]).has(tab)) return;
+    this._activeTab = tab;
+    this._render();
+    if (tab === "map" && !this._mapData) await this._loadMapData();
+  }
+
+  _syncMapElement() {
+    const map = this.shadowRoot?.querySelector("kniha-jizd-map");
+    if (map && this._mapData) map.data = this._mapData;
+    const status = this.shadowRoot?.querySelector(".map-loading");
+    if (status) {
+      status.textContent = this._mapError
+        ? `Mapová data se nepodařilo načíst: ${this._mapError}`
+        : this._mapLoading
+          ? "Načítám aktuální polohu, místa a zóny…"
+          : this._mapData
+            ? `Aktualizováno ${new Date(this._mapData.generated_at || Date.now()).toLocaleString("cs-CZ")}`
+            : "Mapová data ještě nejsou načtená.";
+    }
+    const refresh = this.shadowRoot?.getElementById("refresh-map");
+    if (refresh) refresh.disabled = this._mapLoading;
+  }
+
+  async _loadMapData() {
+    if (!this._hass || this._mapLoading) return;
+    this._mapLoading = true;
+    this._mapError = "";
+    this._syncMapElement();
+    try {
+      this._mapData = await this._hass.callApi("GET", "kniha_jizd/map");
+    } catch (error) {
+      this._mapError = error.message || String(error);
+    } finally {
+      this._mapLoadedAt = Date.now();
+      this._mapLoading = false;
+      this._syncMapElement();
+    }
+  }
+
   _render() {
     if (!this.shadowRoot) return;
+    const currentTableWrap = this.shadowRoot.querySelector?.(".table-wrap");
+    if (currentTableWrap) this._tableScrollLeft = currentTableWrap.scrollLeft;
     if (!this._hass) {
       this.shadowRoot.innerHTML = "<p>Načítám Knihu jízd…</p>";
       return;
@@ -242,17 +311,30 @@ class KnihaJizdPanel extends HTMLElement {
         button { color:var(--text-primary-color,#fff); background:var(--primary-color); }
         button:disabled { opacity:.6; cursor:wait; } a.button { color:var(--primary-color); background:var(--secondary-background-color); }
         .message { margin-top:12px; color:var(--secondary-text-color); }
-        .table-wrap { overflow-x:auto; } table { width:100%; border-collapse:collapse; margin-top:12px; }
+        .table-wrap { max-width:100%; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; }
+        table { width:max-content; min-width:100%; border-collapse:collapse; margin-top:12px; }
         th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--divider-color); padding:9px 8px; min-width:75px; }
         th { color:var(--secondary-text-color); font-weight:600; } td:nth-child(2), td:nth-child(3) { min-width:180px; }
         .save-trip { padding:9px 13px; white-space:nowrap; }
-        .daily-trips { margin-bottom:16px; }
+        .daily-trips { min-width:0; overflow:hidden; margin-bottom:16px; }
+        .tabs { display:flex; gap:6px; margin:-8px 0 22px; padding:5px; width:max-content; max-width:100%; border-radius:12px; background:var(--secondary-background-color); }
+        .tab { min-width:130px; padding:10px 16px; color:var(--primary-text-color); background:transparent; }
+        .tab.active { color:var(--text-primary-color,#fff); background:var(--primary-color); }
+        .map-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+        .map-heading h2 { margin:0; }
+        .map-heading button { padding:9px 14px; }
+        .map-loading { min-height:20px; margin-bottom:12px; color:var(--secondary-text-color); }
         @media (max-width:600px) { main { padding:16px; } dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:8px; } }
       </style>
       <main>
         <header><div><h1>Kniha jízd</h1><div class="muted">Průběžný stav integrace a export reportů</div></div>
           <span class="pill ${ready?.state === "on" ? "ready" : "error"}">${ready?.state === "on" ? this._statusLabel(status?.state) : "Vstupy nejsou připravené"}</span>
         </header>
+        <nav class="tabs" aria-label="Části panelu">
+          <button class="tab ${this._activeTab === "overview" ? "active" : ""}" data-tab="overview">Přehled</button>
+          <button class="tab ${this._activeTab === "map" ? "active" : ""}" data-tab="map">Mapa míst</button>
+        </nav>
+        <div ${this._activeTab === "overview" ? "" : "hidden"}>
         <section class="grid">
           <article class="card"><div class="muted">Dnes služební</div><div class="metric">${this._number(business?.state)} km</div></article>
           <article class="card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateKm?.state)} km</div></article>
@@ -306,7 +388,17 @@ class KnihaJizdPanel extends HTMLElement {
           ${downloadUrl ? `<a class="button" href="${downloadUrl}" download="${this._text(downloadFilename)}">Stáhnout poslední export (${this._text(exportEntity?.attributes?.month)})</a>` : ""}</div>
           <div class="message">${this._text(this._message, exportEntity?.attributes?.generated_at ? `Poslední export: ${exportEntity.attributes.generated_at}, měsíc ${exportEntity.attributes.month}` : "Dosud nebyl vytvořen export.")}</div>
         </section>
+        </div>
+        ${this._activeTab === "map" ? `<section class="card">
+          <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Aktuální auto, naučené parkovací body, rozpoznávací poloměry a dnešní úseky.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
+          <div class="map-loading"></div>
+          <kniha-jizd-map></kniha-jizd-map>
+        </section>` : ""}
       </main>`;
+    this.shadowRoot.querySelectorAll(".tab").forEach((button) => {
+      button.addEventListener("click", () => this._selectTab(button.dataset.tab));
+    });
+    this.shadowRoot.getElementById("refresh-map")?.addEventListener("click", () => this._loadMapData());
     this.shadowRoot.getElementById("month")?.addEventListener("change", (event) => {
       if (event.target.value) this._month = event.target.value;
     });
@@ -314,6 +406,17 @@ class KnihaJizdPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll(".save-trip").forEach((button) => {
       button.addEventListener("click", () => this._saveTrip(button));
     });
+    const tableWrap = this.shadowRoot.querySelector(".table-wrap");
+    if (tableWrap) {
+      tableWrap.scrollLeft = Math.min(
+        this._tableScrollLeft,
+        Math.max(0, tableWrap.scrollWidth - tableWrap.clientWidth),
+      );
+      tableWrap.addEventListener("scroll", () => {
+        this._tableScrollLeft = tableWrap.scrollLeft;
+      }, { passive: true });
+    }
+    this._syncMapElement();
   }
 }
 

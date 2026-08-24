@@ -15,6 +15,7 @@ from aiohttp import ClientError, ClientSession
 _LOGGER = logging.getLogger(__name__)
 
 _AMENITY_WEIGHTS = {
+    "blood_bank": 60.0,
     "research_institute": 45.0,
     "laboratory": 40.0,
     "university": 30.0,
@@ -88,7 +89,8 @@ def build_overpass_query(latitude: float, longitude: float, radius: int) -> str:
     """Build one bounded query covering relevant medical/research OSM tags."""
     around = f"(around:{radius},{latitude:.7f},{longitude:.7f})"
     institution_amenities = (
-        "hospital|clinic|university|college|research_institute|laboratory"
+        "hospital|clinic|university|college|research_institute|laboratory|"
+        "blood_bank"
     )
     return (
         "[out:json][timeout:25];("
@@ -99,6 +101,7 @@ def build_overpass_query(latitude: float, longitude: float, radius: int) -> str:
         f'nwr{around}["university"~"^(institute|department|faculty)$"];'
         f'nwr{around}["research"];'
         f'nwr{around}["laboratory"];'
+        f'nwr{around}["name"~"krev|blood|transfu|hematol|plasma",i];'
         ");out bb;"
     )
 
@@ -229,9 +232,19 @@ def _score_tags(
 
     healthcare = str(tags.get("healthcare") or "").casefold()
     if healthcare:
-        healthcare_weight = 40.0 if "labor" in healthcare else 18.0
+        if healthcare in {"blood_donation", "blood_bank"}:
+            healthcare_weight = 60.0
+        elif "labor" in healthcare:
+            healthcare_weight = 45.0
+        else:
+            healthcare_weight = 18.0
         score += healthcare_weight
         reasons.append(f"healthcare={healthcare} +{healthcare_weight:g}")
+
+    specialty = _normalize_text(tags.get("healthcare:speciality"))
+    if any(term in specialty for term in ("hematol", "transfu", "blood")):
+        score += 45.0
+        reasons.append("hematologie/transfuze +45")
 
     if str(tags.get("office") or "").casefold() == "research":
         score += 40.0
@@ -286,7 +299,14 @@ def _score_tags(
 
 def _category_label(tags: dict[str, Any]) -> str:
     """Return a readable primary OSM classification."""
-    for key in ("amenity", "healthcare", "office", "university", "research"):
+    for key in (
+        "amenity",
+        "healthcare",
+        "healthcare:speciality",
+        "office",
+        "university",
+        "research",
+    ):
         if value := tags.get(key):
             return f"{key}={value}"
     return "instituce"

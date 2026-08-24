@@ -31,11 +31,9 @@ Výchozí nastavení počítá s těmito objekty:
 - `sensor.skoda_odometer`
 - `notify.mobile_app_telefon`
 
-Jako výchozí zvláštní místa jsou nastavená adresa domova
-`Vrchlického 699, Kroměříž` a adresa firmy `Na Jetelce 69` se štítkem
-`Altium`. Domov používá bod `49.2958889, 17.3934167`, firma bod
-`50.1135278, 14.4978056`. Adresy, souřadnice i název lze změnit přes
-**Konfigurovat**.
+Adresy a souřadnice domova a firmy nejsou ve veřejném kódu předvyplněné.
+Vlastní hodnoty lze bezpečně zadat pouze do lokální konfigurace přes
+**Konfigurovat**; název firmy má neutrální výchozí štítek **Firma**.
 
 Nastavení lze později změnit přes tlačítko **Konfigurovat** u integrace; změna
 integraci bezpečně reloaduje.
@@ -108,10 +106,11 @@ všechny další zadané části. PSČ, stát, interpunkce ani diakritika shodu
 neovlivní. Použitá metoda a vzdálenost se ukládají do
 `configured_place_match` v raw datech.
 
-- `Vrchlického 699, Kroměříž` se rozpozná jako **Domov**. Při platné návaznosti
-  na předchozího zákazníka se automaticky použije služební návrat; bez návaznosti
-  se integrace zeptá, protože cesta domů může být také soukromá.
-- `Na Jetelce 69` se automaticky uloží jako služební cíl **Altium**.
+- Nastavená adresa domova se rozpozná jako **Domov**. Při platné návaznosti na
+  předchozího zákazníka se automaticky použije služební návrat; bez návaznosti se
+  integrace zeptá, protože cesta domů může být také soukromá.
+- Nastavená adresa firmy se automaticky uloží jako služební cíl pod zadaným
+  názvem firmy.
 
 ### Služební návraty domů, na firmu nebo do hotelu
 
@@ -210,6 +209,9 @@ a **Jiný klient**. Návratové místo se učí kontextově, nikoli napevno jako
 
 Volba se spolu se souřadnicemi a typem jízdy uloží do
 `/config/learned_places.json`. Příští cíl v nastaveném poloměru se už neptá.
+Soukromé cíle se učí pod názvem mapového místa s konzervativní zónou 250 m,
+takže několik různých soukromých cílů nesplyne do jedné široké kilometrové zóny.
+V raw jízdě zůstává účel `Soukromá`.
 
 ### Denní tabulka a dodatečné opravy
 
@@ -236,6 +238,21 @@ data:
   trip_type: business
 ```
 
+### Mapa míst a zón
+
+Záložka **Mapa míst** v administračním panelu načítá přes přihlášené HA API:
+
+- aktuální GPS auta, použitý zdroj polohy a informaci, zda je auto uvnitř známé zóny,
+- nakonfigurovaný domov a firmu,
+- všechny kotvy z `learned_places.json` včetně názvu, role, adresy a skutečně
+  použitého rozpoznávacího poloměru,
+- dnešní uložené i rozpracované úseky jízdy.
+
+Mapa rozlišuje klienty, soukromá a návratová místa i krátké zastávky. Zóny klientů
+používají nastavený poloměr, soukromá místa 250 m a potvrzené benzinky či jiné
+tranzitní body 200 m. Podklad tvoří dlaždice OpenStreetMap; značky a zóny zůstávají
+funkční jako interní vrstva panelu.
+
 ## Rozpoznání nemocnic a výzkumných pracovišť
 
 Vyhledávání má dvě nezávislé vzdálenosti:
@@ -247,13 +264,18 @@ Vyhledávání má dvě nezávislé vzdálenosti:
 - **Poloměr hledání nových institucí** – výchozí 3 000 m. Slouží jen pro sestavení
   návrhů; samotný mapový odhad se bez potvrzení nezapíše.
 
-Jeden Overpass dotaz načte objekty označené jako nemocnice, klinika, univerzita,
-výzkumný ústav, výzkumná kancelář, laboratoř nebo univerzitní pracoviště. Kandidáti
+Jeden Overpass dotaz načte objekty označené jako nemocnice, klinika, krevní banka,
+odběrové/transfuzní centrum, univerzita, výzkumný ústav, výzkumná kancelář,
+laboratoř nebo univerzitní pracoviště. Kandidáti
 získávají body za odpovídající OSM kategorii a za výskyty nakonfigurovaných kořenů
 slov. Výchozí sada zvýhodňuje genetiku, genomiku, DNA, molekulární a biomedicínská
 pracoviště, laboratoře, cytogenetiku, sekvenování, patologii, onkologii a
 mikrobiologii. Za vzdálenost se body odečítají. Proto může relevantní genetický
 ústav porazit bližší obecnou nemocnici nebo univerzitu.
+
+Každý dokončený pokus ukládá také čas, použité souřadnice a počet výsledků do raw
+dat. Pokud mobilní notifikační služba při dojezdu ještě není zaregistrovaná,
+čekající otázka se automaticky odešle po jejím zpřístupnění.
 
 Do notifikace se vloží až tři nejlepší výsledky se vzdáleností. Tlačítko potvrzení
 vybere první; v textovém vstupu lze napsat číslo druhého/třetího výsledku nebo úplně

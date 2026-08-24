@@ -15,7 +15,15 @@ from uuid import uuid4
 from homeassistant.core import HomeAssistant
 
 from .address_rules import shorten_address
-from .const import LEARNED_PLACES_FILENAME, RAW_DATA_FILENAME
+from .const import (
+    LEARNED_PLACES_FILENAME,
+    LEARNED_PRIVATE_RADIUS,
+    LEARNED_TRANSIENT_RADIUS,
+    PLACE_ROLE_PRIVATE,
+    PLACE_ROLE_TRANSIENT,
+    RAW_DATA_FILENAME,
+    TRIP_TYPE_PRIVATE,
+)
 
 _MAX_ANCHORS_PER_PLACE = 50
 _RAW_DATA_VERSION = 4
@@ -101,6 +109,61 @@ def _optional_float(value: Any) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def effective_place_radius(place: dict[str, Any], fallback_radius: float) -> float:
+    """Return a conservative matching radius for one learned place."""
+    stored_radius = _optional_float(place.get("radius_m"))
+    if stored_radius is not None and stored_radius > 0:
+        return stored_radius
+    role = str(place.get("place_role") or "")
+    if role == PLACE_ROLE_TRANSIENT:
+        return min(fallback_radius, LEARNED_TRANSIENT_RADIUS)
+    if role == PLACE_ROLE_PRIVATE or (
+        not role and place.get("trip_type") == TRIP_TYPE_PRIVATE
+    ):
+        return min(fallback_radius, LEARNED_PRIVATE_RADIUS)
+    return fallback_radius
+
+
+def places_for_map(
+    document: dict[str, Any], fallback_radius: float
+) -> list[dict[str, Any]]:
+    """Flatten learned anchors into safe map markers with their effective zones."""
+    markers: list[dict[str, Any]] = []
+    places = document.get("places")
+    if not isinstance(places, list):
+        return markers
+    for place in places:
+        if not isinstance(place, dict):
+            continue
+        place_id = str(place.get("id") or "")
+        trip_type = str(place.get("trip_type") or "") or None
+        role = str(place.get("place_role") or "") or (
+            PLACE_ROLE_PRIVATE if trip_type == TRIP_TYPE_PRIVATE else "client"
+        )
+        radius = effective_place_radius(place, fallback_radius)
+        for index, anchor in enumerate(_place_anchors(place)):
+            latitude = _optional_float(anchor.get("latitude"))
+            longitude = _optional_float(anchor.get("longitude"))
+            if latitude is None or longitude is None:
+                continue
+            markers.append(
+                {
+                    "id": f"{place_id}:{index}",
+                    "place_id": place_id or None,
+                    "label": place.get("label") or place.get("map_name") or "Místo",
+                    "map_name": place.get("map_name"),
+                    "trip_type": trip_type,
+                    "place_role": role,
+                    "radius_m": radius,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "address": anchor.get("address"),
+                    "updated_at": anchor.get("updated_at") or place.get("updated_at"),
+                }
+            )
+    return markers
 
 
 def _whole_km(value: float) -> int:
@@ -731,6 +794,21 @@ class KnihaJizdRepository:
         """Calculate raw-log statistics in an executor."""
         return calculate_statistics(self._load_raw_sync()["segments"], local_date)
 
+    async def async_get_places_for_map(
+        self, fallback_radius: float
+    ) -> list[dict[str, Any]]:
+        """Return learned parking anchors for the authenticated panel map."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._get_places_for_map_sync, fallback_radius
+            )
+
+    def _get_places_for_map_sync(
+        self, fallback_radius: float
+    ) -> list[dict[str, Any]]:
+        """Load and serialize learned map anchors in an executor."""
+        return places_for_map(self._load_places_sync(), fallback_radius)
+
     async def async_find_place(
         self,
         latitude: float | None,
@@ -760,7 +838,7 @@ class KnihaJizdRepository:
         closest: tuple[float, dict[str, Any], dict[str, Any]] | None = None
         if latitude is not None and longitude is not None:
             for place in places:
-                place_radius = _optional_float(place.get("radius_m")) or radius_meters
+                place_radius = effective_place_radius(place, radius_meters)
                 for anchor in _place_anchors(place):
                     anchor_latitude = _optional_float(anchor.get("latitude"))
                     anchor_longitude = _optional_float(anchor.get("longitude"))

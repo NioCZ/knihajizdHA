@@ -88,6 +88,43 @@ class NearbyInstitutionScoringTest(unittest.TestCase):
         self.assertIn("out bb", query)
         self.assertEqual(query.count("[out:json]"), 1)
 
+    def test_blood_center_is_searched_and_ranked_as_specialist(self) -> None:
+        """Recognize a blood center even when OSM does not tag it as a hospital."""
+        query = SEARCH_MODULE.build_overpass_query(49.3, 17.4, 3000)
+        self.assertIn("blood_bank", query)
+        self.assertIn("transfu", query)
+
+        candidates = SEARCH_MODULE.rank_overpass_candidates(
+            {
+                "elements": [
+                    {
+                        "type": "node",
+                        "id": 30,
+                        "lat": 49.3,
+                        "lon": 17.4,
+                        "tags": {
+                            "name": "Krevní centrum",
+                            "healthcare": "blood_donation",
+                            "healthcare:speciality": "haematology",
+                        },
+                    },
+                    {
+                        "type": "node",
+                        "id": 31,
+                        "lat": 49.3001,
+                        "lon": 17.4,
+                        "tags": {"name": "Nemocnice", "amenity": "hospital"},
+                    },
+                ]
+            },
+            49.3,
+            17.4,
+            SEARCH_MODULE.parse_keywords("krev, hematol, transfuz, blood"),
+        )
+
+        self.assertEqual(candidates[0]["name"], "Krevní centrum")
+        self.assertIn("krev", candidates[0]["keyword_matches"])
+
     def test_parking_inside_institution_bounds_gets_bonus(self) -> None:
         """A large campus surrounding the parking point is recognized."""
         payload = {

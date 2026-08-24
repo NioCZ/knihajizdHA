@@ -44,6 +44,42 @@ storage_spec.loader.exec_module(STORAGE_MODULE)
 class LearnedPlacesTest(unittest.TestCase):
     """Verify grouping and matching of multiple parking points."""
 
+    def test_map_uses_conservative_private_and_transient_zones(self) -> None:
+        """Keep broad client zones from being reused for contextual places."""
+        markers = STORAGE_MODULE.places_for_map(
+            {
+                "places": [
+                    {
+                        "id": "private",
+                        "label": "Kino",
+                        "trip_type": "private",
+                        "anchors": [{"latitude": 50.0, "longitude": 14.0}],
+                    },
+                    {
+                        "id": "fuel",
+                        "label": "ORLEN",
+                        "trip_type": "contextual",
+                        "place_role": "transient",
+                        "anchors": [{"latitude": 50.1, "longitude": 14.1}],
+                    },
+                    {
+                        "id": "client",
+                        "label": "Nemocnice",
+                        "trip_type": "business",
+                        "place_role": "client",
+                        "anchors": [{"latitude": 50.2, "longitude": 14.2}],
+                    },
+                ]
+            },
+            1000,
+        )
+
+        by_id = {marker["place_id"]: marker for marker in markers}
+        self.assertEqual(by_id["private"]["radius_m"], 250)
+        self.assertEqual(by_id["private"]["place_role"], "private")
+        self.assertEqual(by_id["fuel"]["radius_m"], 200)
+        self.assertEqual(by_id["client"]["radius_m"], 1000)
+
     def test_same_customer_keeps_two_distant_anchors(self) -> None:
         """Two confirmations with one label remain one customer with two anchors."""
         test_output = ROOT / "test-output"

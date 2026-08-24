@@ -128,11 +128,13 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_HOME_LATITUDE,
                 default=defaults.get(CONF_HOME_LATITUDE, DEFAULT_HOME_LATITUDE),
-            ): vol.All(vol.Coerce(float), vol.Range(min=-90, max=90)),
+            ): vol.Any("", vol.All(vol.Coerce(float), vol.Range(min=-90, max=90))),
             vol.Optional(
                 CONF_HOME_LONGITUDE,
                 default=defaults.get(CONF_HOME_LONGITUDE, DEFAULT_HOME_LONGITUDE),
-            ): vol.All(vol.Coerce(float), vol.Range(min=-180, max=180)),
+            ): vol.Any(
+                "", vol.All(vol.Coerce(float), vol.Range(min=-180, max=180))
+            ),
             vol.Optional(
                 CONF_COMPANY_ADDRESS,
                 default=defaults.get(CONF_COMPANY_ADDRESS, DEFAULT_COMPANY_ADDRESS),
@@ -142,13 +144,15 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 default=defaults.get(
                     CONF_COMPANY_LATITUDE, DEFAULT_COMPANY_LATITUDE
                 ),
-            ): vol.All(vol.Coerce(float), vol.Range(min=-90, max=90)),
+            ): vol.Any("", vol.All(vol.Coerce(float), vol.Range(min=-90, max=90))),
             vol.Optional(
                 CONF_COMPANY_LONGITUDE,
                 default=defaults.get(
                     CONF_COMPANY_LONGITUDE, DEFAULT_COMPANY_LONGITUDE
                 ),
-            ): vol.All(vol.Coerce(float), vol.Range(min=-180, max=180)),
+            ): vol.Any(
+                "", vol.All(vol.Coerce(float), vol.Range(min=-180, max=180))
+            ),
             vol.Optional(
                 CONF_COMPANY_LABEL,
                 default=defaults.get(CONF_COMPANY_LABEL, DEFAULT_COMPANY_LABEL),

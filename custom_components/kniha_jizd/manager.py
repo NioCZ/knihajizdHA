@@ -55,8 +55,10 @@ from .const import (
     DEFAULT_TRANSIENT_STOP_RADIUS,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
+    LEARNED_PRIVATE_RADIUS,
     LEARNED_TRANSIENT_RADIUS,
     PLACE_ROLE_CLIENT,
+    PLACE_ROLE_PRIVATE,
     PLACE_ROLE_RETURN,
     PLACE_ROLE_TRANSIENT,
     RUNTIME_STORE_VERSION,
@@ -66,7 +68,7 @@ from .const import (
     UNAVAILABLE_STATES,
 )
 from .geocoding import NominatimGeocoder
-from .input_parsing import coordinates_from_state, odometer_from_state
+from .input_parsing import coordinates_from_state, odometer_from_state, parse_decimal
 from .journey_chain import (
     apply_journey_classification,
     continuation_details,
@@ -232,9 +234,19 @@ class KnihaJizdManager:
                     f"{DOMAIN}_restore_pending_odometer_{segment.get('id', 'unknown')}",
                 )
             if not segment.get("classification_ready"):
+                retry_missing_search = (
+                    not _map_candidates(segment)
+                    and not segment.get("candidate_search_completed_at")
+                    and _as_float(segment.get("end_latitude")) is not None
+                    and _as_float(segment.get("end_longitude")) is not None
+                )
                 self._create_task(
-                    self._async_send_classification_notification(segment),
-                    f"{DOMAIN}_restore_notification_{segment.get('id', 'unknown')}",
+                    (
+                        self._async_retry_pending_suggestions(segment)
+                        if retry_missing_search
+                        else self._async_send_classification_notification(segment)
+                    ),
+                    f"{DOMAIN}_restore_pending_search_{segment.get('id', 'unknown')}",
                 )
 
         for segment in list(self._transient.values()):
@@ -411,6 +423,111 @@ class KnihaJizdManager:
             "notify_ok": notify_ok,
             "last_notification_action": deepcopy(self._last_notification_action),
             "last_error": self._last_error,
+        }
+
+    async def async_get_map_data(self) -> dict[str, Any]:
+        """Build current, learned and configured place data for the panel map."""
+        learned_places = await self.repository.async_get_places_for_map(
+            self.place_radius
+        )
+        configured_places: list[dict[str, Any]] = []
+        for marker in (
+            {
+                "id": "configured:home",
+                "place_id": "configured:home",
+                "label": "Domov",
+                "place_role": "home",
+                "trip_type": TRIP_TYPE_CONTEXTUAL,
+                "latitude": self.home_latitude,
+                "longitude": self.home_longitude,
+                "address": self.home_address or None,
+                "radius_m": self.place_radius,
+            },
+            {
+                "id": "configured:company",
+                "place_id": "configured:company",
+                "label": self.company_label or "Firma",
+                "place_role": "company",
+                "trip_type": TRIP_TYPE_BUSINESS,
+                "latitude": self.company_latitude,
+                "longitude": self.company_longitude,
+                "address": self.company_address or None,
+                "radius_m": self.place_radius,
+            },
+        ):
+            if marker["latitude"] is not None and marker["longitude"] is not None:
+                configured_places.append(marker)
+
+        location = self._capture_location()
+        car_latitude = _as_float(location.get("latitude"))
+        car_longitude = _as_float(location.get("longitude"))
+        current_zone: dict[str, Any] | None = None
+        for marker in [*configured_places, *learned_places]:
+            distance = coordinate_distance_m(
+                car_latitude,
+                car_longitude,
+                marker.get("latitude"),
+                marker.get("longitude"),
+            )
+            radius = _as_float(marker.get("radius_m"))
+            if distance is None or radius is None or distance > radius:
+                continue
+            if current_zone is None or distance < float(current_zone["distance_m"]):
+                current_zone = {
+                    "id": marker.get("id"),
+                    "place_id": marker.get("place_id"),
+                    "label": marker.get("label"),
+                    "place_role": marker.get("place_role"),
+                    "distance_m": round(distance, 1),
+                    "radius_m": radius,
+                }
+
+        gps_state = self.hass.states.get(self.gps_entity)
+        _, _, gps_source = _location_coordinates(
+            gps_state, self.hass.states.get(self.address_entity)
+        )
+        car = {
+            "latitude": car_latitude,
+            "longitude": car_longitude,
+            "address": location.get("address_raw") or location.get("address"),
+            "coordinate_source": gps_source,
+            "updated_at": _iso_utc(
+                _ensure_utc(gps_state.last_updated) if gps_state is not None else None
+            ),
+            "current_zone": current_zone,
+            "driving": self._active is not None,
+        }
+
+        routes: dict[str, dict[str, Any]] = {}
+        persisted = self._statistics.get("today_rows")
+        if isinstance(persisted, list):
+            for segment in persisted:
+                if isinstance(segment, dict) and segment.get("id"):
+                    routes[str(segment["id"])] = _map_trip_row(segment, "saved")
+        runtime_groups = (
+            ("driving", [self._active] if self._active is not None else []),
+            ("waiting_odometer", list(self._closing.values())),
+            ("waiting_classification", list(self._pending.values())),
+            ("waiting_journey", list(self._transient.values())),
+        )
+        today = dt_util.now().date().isoformat()
+        for status, segments in runtime_groups:
+            for segment in segments:
+                if str(segment.get("date")) == today and segment.get("id"):
+                    routes[str(segment["id"])] = _map_trip_row(segment, status)
+
+        return {
+            "generated_at": _iso_utc(datetime.now(UTC)),
+            "attribution": "© OpenStreetMap contributors",
+            "default_place_radius_m": self.place_radius,
+            "transient_radius_m": LEARNED_TRANSIENT_RADIUS,
+            "private_radius_m": LEARNED_PRIVATE_RADIUS,
+            "car": car,
+            "configured_places": configured_places,
+            "learned_places": learned_places,
+            "today_routes": sorted(
+                routes.values(), key=lambda row: str(row.get("started_at") or "")
+            ),
         }
 
     @callback
@@ -669,6 +786,19 @@ class KnihaJizdManager:
             and event.data.get(ATTR_SERVICE) == self.notify_service
         ):
             self._notify_listeners()
+            if event.event_type == EVENT_SERVICE_REGISTERED and self._pending:
+                self._create_task(
+                    self._async_resend_unsent_notifications(),
+                    f"{DOMAIN}_resend_pending_notifications",
+                )
+
+    async def _async_resend_unsent_notifications(self) -> None:
+        """Deliver questions queued before the configured phone service existed."""
+        for segment in list(self._pending.values()):
+            if not segment.get("classification_ready") and not segment.get(
+                "notification_sent_at"
+            ):
+                await self._async_send_classification_notification(segment)
 
     def _create_task(self, coro: Coroutine[Any, Any, Any], name: str) -> None:
         """Create a tracked Home Assistant task."""
@@ -1158,6 +1288,18 @@ class KnihaJizdManager:
                 }
                 await self._async_hold_transient(segment)
                 return
+            if (
+                place_role == PLACE_ROLE_PRIVATE
+                or learned_place.get("trip_type") == TRIP_TYPE_PRIVATE
+            ):
+                await self._async_finalize_segment(
+                    segment,
+                    purpose="Soukromá",
+                    trip_type=TRIP_TYPE_PRIVATE,
+                    source="learned_private_place",
+                    learn_place=False,
+                )
+                return
             if place_role == PLACE_ROLE_RETURN and segment.get("return_context"):
                 await self._async_finalize_return(
                     segment,
@@ -1188,43 +1330,18 @@ class KnihaJizdManager:
             )
             await self._async_finalize_segment(
                 segment,
-                purpose=str(learned_place.get("label") or "Neznámý zákazník"),
+                purpose=(
+                    "Soukromá"
+                    if learned_trip_type == TRIP_TYPE_PRIVATE
+                    else str(learned_place.get("label") or "Neznámý zákazník")
+                ),
                 trip_type=learned_trip_type,
                 source="learned_place",
                 learn_place=False,
             )
             return
 
-        end_latitude = _as_float(segment.get("end_latitude"))
-        end_longitude = _as_float(segment.get("end_longitude"))
-        candidates, map_result = await asyncio.gather(
-            self.institution_searcher.async_search(
-                end_latitude,
-                end_longitude,
-                self.institution_search_radius,
-            ),
-            self.geocoder.async_reverse(end_latitude, end_longitude),
-        )
-        segment["map_candidates"] = candidates
-        segment["candidate_search_radius_m"] = self.institution_search_radius
-        if candidates:
-            segment["map_estimate"] = candidates[0]["name"]
-            segment["map_attribution"] = "© OpenStreetMap contributors, ODbL"
-        if map_result is not None:
-            if not segment.get("map_estimate"):
-                segment["map_estimate"] = map_result.get("name")
-            segment["map_address"] = map_result.get("display_name")
-            segment["map_attribution"] = (
-                segment.get("map_attribution") or map_result.get("attribution")
-            )
-            if _address_is_coordinate_fallback(segment.get("end_address")) and map_result.get(
-                "display_name"
-            ):
-                segment["end_address_raw"] = map_result["display_name"]
-                segment["end_address"] = (
-                    shorten_address(map_result["display_name"])
-                    or map_result["display_name"]
-                )
+        candidates, map_result = await self._async_discover_destination(segment)
 
         if await self._async_handle_configured_destination(segment):
             return
@@ -1244,6 +1361,59 @@ class KnihaJizdManager:
             )
 
         await self._async_queue_pending(segment)
+
+    async def _async_retry_pending_suggestions(
+        self, segment: dict[str, Any]
+    ) -> None:
+        """Repair one pre-fix pending segment from its stored endpoint."""
+        await self._async_discover_destination(segment)
+        await self._async_save_runtime()
+        if str(segment.get("id")) in self._pending and not segment.get(
+            "classification_ready"
+        ):
+            await self._async_send_classification_notification(segment)
+
+    async def _async_discover_destination(
+        self, segment: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Search and audit map candidates around a stored trip endpoint."""
+        end_latitude = _as_float(segment.get("end_latitude"))
+        end_longitude = _as_float(segment.get("end_longitude"))
+        candidates, map_result = await asyncio.gather(
+            self.institution_searcher.async_search(
+                end_latitude,
+                end_longitude,
+                self.institution_search_radius,
+            ),
+            self.geocoder.async_reverse(end_latitude, end_longitude),
+        )
+        segment["map_candidates"] = candidates
+        segment["candidate_search_radius_m"] = self.institution_search_radius
+        segment["candidate_search_completed_at"] = _iso_utc(datetime.now(UTC))
+        segment["candidate_search_coordinates"] = {
+            "latitude": end_latitude,
+            "longitude": end_longitude,
+        }
+        segment["candidate_count"] = len(candidates)
+        if candidates:
+            segment["map_estimate"] = candidates[0]["name"]
+            segment["map_attribution"] = "© OpenStreetMap contributors, ODbL"
+        if map_result is not None:
+            if not segment.get("map_estimate"):
+                segment["map_estimate"] = map_result.get("name")
+            segment["map_address"] = map_result.get("display_name")
+            segment["map_attribution"] = (
+                segment.get("map_attribution") or map_result.get("attribution")
+            )
+            if _address_is_coordinate_fallback(
+                segment.get("end_address")
+            ) and map_result.get("display_name"):
+                segment["end_address_raw"] = map_result["display_name"]
+                segment["end_address"] = (
+                    shorten_address(map_result["display_name"])
+                    or map_result["display_name"]
+                )
+        return candidates, map_result
 
     async def _async_handle_configured_destination(
         self, segment: dict[str, Any]
@@ -1788,6 +1958,12 @@ class KnihaJizdManager:
                 purpose = "Soukromá"
                 trip_type = TRIP_TYPE_PRIVATE
                 learn_place = not bool(segment.get("matched_place_id"))
+                place_role = PLACE_ROLE_PRIVATE
+                learned_label = str(
+                    segment.get("map_estimate")
+                    or segment.get("end_address")
+                    or "Soukromé místo"
+                )
 
             if expired_transient:
                 # Fuel stations, shops and rest areas are inherently contextual.
@@ -1996,6 +2172,11 @@ class KnihaJizdManager:
                             else trip_type
                         ),
                         "place_role": place_role,
+                        **(
+                            {"radius_m": LEARNED_PRIVATE_RADIUS}
+                            if place_role == PLACE_ROLE_PRIVATE
+                            else {}
+                        ),
                         "map_name": segment.get("map_estimate"),
                         "updated_at": _iso_utc(datetime.now(UTC)),
                     }
@@ -2181,17 +2362,12 @@ def _iso_utc(value: datetime | None) -> str | None:
 
 def _as_float(value: Any) -> float | None:
     """Parse numbers with either a decimal dot or comma."""
-    if value is None or isinstance(value, bool):
-        return None
+    return parse_decimal(value)
 
 
 def _whole_km(value: float) -> int:
     """Round a non-negative kilometre value to a whole kilometre."""
     return int(floor(max(0.0, value) + 0.5))
-    try:
-        return float(str(value).strip().replace(" ", "").replace(",", "."))
-    except (TypeError, ValueError):
-        return None
 
 
 def _as_text(value: Any) -> str | None:
@@ -2251,4 +2427,23 @@ def _panel_trip_row(segment: dict[str, Any], status: str) -> dict[str, Any]:
         "odometer_completion_source": segment.get("odometer_completion_source"),
         "status": status,
         "editable": segment.get("ended_at") is not None,
+    }
+
+
+def _map_trip_row(segment: dict[str, Any], status: str) -> dict[str, Any]:
+    """Serialize coordinates and context for a single map route segment."""
+    return {
+        "id": segment.get("id"),
+        "started_at": segment.get("started_at"),
+        "ended_at": segment.get("ended_at"),
+        "start_latitude": _as_float(segment.get("start_latitude")),
+        "start_longitude": _as_float(segment.get("start_longitude")),
+        "end_latitude": _as_float(segment.get("end_latitude")),
+        "end_longitude": _as_float(segment.get("end_longitude")),
+        "start_address": segment.get("start_address"),
+        "end_address": segment.get("end_address"),
+        "purpose": segment.get("purpose"),
+        "trip_type": segment.get("trip_type"),
+        "journey_role": segment.get("journey_role"),
+        "status": status,
     }

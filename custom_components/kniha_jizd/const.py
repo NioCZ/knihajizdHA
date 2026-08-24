@@ -38,21 +38,22 @@ DEFAULT_WAIT_TIMEOUT: Final = 600
 DEFAULT_LOCATION_SETTLE_SECONDS: Final = 60
 DEFAULT_RETURN_CONTEXT_HOURS: Final = 18
 DEFAULT_TRANSIENT_STOP_MINUTES: Final = 60
-DEFAULT_HOME_ADDRESS: Final = "Vrchlického 699, Kroměříž"
-DEFAULT_HOME_LATITUDE: Final = 49.2958889
-DEFAULT_HOME_LONGITUDE: Final = 17.3934167
-DEFAULT_COMPANY_ADDRESS: Final = "Na Jetelce 69"
-DEFAULT_COMPANY_LATITUDE: Final = 50.1135278
-DEFAULT_COMPANY_LONGITUDE: Final = 14.4978056
-DEFAULT_COMPANY_LABEL: Final = "Altium"
+DEFAULT_HOME_ADDRESS: Final = ""
+DEFAULT_HOME_LATITUDE: Final = ""
+DEFAULT_HOME_LONGITUDE: Final = ""
+DEFAULT_COMPANY_ADDRESS: Final = ""
+DEFAULT_COMPANY_LATITUDE: Final = ""
+DEFAULT_COMPANY_LONGITUDE: Final = ""
+DEFAULT_COMPANY_LABEL: Final = "Firma"
 DEFAULT_TRANSIENT_STOP_RADIUS: Final = 500
 LEARNED_TRANSIENT_RADIUS: Final = 200
+LEARNED_PRIVATE_RADIUS: Final = 250
 DEFAULT_PLACE_RADIUS: Final = 1000
 DEFAULT_INSTITUTION_SEARCH_RADIUS: Final = 3000
 DEFAULT_OVERPASS_URL: Final = "https://overpass-api.de/api/interpreter"
 DEFAULT_RELEVANCE_KEYWORDS: Final = (
     "genet, genom, dna, molekul, biomed, laborato, cytogen, sekven, "
-    "patolog, onkolog, mikrobiolog"
+    "patolog, onkolog, mikrobiolog, krev, hematol, transfuz, blood"
 )
 DEFAULT_NOMINATIM_URL: Final = "https://nominatim.openstreetmap.org/reverse"
 DEFAULT_NOMINATIM_USER_AGENT: Final = "HomeAssistant-kniha-jizd/1.0"
@@ -85,6 +86,7 @@ TRIP_TYPE_PRIVATE: Final = "private"
 TRIP_TYPE_CONTEXTUAL: Final = "contextual"
 
 PLACE_ROLE_CLIENT: Final = "client"
+PLACE_ROLE_PRIVATE: Final = "private"
 PLACE_ROLE_RETURN: Final = "return"
 PLACE_ROLE_TRANSIENT: Final = "transient"
 

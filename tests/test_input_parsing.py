@@ -23,26 +23,32 @@ class InputParsingTest(unittest.TestCase):
     def test_reads_standard_device_tracker_coordinates(self) -> None:
         """Use the normal latitude and longitude attributes first."""
         result = INPUT_MODULE.coordinates_from_state(
-            "home", {"latitude": 49.295, "longitude": 17.393}
+            "home", {"latitude": 50.0, "longitude": 14.0}
         )
 
-        self.assertEqual(result, (49.295, 17.393, "latitude_longitude"))
+        self.assertEqual(result, (50.0, 14.0, "latitude_longitude"))
+
+    def test_decimal_parser_keeps_coordinate_decimals(self) -> None:
+        """Do not lose GPS values before learned-place and map searches."""
+        self.assertEqual(INPUT_MODULE.parse_decimal("50,123 4567"), 50.1234567)
+        self.assertEqual(INPUT_MODULE.parse_decimal(14.7654321), 14.7654321)
+        self.assertIsNone(INPUT_MODULE.parse_decimal(True))
 
     def test_reads_android_geocoded_location_attribute(self) -> None:
         """Accept the lowercase Location attribute exposed by Android."""
         result = INPUT_MODULE.coordinates_from_state(
-            "Vrchlického 699", {"location": [49.2958889, 17.3934167]}
+            "Testovací 123", {"location": [50.1234567, 14.7654321]}
         )
 
-        self.assertEqual(result, (49.2958889, 17.3934167, "location"))
+        self.assertEqual(result, (50.1234567, 14.7654321, "location"))
 
     def test_reads_ios_location_text_attribute_case_insensitively(self) -> None:
         """Accept an iOS-style capitalized Location attribute represented as text."""
         result = INPUT_MODULE.coordinates_from_state(
-            "Address", {"Location": "49.2958889, 17.3934167"}
+            "Address", {"Location": "50.1234567, 14.7654321"}
         )
 
-        self.assertEqual(result, (49.2958889, 17.3934167, "location"))
+        self.assertEqual(result, (50.1234567, 14.7654321, "location"))
 
     def test_parses_localized_odometer_state_with_unit(self) -> None:
         """Handle spaces, thousands separators, decimals and a km suffix."""
