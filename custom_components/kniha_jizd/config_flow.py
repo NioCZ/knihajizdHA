@@ -42,15 +42,11 @@ from .const import (
     CONF_WAIT_TIMEOUT,
     DEFAULT_ADDRESS_ENTITY,
     DEFAULT_COMPANY_ADDRESS,
-    DEFAULT_COMPANY_LATITUDE,
     DEFAULT_COMPANY_LABEL,
-    DEFAULT_COMPANY_LONGITUDE,
     DEFAULT_COMPANY_RADIUS,
     DEFAULT_CLIENT_RADIUS,
     DEFAULT_GPS_ENTITY,
     DEFAULT_HOME_ADDRESS,
-    DEFAULT_HOME_LATITUDE,
-    DEFAULT_HOME_LONGITUDE,
     DEFAULT_HOME_RADIUS,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_LOCATION_SETTLE_SECONDS,
@@ -86,6 +82,27 @@ def _radius_default(
     except (TypeError, ValueError):
         legacy = default
     return max(25, min(legacy, legacy_cap))
+
+
+_COORDINATE_KEYS = (
+    CONF_HOME_LATITUDE,
+    CONF_HOME_LONGITUDE,
+    CONF_COMPANY_LATITUDE,
+    CONF_COMPANY_LONGITUDE,
+)
+
+
+def _coordinate_marker(
+    defaults: dict[str, Any], key: str, minimum: float, maximum: float
+) -> vol.Marker:
+    """Create a clearable optional coordinate with a numeric suggestion."""
+    try:
+        suggested = float(defaults.get(key))
+    except (TypeError, ValueError):
+        return vol.Optional(key)
+    if not minimum <= suggested <= maximum:
+        return vol.Optional(key)
+    return vol.Optional(key, description={"suggested_value": suggested})
 
 
 def _schema(defaults: dict[str, Any]) -> vol.Schema:
@@ -158,33 +175,49 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 CONF_HOME_ADDRESS,
                 default=defaults.get(CONF_HOME_ADDRESS, DEFAULT_HOME_ADDRESS),
             ): selector.TextSelector(),
-            vol.Optional(
-                CONF_HOME_LATITUDE,
-                default=defaults.get(CONF_HOME_LATITUDE, DEFAULT_HOME_LATITUDE),
-            ): vol.Any("", vol.All(vol.Coerce(float), vol.Range(min=-90, max=90))),
-            vol.Optional(
-                CONF_HOME_LONGITUDE,
-                default=defaults.get(CONF_HOME_LONGITUDE, DEFAULT_HOME_LONGITUDE),
-            ): vol.Any(
-                "", vol.All(vol.Coerce(float), vol.Range(min=-180, max=180))
+            _coordinate_marker(
+                defaults, CONF_HOME_LATITUDE, -90, 90
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-90,
+                    max=90,
+                    step="any",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            _coordinate_marker(
+                defaults, CONF_HOME_LONGITUDE, -180, 180
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-180,
+                    max=180,
+                    step="any",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
             ),
             vol.Optional(
                 CONF_COMPANY_ADDRESS,
                 default=defaults.get(CONF_COMPANY_ADDRESS, DEFAULT_COMPANY_ADDRESS),
             ): selector.TextSelector(),
-            vol.Optional(
-                CONF_COMPANY_LATITUDE,
-                default=defaults.get(
-                    CONF_COMPANY_LATITUDE, DEFAULT_COMPANY_LATITUDE
-                ),
-            ): vol.Any("", vol.All(vol.Coerce(float), vol.Range(min=-90, max=90))),
-            vol.Optional(
-                CONF_COMPANY_LONGITUDE,
-                default=defaults.get(
-                    CONF_COMPANY_LONGITUDE, DEFAULT_COMPANY_LONGITUDE
-                ),
-            ): vol.Any(
-                "", vol.All(vol.Coerce(float), vol.Range(min=-180, max=180))
+            _coordinate_marker(
+                defaults, CONF_COMPANY_LATITUDE, -90, 90
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-90,
+                    max=90,
+                    step="any",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            _coordinate_marker(
+                defaults, CONF_COMPANY_LONGITUDE, -180, 180
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-180,
+                    max=180,
+                    step="any",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
             ),
             vol.Optional(
                 CONF_COMPANY_LABEL,
@@ -296,7 +329,10 @@ class KnihaJizdOptionsFlow(config_entries.OptionsFlow):
     ) -> dict[str, Any]:
         """Manage the options."""
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            updated = dict(user_input)
+            for key in _COORDINATE_KEYS:
+                updated.setdefault(key, "")
+            return self.async_create_entry(data=updated)
 
         current = {**self._config_entry.data, **self._config_entry.options}
         return self.async_show_form(step_id="init", data_schema=_schema(current))
