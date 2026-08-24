@@ -1305,6 +1305,47 @@ class KnihaJizdRepository:
         _write_json_atomic(self.places_path, data)
         return {"deleted": place_id}
 
+    async def async_delete_place_anchor(
+        self, place_id: str, anchor_index: int
+    ) -> dict[str, Any]:
+        """Delete one physical point without deleting its whole logical place."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._delete_place_anchor_sync, place_id, anchor_index
+            )
+
+    def _delete_place_anchor_sync(
+        self, place_id: str, anchor_index: int
+    ) -> dict[str, Any]:
+        data = self._load_places_sync()
+        places: list[dict[str, Any]] = data["places"]
+        target = next((item for item in places if str(item.get("id")) == place_id), None)
+        if target is None:
+            raise ValueError("place was not found")
+        anchors = _place_anchors(target)
+        if anchor_index < 0 or anchor_index >= len(anchors):
+            raise ValueError("anchor was not found")
+
+        if len(anchors) == 1:
+            data["places"] = [item for item in places if item is not target]
+            place_deleted = True
+        else:
+            target["anchors"] = [
+                anchor for index, anchor in enumerate(anchors) if index != anchor_index
+            ]
+            for legacy_key in ("latitude", "longitude", "address"):
+                target.pop(legacy_key, None)
+            target["updated_at"] = datetime.now(UTC).isoformat()
+            place_deleted = False
+
+        data["version"] = _LEARNED_PLACES_VERSION
+        _write_json_atomic(self.places_path, data)
+        return {
+            "deleted_anchor": anchor_index,
+            "place_id": place_id,
+            "place_deleted": place_deleted,
+        }
+
     async def async_merge_places(
         self,
         place_ids: list[str],

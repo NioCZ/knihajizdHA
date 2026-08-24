@@ -598,6 +598,57 @@ class LearnedPlacesTest(unittest.TestCase):
             repository._delete_place_sync("one")
             self.assertEqual(repository._get_managed_places_sync(500, 250, 200), [])
 
+    def test_place_management_can_delete_only_one_physical_anchor(self) -> None:
+        """Removing a duplicate map point must preserve the logical place."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.places_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "places": [
+                            {
+                                "id": "one",
+                                "label": "Klient",
+                                "trip_type": "business",
+                                "place_role": "client",
+                                "anchors": [
+                                    {
+                                        "latitude": 50.0,
+                                        "longitude": 14.0,
+                                        "address": "Přední vjezd",
+                                    },
+                                    {
+                                        "latitude": 50.01,
+                                        "longitude": 14.0,
+                                        "address": "Chybný bod",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = repository._delete_place_anchor_sync("one", 1)
+            managed = repository._get_managed_places_sync(500, 250, 200)
+
+            self.assertFalse(result["place_deleted"])
+            self.assertEqual(len(managed), 1)
+            self.assertEqual(managed[0]["anchor_count"], 1)
+            self.assertEqual(managed[0]["anchors"][0]["address"], "Přední vjezd")
+
+            result = repository._delete_place_anchor_sync("one", 0)
+
+            self.assertTrue(result["place_deleted"])
+            self.assertEqual(repository._get_managed_places_sync(500, 250, 200), [])
+
     def test_manual_historical_correction_retrains_place_exactly(self) -> None:
         """Replace a wrong learned default instead of creating a mixed duplicate."""
         test_output = ROOT / "test-output"

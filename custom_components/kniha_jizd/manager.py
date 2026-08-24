@@ -450,8 +450,10 @@ class KnihaJizdManager:
             "last_error": self._last_error,
         }
 
-    async def async_get_map_data(self) -> dict[str, Any]:
-        """Build current, learned and configured place data for the panel map."""
+    async def _async_get_visible_place_markers(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return the exact configured and learned points shown on the map."""
         learned_places = await self.repository.async_get_places_for_map(
             self.client_radius,
             self.private_radius,
@@ -486,6 +488,13 @@ class KnihaJizdManager:
                 configured_places.append(marker)
         learned_places = suppress_configured_place_duplicates(
             learned_places, configured_places
+        )
+        return configured_places, learned_places
+
+    async def async_get_map_data(self) -> dict[str, Any]:
+        """Build current, learned and configured place data for the panel map."""
+        configured_places, learned_places = (
+            await self._async_get_visible_place_markers()
         )
 
         location = self._capture_location()
@@ -593,13 +602,24 @@ class KnihaJizdManager:
         }
 
     async def async_get_places_data(self) -> dict[str, Any]:
-        """Return editable learned places and the active split-radius defaults."""
+        """Return every stored point plus the exact points visible on the map."""
         places = await self.repository.async_get_managed_places(
             self.client_radius, self.private_radius, self.transient_radius
+        )
+        configured_places, learned_map_places = (
+            await self._async_get_visible_place_markers()
         )
         return {
             "generated_at": _iso_utc(datetime.now(UTC)),
             "places": places,
+            "configured_places": configured_places,
+            "visible_learned_point_ids": [
+                marker["id"] for marker in learned_map_places
+            ],
+            "stored_point_count": sum(
+                int(place.get("anchor_count") or 0) for place in places
+            ),
+            "map_point_count": len(configured_places) + len(learned_map_places),
             "radii": {
                 "home": self.home_radius,
                 "company": self.company_radius,
@@ -627,6 +647,16 @@ class KnihaJizdManager:
             if not place_id:
                 raise ValueError("place_id is required")
             result = await self.repository.async_delete_place(place_id)
+        elif action == "delete_anchor":
+            place_id = str(payload.get("place_id") or "").strip()
+            anchor_index = payload.get("anchor_index")
+            if not place_id:
+                raise ValueError("place_id is required")
+            if isinstance(anchor_index, bool) or not isinstance(anchor_index, int):
+                raise ValueError("anchor_index must be an integer")
+            result = await self.repository.async_delete_place_anchor(
+                place_id, anchor_index
+            )
         elif action == "merge":
             raw_ids = payload.get("place_ids")
             if not isinstance(raw_ids, list):
@@ -638,7 +668,7 @@ class KnihaJizdManager:
                 _as_float(payload.get("radius_m")),
             )
         else:
-            raise ValueError("action must be update, delete or merge")
+            raise ValueError("action must be update, delete, delete_anchor or merge")
         self._notify_listeners()
         return {**result, "data": await self.async_get_places_data()}
 
