@@ -193,10 +193,10 @@ class KnihaJizdMap extends HTMLElement {
     }
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display:block; color:var(--primary-text-color); }
+        :host { display:block; width:100%; min-width:0; color:var(--primary-text-color); }
         * { box-sizing:border-box; }
-        .map-layout { display:grid; grid-template-columns:minmax(0,1fr) 290px; gap:16px; }
-        .map-canvas { position:relative; height:min(68vh,680px); min-height:460px; overflow:hidden; border-radius:12px; background:#d9e3e8; cursor:grab; touch-action:none; user-select:none; }
+        .map-layout { display:grid; min-width:0; grid-template-columns:minmax(0,1fr) 290px; gap:16px; }
+        .map-canvas { position:relative; min-width:0; height:min(68vh,680px); min-height:460px; overflow:hidden; border-radius:12px; background:#d9e3e8; cursor:grab; touch-action:pan-y pinch-zoom; user-select:none; }
         .map-canvas.dragging { cursor:grabbing; }
         .tile-layer, .zone-layer, .marker-layer { position:absolute; inset:0; overflow:hidden; }
         .tile-layer img { position:absolute; width:256px; height:256px; max-width:none; user-select:none; pointer-events:none; }

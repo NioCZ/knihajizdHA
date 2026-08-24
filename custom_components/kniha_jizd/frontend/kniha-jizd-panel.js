@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.11.0";
+import "./kniha-jizd-map.js?v=1.11.1";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -8,7 +8,7 @@ class KnihaJizdPanel extends HTMLElement {
     this._exporting = false;
     this._message = "";
     this._savingTrip = null;
-    this._tableScrollLeft = 0;
+    this._scrollPositions = new Map();
     this._activeTab = "overview";
     this._mapData = null;
     this._mapLoading = false;
@@ -166,11 +166,15 @@ class KnihaJizdPanel extends HTMLElement {
     }
   }
 
-  _tripTable(rows, emptyMessage = "Pro vybraný den není zaznamenána žádná jízda.") {
+  _tripTable(
+    rows,
+    emptyMessage = "Pro vybraný den není zaznamenána žádná jízda.",
+    scrollKey = "overview-trips",
+  ) {
     if (!Array.isArray(rows) || rows.length === 0) {
       return `<div class="muted">${this._text(emptyMessage)}</div>`;
     }
-    return `<div class="table-wrap"><table><thead><tr>
+    return `<div class="table-wrap" data-scroll-key="${scrollKey}"><table><thead><tr>
       <th>Čas</th><th>Odkud</th><th>Kam</th><th>km</th><th>Zákazník / účel</th><th>Typ</th><th>Rozhodnutí</th><th>Stav</th><th></th>
     </tr></thead><tbody>${rows.map((trip) => {
       const privateSelected = trip.trip_type === "private";
@@ -281,9 +285,11 @@ class KnihaJizdPanel extends HTMLElement {
         </span>
       </button>`);
     }
-    return `<div class="calendar-weekdays" aria-hidden="true">
-      ${["Po", "Út", "St", "Čt", "Pá", "So", "Ne"].map((day) => `<span>${day}</span>`).join("")}
-    </div><div class="calendar-grid">${cells.join("")}</div>`;
+    return `<div class="calendar-scroll" data-scroll-key="history-calendar"><div class="calendar-content">
+      <div class="calendar-weekdays" aria-hidden="true">
+        ${["Po", "Út", "St", "Čt", "Pá", "So", "Ne"].map((day) => `<span>${day}</span>`).join("")}
+      </div><div class="calendar-grid">${cells.join("")}</div>
+    </div></div>`;
   }
 
   async _loadHistoryData() {
@@ -502,7 +508,7 @@ class KnihaJizdPanel extends HTMLElement {
   _placesTable() {
     const places = this._placesData?.places || [];
     if (!places.length) return '<div class="muted">Zatím nejsou uložena žádná naučená místa.</div>';
-    return `<div class="table-wrap places-table"><table><thead><tr>
+    return `<div class="table-wrap places-table" data-scroll-key="places"><table><thead><tr>
       <th></th><th>Název</th><th>Typ</th><th>Poloměr</th><th>Kotvy</th><th>Poslední známé místo</th><th></th>
     </tr></thead><tbody>${places.map((place) => {
       const anchor = place.anchors?.[place.anchors.length - 1] || {};
@@ -526,8 +532,9 @@ class KnihaJizdPanel extends HTMLElement {
 
   _render() {
     if (!this.shadowRoot) return;
-    const currentTableWrap = this.shadowRoot.querySelector?.(".table-wrap");
-    if (currentTableWrap) this._tableScrollLeft = currentTableWrap.scrollLeft;
+    this.shadowRoot.querySelectorAll?.("[data-scroll-key]").forEach((surface) => {
+      this._scrollPositions.set(surface.dataset.scrollKey, surface.scrollLeft);
+    });
     if (!this._hass) {
       this.shadowRoot.innerHTML = "<p>Načítám Knihu jízd…</p>";
       return;
@@ -567,13 +574,13 @@ class KnihaJizdPanel extends HTMLElement {
       <style>
         :host { display:block; min-height:100%; background:var(--primary-background-color); color:var(--primary-text-color); }
         * { box-sizing:border-box; }
-        main { max-width:1200px; margin:0 auto; padding:24px; font-family:var(--paper-font-body1_-_font-family, sans-serif); }
+        main { width:100%; max-width:1200px; min-width:0; margin:0 auto; padding:24px; font-family:var(--paper-font-body1_-_font-family, sans-serif); }
         header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:24px; flex-wrap:wrap; }
         h1 { margin:0; font-size:28px; } h2 { margin:0 0 16px; font-size:18px; }
         .pill { border-radius:999px; padding:8px 14px; font-weight:600; background:var(--secondary-background-color); }
         .pill.ready { color:var(--success-color, #2e7d32); } .pill.error { color:var(--error-color, #c62828); }
         .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:16px; margin-bottom:16px; }
-        .card { background:var(--card-background-color); border-radius:14px; padding:18px; box-shadow:var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.12)); }
+        .card { min-width:0; max-width:100%; background:var(--card-background-color); border-radius:14px; padding:18px; box-shadow:var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.12)); }
         .metric { font-size:28px; font-weight:700; margin-top:8px; } .muted, small { color:var(--secondary-text-color); }
         small { display:block; margin-top:3px; overflow-wrap:anywhere; }
         .check { display:flex; gap:10px; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--divider-color); }
@@ -592,7 +599,7 @@ class KnihaJizdPanel extends HTMLElement {
         button { color:var(--text-primary-color,#fff); background:var(--primary-color); }
         button:disabled { opacity:.6; cursor:wait; } a.button { color:var(--primary-color); background:var(--secondary-background-color); }
         .message { margin-top:12px; color:var(--secondary-text-color); }
-        .table-wrap { position:relative; display:block; width:100%; max-width:100%; min-width:0; overflow-x:scroll; overflow-y:visible; overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; scrollbar-gutter:stable; padding-bottom:8px; }
+        .table-wrap, .calendar-scroll { position:relative; display:block; width:100%; max-width:100%; min-width:0; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; scrollbar-gutter:stable; padding-bottom:8px; }
         table { width:max-content; min-width:1180px; border-collapse:collapse; margin-top:12px; }
         th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--divider-color); padding:9px 8px; min-width:75px; }
         th { color:var(--secondary-text-color); font-weight:600; } td:nth-child(2), td:nth-child(3) { min-width:180px; }
@@ -601,7 +608,8 @@ class KnihaJizdPanel extends HTMLElement {
         .decision summary { cursor:pointer; color:var(--primary-color); font-weight:600; }
         .decision div { margin-top:6px; }
         .review-label { color:var(--warning-color,#ef6c00); }
-        .daily-trips { min-width:0; overflow:hidden; margin-bottom:16px; }
+        .daily-trips, .history-view { min-width:0; }
+        .daily-trips { overflow:visible; margin-bottom:16px; }
         .tabs { display:flex; gap:6px; margin:-8px 0 22px; padding:5px; width:max-content; max-width:100%; overflow-x:auto; border-radius:12px; background:var(--secondary-background-color); }
         .tab { min-width:130px; padding:10px 16px; color:var(--primary-text-color); background:transparent; }
         .tab.active { color:var(--text-primary-color,#fff); background:var(--primary-color); }
@@ -609,6 +617,7 @@ class KnihaJizdPanel extends HTMLElement {
         .map-heading h2 { margin:0; }
         .map-heading button { padding:9px 14px; }
         .map-loading { min-height:20px; margin-bottom:12px; color:var(--secondary-text-color); }
+        .map-card, kniha-jizd-map { display:block; width:100%; min-width:0; }
         .history-heading { display:flex; justify-content:space-between; align-items:center; gap:14px; margin-bottom:16px; flex-wrap:wrap; }
         .history-heading h2 { margin:0; text-transform:capitalize; }
         .history-month-nav { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -618,7 +627,8 @@ class KnihaJizdPanel extends HTMLElement {
         .calendar-legend span { display:flex; align-items:center; gap:6px; }
         .legend-dot { width:10px; height:10px; border-radius:999px; background:#1976d2; }
         .legend-dot.private { background:#8e44ad; }
-        .calendar-weekdays, .calendar-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px; }
+        .calendar-content { min-width:630px; }
+        .calendar-weekdays, .calendar-grid { display:grid; grid-template-columns:repeat(7,minmax(84px,1fr)); gap:6px; }
         .calendar-weekdays { margin-bottom:6px; color:var(--secondary-text-color); text-align:center; font-size:12px; font-weight:700; }
         .calendar-day { min-width:0; min-height:96px; display:flex; flex-direction:column; align-items:stretch; gap:6px; padding:8px; color:var(--primary-text-color); background:var(--secondary-background-color); border:1px solid transparent; border-radius:10px; text-align:left; }
         .calendar-day:hover { border-color:var(--primary-color); }
@@ -705,7 +715,7 @@ class KnihaJizdPanel extends HTMLElement {
         </section>
         <section class="card daily-trips"><h2>Dnešní jízdy</h2>
           <div class="muted">Uložené i čekající jízdy lze opravit. Zákazník je u služební jízdy volitelný. Segmenty stejné celé cesty se upraví společně.</div>
-          ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.")}
+          ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.", "overview-trips")}
         </section>
         <section class="card"><h2>Excel report</h2>
           <div class="muted">Oba listy budou obsahovat pouze jízdy z vybraného měsíce.</div>
@@ -744,10 +754,10 @@ class KnihaJizdPanel extends HTMLElement {
           </section>
           <section class="card daily-trips"><h2>Jízdy vybraného dne</h2>
             <div class="muted">Historické záznamy lze opravit stejně jako dnešní jízdy.</div>
-            ${this._tripTable(historyRows)}
+            ${this._tripTable(historyRows, "Pro vybraný den není zaznamenána žádná jízda.", "history-trips")}
           </section>
         </div>` : ""}
-        ${this._activeTab === "map" ? `<section class="card">
+        ${this._activeTab === "map" ? `<section class="card map-card">
           <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Aktuální auto, naučené parkovací body, rozpoznávací poloměry a dnešní úseky.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
           <div class="map-loading"></div>
           <kniha-jizd-map></kniha-jizd-map>
@@ -805,16 +815,16 @@ class KnihaJizdPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll(".place-select").forEach((input) => {
       input.addEventListener("change", () => this._togglePlaceSelection(input));
     });
-    const tableWrap = this.shadowRoot.querySelector(".table-wrap");
-    if (tableWrap) {
-      tableWrap.scrollLeft = Math.min(
-        this._tableScrollLeft,
-        Math.max(0, tableWrap.scrollWidth - tableWrap.clientWidth),
+    this.shadowRoot.querySelectorAll("[data-scroll-key]").forEach((surface) => {
+      const scrollKey = surface.dataset.scrollKey;
+      surface.scrollLeft = Math.min(
+        this._scrollPositions.get(scrollKey) || 0,
+        Math.max(0, surface.scrollWidth - surface.clientWidth),
       );
-      tableWrap.addEventListener("scroll", () => {
-        this._tableScrollLeft = tableWrap.scrollLeft;
+      surface.addEventListener("scroll", () => {
+        this._scrollPositions.set(scrollKey, surface.scrollLeft);
       }, { passive: true });
-    }
+    });
     this._syncMapElement();
   }
 }
