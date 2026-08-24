@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
@@ -187,6 +188,42 @@ class NearbyInstitutionScoringTest(unittest.TestCase):
 
         self.assertEqual(false_candidate["keyword_matches"], [])
         self.assertEqual(true_candidate["keyword_matches"], ["dna"])
+
+    def test_successful_search_is_cached_with_visible_diagnostics(self) -> None:
+        """Avoid repeated Overpass calls and distinguish a cache result."""
+        searcher = SEARCH_MODULE.NearbyInstitutionSearcher(
+            object(), "https://example.invalid", "test", "krev"
+        )
+        calls = 0
+
+        async def fake_request(_query: str) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            return {
+                "elements": [
+                    {
+                        "type": "node",
+                        "id": 1,
+                        "lat": 49.3,
+                        "lon": 17.4,
+                        "tags": {"name": "Krevní centrum", "amenity": "blood_bank"},
+                    }
+                ]
+            }
+
+        searcher._async_request = fake_request
+
+        async def scenario() -> None:
+            first = await searcher.async_search(49.3, 17.4, 3000)
+            self.assertEqual(first[0]["name"], "Krevní centrum")
+            self.assertEqual(searcher.last_result["status"], "ok")
+            second = await searcher.async_search(49.3, 17.4, 3000)
+            self.assertEqual(second, first)
+            self.assertEqual(searcher.last_result["status"], "cached")
+            self.assertTrue(searcher.last_result["cache_hit"])
+
+        asyncio.run(scenario())
+        self.assertEqual(calls, 1)
 
 
 if __name__ == "__main__":

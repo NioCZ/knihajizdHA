@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.10.0";
+import "./kniha-jizd-map.js?v=1.11.0";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -21,6 +21,12 @@ class KnihaJizdPanel extends HTMLElement {
     this._historyData = null;
     this._historyLoading = false;
     this._historyError = "";
+    this._placesData = null;
+    this._placesLoading = false;
+    this._placesError = "";
+    this._placesMessage = "";
+    this._savingPlace = null;
+    this._selectedPlaces = new Set();
   }
 
   set hass(value) {
@@ -130,6 +136,11 @@ class KnihaJizdPanel extends HTMLElement {
     const distanceValue = row?.querySelector(".trip-distance")?.value;
     const distanceKm = distanceValue === "" ? undefined : Number(distanceValue);
     if (!segmentId) return;
+    if (tripType === "unclassified") {
+      this._message = "Před uložením vyberte služební nebo soukromý typ jízdy.";
+      this._render();
+      return;
+    }
     this._savingTrip = segmentId;
     this._message = "Ukládám opravu jízdy…";
     this._render();
@@ -160,9 +171,10 @@ class KnihaJizdPanel extends HTMLElement {
       return `<div class="muted">${this._text(emptyMessage)}</div>`;
     }
     return `<div class="table-wrap"><table><thead><tr>
-      <th>Čas</th><th>Odkud</th><th>Kam</th><th>km</th><th>Zákazník / účel</th><th>Typ</th><th>Stav</th><th></th>
+      <th>Čas</th><th>Odkud</th><th>Kam</th><th>km</th><th>Zákazník / účel</th><th>Typ</th><th>Rozhodnutí</th><th>Stav</th><th></th>
     </tr></thead><tbody>${rows.map((trip) => {
       const privateSelected = trip.trip_type === "private";
+      const reviewSelected = trip.trip_type === "unclassified";
       const disabled = !trip.editable || this._savingTrip === trip.id;
       return `<tr data-segment-id="${this._text(trip.id)}">
         <td>${this._time(trip.started_at)}</td>
@@ -171,13 +183,47 @@ class KnihaJizdPanel extends HTMLElement {
         <td><input class="trip-distance" type="number" min="0" step="1" value="${trip.distance_km ?? ""}" ${disabled ? "disabled" : ""}></td>
         <td><input class="trip-purpose" type="text" value="${this._text(trip.purpose, "")}" placeholder="Volitelný zákazník / účel" ${disabled ? "disabled" : ""}></td>
         <td><select class="trip-type" ${disabled ? "disabled" : ""}>
-          <option value="business" ${privateSelected ? "" : "selected"}>Služební</option>
+          ${reviewSelected ? '<option value="unclassified" selected disabled>Nevyřešená – vyberte typ</option>' : ""}
+          <option value="business" ${privateSelected || reviewSelected ? "" : "selected"}>Služební</option>
           <option value="private" ${privateSelected ? "selected" : ""}>Soukromá</option>
         </select></td>
-        <td>${this._statusLabel(trip.status)}${trip.odometer_ready ? "" : " · čeká km"}<small>${this._text(trip.distance_reconciliation_source)}</small></td>
+        <td>${this._decisionDetails(trip)}</td>
+        <td>${trip.needs_review ? '<strong class="review-label">K revizi</strong> · ' : ""}${this._statusLabel(trip.status)}${trip.odometer_ready ? "" : " · čeká km"}<small>${this._text(trip.distance_reconciliation_source)}</small></td>
         <td><button class="save-trip" ${disabled ? "disabled" : ""}>Uložit</button></td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
+  }
+
+  _decisionDetails(trip) {
+    const decision = trip?.decision || {};
+    const distance = decision.distance_m === undefined || decision.distance_m === null
+      ? "—"
+      : `${this._number(decision.distance_m)} m`;
+    const radius = decision.radius_m === undefined || decision.radius_m === null
+      ? "—"
+      : `${this._number(decision.radius_m)} m`;
+    const searchStatus = {
+      ok: "nalezeny návrhy",
+      empty: "bez výsledku",
+      cached: "výsledek z cache",
+      empty_cached: "cache bez výsledku",
+      stale_cache: "starší výsledek z cache",
+      error: "chyba služby",
+      skipped: "bez souřadnic",
+    }[decision.candidate_search_status] || decision.candidate_search_status;
+    return `<details class="decision"><summary>${this._text(decision.source_label, "Proč takto?")}</summary>
+      <div>${this._text(decision.explanation)}</div>
+      <small>Zdroj: ${this._text(decision.source)} · jistota: ${this._text(decision.confidence)}</small>
+      ${decision.matched_place_id || decision.distance_m !== null && decision.distance_m !== undefined
+        ? `<small>Místo: ${this._text(decision.matched_place_label)} · vzdálenost ${distance} / poloměr ${radius} · ${this._text(decision.match_method)}</small>`
+        : ""}
+      ${decision.return_gap_minutes !== null && decision.return_gap_minutes !== undefined
+        ? `<small>Návaznost: ${this._number(decision.return_gap_minutes, 1)} min · ${this._text(decision.return_reason)}</small>`
+        : ""}
+      ${searchStatus
+        ? `<small>Hledání institucí: ${this._text(searchStatus)} · pokusy ${this._text(decision.candidate_search_attempts, "0")}${decision.candidate_search_cache_hit ? " · cache" : ""}${decision.candidate_search_error ? ` · ${this._text(decision.candidate_search_error)}` : ""}</small>`
+        : ""}
+    </details>`;
   }
 
   _historyDateLabel(value) {
@@ -219,6 +265,7 @@ class KnihaJizdPanel extends HTMLElement {
       const privateKm = Number(summary.private_km || 0);
       const businessTrips = Number(summary.business_trips || 0);
       const privateTrips = Number(summary.private_trips || 0);
+      const reviewTrips = Number(summary.review_trips || 0);
       const classes = [
         "calendar-day",
         dateValue === this._historyDate ? "selected" : "",
@@ -230,6 +277,7 @@ class KnihaJizdPanel extends HTMLElement {
         <span class="day-values">
           ${businessTrips ? `<span class="calendar-value business" title="Služební">${this._number(businessKm)} km</span>` : ""}
           ${privateTrips ? `<span class="calendar-value private" title="Soukromé">${this._number(privateKm)} km</span>` : ""}
+          ${reviewTrips ? `<span class="calendar-value review" title="Nevyřešené">${this._number(reviewTrips)} k revizi</span>` : ""}
         </span>
       </button>`);
     }
@@ -330,11 +378,12 @@ class KnihaJizdPanel extends HTMLElement {
   }
 
   async _selectTab(tab) {
-    if (!new Set(["overview", "history", "map"]).has(tab)) return;
+    if (!new Set(["overview", "history", "map", "places"]).has(tab)) return;
     this._activeTab = tab;
     this._render();
     if (tab === "map" && !this._mapData) await this._loadMapData();
     if (tab === "history" && !this._historyData) await this._loadHistoryData();
+    if (tab === "places" && !this._placesData) await this._loadPlacesData();
   }
 
   _syncMapElement() {
@@ -368,6 +417,111 @@ class KnihaJizdPanel extends HTMLElement {
       this._mapLoading = false;
       this._syncMapElement();
     }
+  }
+
+  async _loadPlacesData() {
+    if (!this._hass || this._placesLoading) return;
+    this._placesLoading = true;
+    this._placesError = "";
+    this._render();
+    try {
+      this._placesData = await this._hass.callApi("GET", "kniha_jizd/places");
+      const validIds = new Set((this._placesData?.places || []).map((place) => String(place.id)));
+      this._selectedPlaces = new Set(
+        [...this._selectedPlaces].filter((placeId) => validIds.has(placeId)),
+      );
+    } catch (error) {
+      this._placesError = error.message || String(error);
+    } finally {
+      this._placesLoading = false;
+      this._render();
+    }
+  }
+
+  async _placeAction(payload, workingId) {
+    if (!this._hass || this._savingPlace) return;
+    this._savingPlace = workingId;
+    this._placesError = "";
+    this._placesMessage = "Ukládám změnu místa…";
+    this._render();
+    try {
+      const result = await this._hass.callApi("POST", "kniha_jizd/places", payload);
+      this._placesData = result.data || this._placesData;
+      this._placesMessage = "Změna místa byla uložena.";
+      if (payload.action === "delete" || payload.action === "merge") {
+        this._selectedPlaces = new Set();
+      }
+      this._mapData = null;
+    } catch (error) {
+      this._placesError = error.message || String(error);
+    } finally {
+      this._savingPlace = null;
+      this._render();
+    }
+  }
+
+  _savePlace(button) {
+    const row = button.closest("tr");
+    const placeId = row?.dataset?.placeId;
+    if (!placeId) return;
+    this._placeAction({
+      action: "update",
+      place_id: placeId,
+      label: row.querySelector(".place-label")?.value?.trim() || "",
+      classification: row.querySelector(".place-classification")?.value || "business",
+      radius_m: Number(row.querySelector(".place-radius")?.value),
+    }, placeId);
+  }
+
+  _deletePlace(button) {
+    const row = button.closest("tr");
+    const placeId = row?.dataset?.placeId;
+    const label = row?.querySelector(".place-label")?.value || "toto místo";
+    if (!placeId || !window.confirm(`Opravdu odstranit ${label}? Historické jízdy zůstanou zachované.`)) return;
+    this._placeAction({ action: "delete", place_id: placeId }, placeId);
+  }
+
+  _togglePlaceSelection(input) {
+    const selected = new Set(this._selectedPlaces);
+    if (input.checked) selected.add(String(input.value));
+    else selected.delete(String(input.value));
+    this._selectedPlaces = selected;
+    const mergeButton = this.shadowRoot?.getElementById("merge-places");
+    if (mergeButton) mergeButton.disabled = selected.size < 2 || Boolean(this._savingPlace);
+    const count = this.shadowRoot?.querySelector(".selected-place-count");
+    if (count) count.textContent = `${selected.size} vybráno`;
+  }
+
+  _mergeSelectedPlaces() {
+    const placeIds = [...this._selectedPlaces];
+    if (placeIds.length < 2) return;
+    if (!window.confirm(`Sloučit ${placeIds.length} vybraná místa do jednoho záznamu?`)) return;
+    this._placeAction({ action: "merge", place_ids: placeIds }, "merge");
+  }
+
+  _placesTable() {
+    const places = this._placesData?.places || [];
+    if (!places.length) return '<div class="muted">Zatím nejsou uložena žádná naučená místa.</div>';
+    return `<div class="table-wrap places-table"><table><thead><tr>
+      <th></th><th>Název</th><th>Typ</th><th>Poloměr</th><th>Kotvy</th><th>Poslední známé místo</th><th></th>
+    </tr></thead><tbody>${places.map((place) => {
+      const anchor = place.anchors?.[place.anchors.length - 1] || {};
+      const disabled = Boolean(this._savingPlace);
+      return `<tr data-place-id="${this._text(place.id)}">
+        <td><input class="place-select" type="checkbox" value="${this._text(place.id)}" ${this._selectedPlaces.has(String(place.id)) ? "checked" : ""} ${disabled ? "disabled" : ""}></td>
+        <td><input class="place-label" type="text" value="${this._text(place.label, "")}" ${disabled ? "disabled" : ""}></td>
+        <td><select class="place-classification" ${disabled ? "disabled" : ""}>
+          <option value="business" ${place.classification === "business" ? "selected" : ""}>Služební</option>
+          <option value="private" ${place.classification === "private" ? "selected" : ""}>Soukromé</option>
+          <option value="mixed" ${place.classification === "mixed" ? "selected" : ""}>Služební i soukromé</option>
+          <option value="transient" ${place.classification === "transient" ? "selected" : ""}>Krátká zastávka</option>
+        </select></td>
+        <td><input class="place-radius" type="number" min="25" max="5000" step="25" value="${this._text(place.radius_m, "")}" ${disabled ? "disabled" : ""}> m</td>
+        <td>${this._text(place.anchor_count, "0")}</td>
+        <td>${this._text(anchor.address)}<small>${this._number(anchor.latitude, 5)}, ${this._number(anchor.longitude, 5)}</small></td>
+        <td><div class="place-actions"><button class="save-place" ${disabled ? "disabled" : ""}>Uložit</button><button class="delete-place danger" ${disabled ? "disabled" : ""}>Odstranit</button></div></td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
   }
 
   _render() {
@@ -438,13 +592,17 @@ class KnihaJizdPanel extends HTMLElement {
         button { color:var(--text-primary-color,#fff); background:var(--primary-color); }
         button:disabled { opacity:.6; cursor:wait; } a.button { color:var(--primary-color); background:var(--secondary-background-color); }
         .message { margin-top:12px; color:var(--secondary-text-color); }
-        .table-wrap { max-width:100%; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; }
-        table { width:max-content; min-width:100%; border-collapse:collapse; margin-top:12px; }
+        .table-wrap { position:relative; display:block; width:100%; max-width:100%; min-width:0; overflow-x:scroll; overflow-y:visible; overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; scrollbar-gutter:stable; padding-bottom:8px; }
+        table { width:max-content; min-width:1180px; border-collapse:collapse; margin-top:12px; }
         th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--divider-color); padding:9px 8px; min-width:75px; }
         th { color:var(--secondary-text-color); font-weight:600; } td:nth-child(2), td:nth-child(3) { min-width:180px; }
         .save-trip { padding:9px 13px; white-space:nowrap; }
+        .decision { min-width:220px; max-width:330px; }
+        .decision summary { cursor:pointer; color:var(--primary-color); font-weight:600; }
+        .decision div { margin-top:6px; }
+        .review-label { color:var(--warning-color,#ef6c00); }
         .daily-trips { min-width:0; overflow:hidden; margin-bottom:16px; }
-        .tabs { display:flex; gap:6px; margin:-8px 0 22px; padding:5px; width:max-content; max-width:100%; border-radius:12px; background:var(--secondary-background-color); }
+        .tabs { display:flex; gap:6px; margin:-8px 0 22px; padding:5px; width:max-content; max-width:100%; overflow-x:auto; border-radius:12px; background:var(--secondary-background-color); }
         .tab { min-width:130px; padding:10px 16px; color:var(--primary-text-color); background:transparent; }
         .tab.active { color:var(--text-primary-color,#fff); background:var(--primary-color); }
         .map-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
@@ -471,12 +629,22 @@ class KnihaJizdPanel extends HTMLElement {
         .day-values { display:flex; flex-direction:column; gap:4px; margin-top:auto; min-width:0; }
         .calendar-value { display:block; overflow:hidden; padding:3px 5px; border-radius:6px; color:#fff; background:#1976d2; font-size:11px; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
         .calendar-value.private { background:#8e44ad; }
+        .calendar-value.review { background:#ef6c00; }
         .history-status { min-height:20px; margin:0 0 12px; color:var(--secondary-text-color); }
+        .places-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+        .places-heading h2 { margin:0; }
+        .place-toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+        .places-table table { min-width:1050px; }
+        .place-actions { display:flex; gap:6px; }
+        .place-actions button { padding:8px 10px; white-space:nowrap; }
+        button.danger { background:var(--error-color,#c62828); }
+        .radius-summary { display:flex; gap:10px 16px; flex-wrap:wrap; margin:8px 0 16px; color:var(--secondary-text-color); }
         @media (max-width:600px) {
           main { padding:16px; } dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:8px; }
           .calendar-weekdays, .calendar-grid { gap:3px; }
           .calendar-day { min-height:75px; padding:5px; border-radius:7px; }
           .calendar-value { padding:2px 3px; font-size:9px; }
+          .table-wrap { margin:0 -4px; width:calc(100% + 8px); }
         }
       </style>
       <main>
@@ -487,6 +655,7 @@ class KnihaJizdPanel extends HTMLElement {
           <button class="tab ${this._activeTab === "overview" ? "active" : ""}" data-tab="overview">Přehled</button>
           <button class="tab ${this._activeTab === "history" ? "active" : ""}" data-tab="history">Historie</button>
           <button class="tab ${this._activeTab === "map" ? "active" : ""}" data-tab="map">Mapa míst</button>
+          <button class="tab ${this._activeTab === "places" ? "active" : ""}" data-tab="places">Správa míst</button>
         </nav>
         <div ${this._activeTab === "overview" ? "" : "hidden"}>
         <section class="grid">
@@ -494,6 +663,7 @@ class KnihaJizdPanel extends HTMLElement {
           <article class="card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateKm?.state)} km</div></article>
           <article class="card"><div class="muted">Dnešní jízdy</div><div class="metric">${this._text(todayTrips?.state, "0")}</div></article>
           <article class="card"><div class="muted">Čekající jízdy</div><div class="metric">${this._text(pending?.state, "0")}</div></article>
+          <article class="card"><div class="muted">Jízdy k revizi</div><div class="metric">${this._text(attrs.review_count, "0")}</div><small>Dnes ${this._text(attrs.today_review_count, "0")}</small></article>
           <article class="card"><div class="muted">Celkem záznamů</div><div class="metric">${this._text(totalTrips?.state, "0")}</div></article>
           <article class="card"><div class="muted">Celkem služební</div><div class="metric">${this._number(totalBusiness?.state)} km</div></article>
           <article class="card"><div class="muted">Celkem soukromé</div><div class="metric">${this._number(totalPrivate?.state)} km</div></article>
@@ -514,10 +684,12 @@ class KnihaJizdPanel extends HTMLElement {
             <dt>Čeká na cíl celé jízdy</dt><dd>${this._text(attrs.transient_count, "0")}</dd>
             <dt>Návaznost návratu</dt><dd>${this._text(attrs.return_context_hours)} h</dd>
             <dt>Limit mezizastávky</dt><dd>${this._text(attrs.transient_stop_minutes)} min</dd>
+            <dt>Automatická revize</dt><dd>${this._text(attrs.pending_review_hours)} h</dd>
             <dt>Ustálení cíle</dt><dd>${this._text(attrs.location_settle_seconds)} s</dd>
             <dt>Denní kontrola km</dt><dd>${odometerCheck.consistent ? "Sedí" : "Čeká / rozdíl"} · odometer ${this._number(odometerCheck.odometer_delta_km)} km · potvrzené segmenty ${this._number(odometerCheck.assigned_segment_km)} km · čekající ${this._number(odometerCheck.pending_segment_km)} km · rozdíl ${this._number(odometerCheck.difference_km)} km</dd>
             <dt>Domov</dt><dd>${this._text(attrs.home_address)} · ${this._text(attrs.home_latitude)}, ${this._text(attrs.home_longitude)}</dd>
             <dt>Firma</dt><dd>${this._text(attrs.company_address)} · ${this._text(attrs.company_latitude)}, ${this._text(attrs.company_longitude)} → ${this._text(attrs.company_label)}</dd>
+            <dt>Poloměry</dt><dd>domov ${this._number(attrs.home_radius_m)} m · firma ${this._number(attrs.company_radius_m)} m · klient ${this._number(attrs.client_radius_m)} m · soukromé ${this._number(attrs.private_radius_m)} m · zastávka ${this._number(attrs.transient_radius_m)} m</dd>
             <dt>Poslední volba z telefonu</dt><dd>${attrs.last_notification_action ? `${this._text(attrs.last_notification_action.action)} · ${this._text(attrs.last_notification_action.processed_at)}` : "—"}</dd>
             <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
           </dl></article>
@@ -525,7 +697,7 @@ class KnihaJizdPanel extends HTMLElement {
             <dt>Vzdálenost</dt><dd>${this._number(lastTrip?.state)} km</dd>
             <dt>Celá cesta</dt><dd>${this._number(last.journey_distance_km)} km / ${this._text(last.journey_segment_count, "1")} segmentů</dd>
             <dt>Zákazník</dt><dd>${this._text(last.purpose)}</dd>
-            <dt>Typ</dt><dd>${last.journey_role === "return" ? "Služební návrat" : last.trip_type === "private" ? "Soukromá" : this._text(last.trip_type)}</dd>
+            <dt>Typ</dt><dd>${last.journey_role === "return" ? "Služební návrat" : last.trip_type === "private" ? "Soukromá" : last.trip_type === "unclassified" ? "Nevyřešená – k revizi" : this._text(last.trip_type)}</dd>
             <dt>Start</dt><dd>${this._text(last.start_address)}</dd>
             <dt>Cíl</dt><dd>${this._text(last.end_address)}</dd>
             <dt>Konec</dt><dd>${this._text(last.ended_at)}</dd>
@@ -559,7 +731,7 @@ class KnihaJizdPanel extends HTMLElement {
               : this._historyLoading
                 ? "Načítám historii…"
                 : this._historyData
-                  ? `Za měsíc: ${this._number(this._historyData.month_business_km)} služebních km, ${this._number(this._historyData.month_private_km)} soukromých km, ${this._text(this._historyData.month_trips, "0")} záznamů.`
+                  ? `Za měsíc: ${this._number(this._historyData.month_business_km)} služebních km, ${this._number(this._historyData.month_private_km)} soukromých km, ${this._text(this._historyData.month_trips, "0")} záznamů, ${this._text(this._historyData.month_review_trips, "0")} k revizi.`
                   : "Historie ještě není načtená."}</div>
             <div class="calendar-legend"><span><i class="legend-dot"></i>Služební km</span><span><i class="legend-dot private"></i>Soukromé km</span></div>
             ${this._historyCalendar()}
@@ -568,6 +740,7 @@ class KnihaJizdPanel extends HTMLElement {
             <article class="card"><div class="muted">Vybraný den</div><div class="metric">${this._text(this._historyDateLabel(this._historyDate))}</div></article>
             <article class="card"><div class="muted">Služební</div><div class="metric">${this._number(selectedDay.business_km || 0)} km</div><small>${this._text(selectedDay.business_trips, "0")} jízd</small></article>
             <article class="card"><div class="muted">Soukromé</div><div class="metric">${this._number(selectedDay.private_km || 0)} km</div><small>${this._text(selectedDay.private_trips, "0")} jízd</small></article>
+            <article class="card"><div class="muted">K revizi</div><div class="metric">${this._text(selectedDay.review_trips, "0")}</div><small>nezapočteno do typu</small></article>
           </section>
           <section class="card daily-trips"><h2>Jízdy vybraného dne</h2>
             <div class="muted">Historické záznamy lze opravit stejně jako dnešní jízdy.</div>
@@ -578,6 +751,14 @@ class KnihaJizdPanel extends HTMLElement {
           <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Aktuální auto, naučené parkovací body, rozpoznávací poloměry a dnešní úseky.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
           <div class="map-loading"></div>
           <kniha-jizd-map></kniha-jizd-map>
+        </section>` : ""}
+        ${this._activeTab === "places" ? `<section class="card daily-trips">
+          <div class="places-heading"><div><h2>Správa naučených míst</h2><div class="muted">Běžné místo má jeden typ; volbu „Služební i soukromé“ používejte jen pro skutečnou výjimku.</div></div>
+            <div class="place-toolbar"><span class="selected-place-count">${this._selectedPlaces.size} vybráno</span><button id="merge-places" ${this._selectedPlaces.size < 2 || this._savingPlace ? "disabled" : ""}>Sloučit vybrané</button><button id="refresh-places" ${this._placesLoading || this._savingPlace ? "disabled" : ""}>Aktualizovat</button></div>
+          </div>
+          <div class="radius-summary">Aktivní výchozí poloměry: domov ${this._number(this._placesData?.radii?.home)} m · firma ${this._number(this._placesData?.radii?.company)} m · klient ${this._number(this._placesData?.radii?.business)} m · soukromé ${this._number(this._placesData?.radii?.private)} m · zastávka ${this._number(this._placesData?.radii?.transient)} m</div>
+          <div class="history-status">${this._placesError ? `Správu míst se nepodařilo načíst: ${this._text(this._placesError)}` : this._placesLoading ? "Načítám místa…" : this._text(this._placesMessage, this._placesData ? `${this._placesData.places?.length || 0} uložených míst.` : "Místa ještě nejsou načtená.")}</div>
+          ${this._placesTable()}
         </section>` : ""}
       </main>`;
     this.shadowRoot.querySelectorAll(".tab").forEach((button) => {
@@ -606,12 +787,23 @@ class KnihaJizdPanel extends HTMLElement {
       );
     });
     this.shadowRoot.getElementById("refresh-map")?.addEventListener("click", () => this._loadMapData());
+    this.shadowRoot.getElementById("refresh-places")?.addEventListener("click", () => this._loadPlacesData());
+    this.shadowRoot.getElementById("merge-places")?.addEventListener("click", () => this._mergeSelectedPlaces());
     this.shadowRoot.getElementById("month")?.addEventListener("change", (event) => {
       if (event.target.value) this._month = event.target.value;
     });
     this.shadowRoot.getElementById("export")?.addEventListener("click", () => this._exportExcel());
     this.shadowRoot.querySelectorAll(".save-trip").forEach((button) => {
       button.addEventListener("click", () => this._saveTrip(button));
+    });
+    this.shadowRoot.querySelectorAll(".save-place").forEach((button) => {
+      button.addEventListener("click", () => this._savePlace(button));
+    });
+    this.shadowRoot.querySelectorAll(".delete-place").forEach((button) => {
+      button.addEventListener("click", () => this._deletePlace(button));
+    });
+    this.shadowRoot.querySelectorAll(".place-select").forEach((input) => {
+      input.addEventListener("change", () => this._togglePlaceSelection(input));
     });
     const tableWrap = this.shadowRoot.querySelector(".table-wrap");
     if (tableWrap) {

@@ -21,8 +21,15 @@ CONF_COMPANY_ADDRESS: Final = "company_address"
 CONF_COMPANY_LATITUDE: Final = "company_latitude"
 CONF_COMPANY_LONGITUDE: Final = "company_longitude"
 CONF_COMPANY_LABEL: Final = "company_label"
+# Legacy combined radius retained only for config-entry migration.
 CONF_PLACE_RADIUS: Final = "place_radius"
+CONF_HOME_RADIUS: Final = "home_radius"
+CONF_COMPANY_RADIUS: Final = "company_radius"
+CONF_CLIENT_RADIUS: Final = "client_radius"
+CONF_PRIVATE_RADIUS: Final = "private_radius"
+CONF_TRANSIENT_RADIUS: Final = "transient_radius"
 CONF_INSTITUTION_SEARCH_RADIUS: Final = "institution_search_radius"
+CONF_PENDING_REVIEW_HOURS: Final = "pending_review_hours"
 CONF_OVERPASS_URL: Final = "overpass_url"
 CONF_RELEVANCE_KEYWORDS: Final = "relevance_keywords"
 CONF_NOMINATIM_URL: Final = "nominatim_url"
@@ -48,8 +55,15 @@ DEFAULT_COMPANY_LABEL: Final = "Firma"
 DEFAULT_TRANSIENT_STOP_RADIUS: Final = 500
 LEARNED_TRANSIENT_RADIUS: Final = 200
 LEARNED_PRIVATE_RADIUS: Final = 250
+# DEFAULT_PLACE_RADIUS is the pre-1.11 legacy value.
 DEFAULT_PLACE_RADIUS: Final = 1000
+DEFAULT_HOME_RADIUS: Final = 300
+DEFAULT_COMPANY_RADIUS: Final = 300
+DEFAULT_CLIENT_RADIUS: Final = 500
+DEFAULT_PRIVATE_RADIUS: Final = 250
+DEFAULT_TRANSIENT_RADIUS: Final = 200
 DEFAULT_INSTITUTION_SEARCH_RADIUS: Final = 3000
+DEFAULT_PENDING_REVIEW_HOURS: Final = 24
 DEFAULT_OVERPASS_URL: Final = "https://overpass-api.de/api/interpreter"
 DEFAULT_RELEVANCE_KEYWORDS: Final = (
     "genet, genom, dna, molekul, biomed, laborato, cytogen, sekven, "
@@ -84,6 +98,7 @@ ACTION_RETURN: Final = "RETURN"
 TRIP_TYPE_BUSINESS: Final = "business"
 TRIP_TYPE_PRIVATE: Final = "private"
 TRIP_TYPE_CONTEXTUAL: Final = "contextual"
+TRIP_TYPE_UNCLASSIFIED: Final = "unclassified"
 
 PLACE_ROLE_CLIENT: Final = "client"
 PLACE_ROLE_MIXED: Final = "mixed"

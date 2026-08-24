@@ -83,7 +83,8 @@ umí kromě čistého číselného stavu přečíst také hodnotu s jednotkou ne
   poslední dostupná hodnota. Raw data pak obsahují
   `odometer_wait_timed_out: true` a
   `odometer_completion_source: timeout_latest_value`.
-- Potvrzené místo v okruhu 1 000 m se zařadí automaticky. U neznámého cíle se
+- Potvrzené služební místo ve výchozím okruhu 500 m se zařadí automaticky.
+  Soukromé místo používá výchozí okruh 250 m. U neznámého cíle se
   v okruhu 3 000 m vyhledají a obodují odborné instituce a odešle se notifikace.
 
 Na notifikaci lze odpovědět ještě před dokončením tachometru. Klasifikace se uloží
@@ -99,7 +100,7 @@ ukončení se použije původní záložní poloha místo aktuální polohy tele
 ### Nastavený domov a firma
 
 Je-li dostupná GPS, integrace porovná cíl se zadanými souřadnicemi a použije
-**Poloměr potvrzeného místa** (výchozí 1 000 m). Text telefonu pak nemůže
+samostatný poloměr domova nebo firmy (výchozí 300 m). Text telefonu pak nemůže
 přebít GPS mimo tento okruh. Jen při chybějící GPS se krátká nastavená adresa
 porovnává s celou geokódovanou adresou: musí souhlasit ulice, číslo domu a
 všechny další zadané části. PSČ, stát, interpunkce ani diakritika shodu
@@ -205,11 +206,12 @@ zůstává v `distance_km_raw`.
 - **Osobní KM** – označí segment jako soukromý.
 
 U rozpoznané návazné jízdy se první dvě volby nahradí tlačítky **Služební návrat**
-a **Jiný klient**. Návratové místo se učí kontextově, nikoli napevno jako služební.
+a **Jiný klient**. Návrat je uložen jen jako vztah mezi jízdami (`journey_role` a
+`return_of_segment_id`); nevytváří ani neučí samostatný typ místa.
 
 Volba se spolu se souřadnicemi a typem jízdy uloží do
 `/config/learned_places.json`. Příští cíl v nastaveném poloměru se už neptá.
-Soukromé cíle se učí pod názvem mapového místa s konzervativní zónou 250 m,
+Soukromé cíle se učí pod názvem mapového místa s nastavitelnou výchozí zónou 250 m,
 takže několik různých soukromých cílů nesplyne do jedné široké kilometrové zóny.
 V raw jízdě zůstává účel `Soukromá`.
 
@@ -232,7 +234,9 @@ To funguje také v případě, kdy byla mobilní notifikace omylem smazána: seg
 zůstane ve stavu **Čeká na zařazení** a lze jej dokončit přímo v tabulce. Pokud
 ještě čeká tachometr, ruční volba se uloží a finální zápis proběhne později.
 Oprava již uložené cesty změní všechny segmenty se stejným `journey_id`, takže
-benzinka či odpočívadlo nezůstanou v jiném typu než konečný cíl.
+benzinka či odpočívadlo nezůstanou v jiném typu než konečný cíl. Současně se
+přeučí výchozí typ odpovídajícího fyzického místa; další návštěva proto neopakuje
+původní chybnou klasifikaci.
 
 Stejnou opravu lze volat jako HA akci:
 
@@ -254,11 +258,13 @@ Záložka **Mapa míst** v administračním panelu načítá přes přihlášen�
   použitého rozpoznávacího poloměru,
 - dnešní uložené i rozpracované úseky jízdy.
 
-Mapa rozlišuje klienty, soukromá a návratová místa. Nakonfigurovaný domov a firma
+Mapa rozlišuje klienty a soukromá místa. Nakonfigurovaný domov a firma
 mají vždy jen jeden bod bez ohledu na to, zda tam vedla soukromá nebo služební
 jízda. Krátké zastávky, například benzinky a obchody, se na mapě nekreslí a jejich
 úseky se sloučí do celé cesty k výslednému cíli. Interně zůstávají zapamatované jen
-pro správné rozpoznání návaznosti jízd. Podklad tvoří dlaždice OpenStreetMap.
+pro správné rozpoznání návaznosti jízd. Totéž platí pro interní návratový kontext:
+ovlivní zařazení trasy, ale nevytváří kategorii místa na mapě. Podklad tvoří
+dlaždice OpenStreetMap.
 
 Krátká zastávka nevyvolá okamžitou notifikaci. Integrace čeká nastavený počet
 minut na pokračování: pokud další jízda začne, zastávka zdědí klasifikaci celé
@@ -267,23 +273,42 @@ uloží jako standardní soukromý nebo služební cíl. Každé známé soukrom
 služebním cíli nejdřív počká na možné pokračování: při odjezdu v limitu zdědí
 služební cestu, bez pokračování se samo uloží jako soukromý cíl. Známé služební
 místo má naopak přednost a zaznamená se jako skutečný cíl i při krátké návštěvě.
+Pokud otázka na samostatnou krátkou zastávku zůstane bez odpovědi, po výchozích
+24 hodinách se segment uloží jako **Nevyřešený – k revizi**. Jeho kilometry se do
+opravy nezapočtou ani jako služební, ani jako soukromé a segment už nezůstává
+neomezeně v runtime frontě.
+
+### Správa míst
+
+Záložka **Správa míst** zobrazuje každý fyzický záznam, počet jeho parkovacích
+kotev, typ a skutečný poloměr. Místo lze přejmenovat, přepnout mezi služebním,
+soukromým, smíšenou výjimkou a interní krátkou zastávkou, změnit mu poloměr nebo
+je odstranit. Zaškrtnuté duplicity lze sloučit; historické jízdy zůstávají při
+odstranění místa zachované.
 
 ### Historie a kalendář
 
 Záložka **Historie** umožňuje přepínat měsíce a vybrat libovolný den. Kalendář
-zobrazuje u každého dne modře služební a fialově soukromé kilometry. Po kliknutí
+zobrazuje u každého dne modře služební, fialově soukromé kilometry a oranžově počet
+jízd čekajících na revizi. Po kliknutí
 na den se zobrazí jeho souhrn a stejná editovatelná tabulka jízd jako v dnešním
 přehledu. Historická data poskytuje pouze přihlášené administrační API a oprava
-řádku se promítne do denních i měsíčních součtů.
+řádku se promítne do denních i měsíčních součtů. Sloupec **Rozhodnutí** rozbalí
+zdroj klasifikace, nalezené místo, vzdálenost a poloměr, návratový kontext i stav
+vyhledávání okolních institucí.
 
 ## Rozpoznání nemocnic a výzkumných pracovišť
 
-Vyhledávání má dvě nezávislé vzdálenosti:
+Rozpoznávání používá oddělené vzdálenosti:
 
-- **Poloměr potvrzeného místa** – výchozí 1 000 m. Vztahuje se pouze na zákazníky,
+- **Domov** – výchozí 300 m.
+- **Firma** – výchozí 300 m.
+- **Služební místo** – výchozí 500 m. Vztahuje se na klienty,
   které už uživatel potvrdil. Nejbližší shoda se zapíše automaticky. Je-li GPS
   dostupná, shodná textová adresa nemůže tento okruh obejít; adresa je záloha jen
   při chybějících souřadnicích.
+- **Soukromé místo** – výchozí 250 m.
+- **Návaznost krátké zastávky** – výchozí 200 m.
 - **Poloměr hledání nových institucí** – výchozí 3 000 m. Slouží jen pro sestavení
   návrhů; samotný mapový odhad se bez potvrzení nezapíše.
 
@@ -296,8 +321,11 @@ pracoviště, laboratoře, cytogenetiku, sekvenování, patologii, onkologii a
 mikrobiologii. Za vzdálenost se body odečítají. Proto může relevantní genetický
 ústav porazit bližší obecnou nemocnici nebo univerzitu.
 
-Každý dokončený pokus ukládá také čas, použité souřadnice a počet výsledků do raw
-dat. Pokud mobilní notifikační služba při dojezdu ještě není zaregistrovaná,
+Každý dokončený pokus ukládá také čas, použité souřadnice, počet výsledků, stav,
+počet pokusů, použití cache a případnou chybu do raw dat. Overpass dotaz se při
+dočasné chybě opakuje až třikrát; úspěšné i prázdné výsledky se šest hodin cacheují
+a při výpadku lze použít i starší cache. Pokud mobilní notifikační služba při
+dojezdu ještě není zaregistrovaná,
 čekající otázka se automaticky odešle po jejím zpřístupnění.
 
 Do notifikace se vloží až tři nejlepší výsledky se vzdáleností. Tlačítko potvrzení
@@ -365,7 +393,8 @@ endpoint. Aktuální podmínky jsou v
 
 Kandidáty odborných institucí dodává samostatný Overpass endpoint. Používá se jeden
 sloučený dotaz na neznámý cíl, nejvýše jeden současně a s odstupem nejméně dvě
-sekundy. Oba endpointy jsou nastavitelné, takže je lze nahradit vlastními službami.
+sekundy mezi jednotlivými pokusy. Oba endpointy jsou nastavitelné, takže je lze
+nahradit vlastními službami.
 
 Souřadnice neznámého startu/cíle jsou při lookupu odeslány z HA na zvolený
 Nominatim endpoint; souřadnice neznámého cíle také na zvolený Overpass endpoint.

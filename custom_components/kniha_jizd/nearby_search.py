@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
+from datetime import UTC, datetime
 import logging
 from math import asin, cos, radians, sin, sqrt
 import re
@@ -13,6 +15,9 @@ import unicodedata
 from aiohttp import ClientError, ClientSession
 
 _LOGGER = logging.getLogger(__name__)
+
+_CACHE_TTL_SECONDS = 6 * 3600
+_MAX_ATTEMPTS = 3
 
 _AMENITY_WEIGHTS = {
     "blood_bank": 60.0,
@@ -42,6 +47,30 @@ class NearbyInstitutionSearcher:
         self._keywords = parse_keywords(keywords)
         self._request_lock = asyncio.Lock()
         self._last_request_started = 0.0
+        self._cache: dict[
+            tuple[float, float, int], tuple[float, list[dict[str, Any]]]
+        ] = {}
+        self._last_result: dict[str, Any] = {
+            "status": "not_run",
+            "attempts": 0,
+            "cache_hit": False,
+            "error": None,
+        }
+
+    @property
+    def last_result(self) -> dict[str, Any]:
+        """Return diagnostics for the most recently completed search."""
+        return deepcopy(self._last_result)
+
+    async def async_search_with_diagnostics(
+        self,
+        latitude: float | None,
+        longitude: float | None,
+        radius_meters: float,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Return candidates together with the diagnostics from the same call."""
+        candidates = await self.async_search(latitude, longitude, radius_meters)
+        return candidates, self.last_result
 
     async def async_search(
         self,
@@ -51,38 +80,106 @@ class NearbyInstitutionSearcher:
     ) -> list[dict[str, Any]]:
         """Return up to five scored institution candidates."""
         if latitude is None or longitude is None:
+            self._set_result("skipped", 0, False, None, 0)
             return []
 
         radius = max(100, min(10_000, int(round(radius_meters))))
         query = build_overpass_query(latitude, longitude, radius)
-        try:
-            async with self._request_lock:
-                delay = 2.0 - (time.monotonic() - self._last_request_started)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                self._last_request_started = time.monotonic()
-                async with asyncio.timeout(45):
-                    async with self._session.post(
-                        self._endpoint,
-                        data={"data": query},
-                        headers={
-                            "User-Agent": self._user_agent,
-                            "Accept": "application/json",
-                        },
-                    ) as response:
-                        response.raise_for_status()
-                        payload = await response.json(content_type=None)
-        except (TimeoutError, ClientError, ValueError) as err:
-            _LOGGER.warning("Nearby institution search failed: %s", err)
-            return []
+        cache_key = (round(latitude, 4), round(longitude, 4), radius)
+        cached = self._cache.get(cache_key)
+        if cached is not None and time.monotonic() - cached[0] <= _CACHE_TTL_SECONDS:
+            candidates = deepcopy(cached[1])
+            self._set_result(
+                "cached" if candidates else "empty_cached",
+                0,
+                True,
+                None,
+                len(candidates),
+            )
+            return candidates
 
-        return rank_overpass_candidates(
-            payload,
-            latitude,
-            longitude,
-            self._keywords,
-            limit=5,
-        )
+        last_error: str | None = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                payload = await self._async_request(query)
+                candidates = rank_overpass_candidates(
+                    payload,
+                    latitude,
+                    longitude,
+                    self._keywords,
+                    limit=5,
+                )
+                self._cache[cache_key] = (time.monotonic(), deepcopy(candidates))
+                if len(self._cache) > 128:
+                    oldest_key = min(self._cache, key=lambda key: self._cache[key][0])
+                    self._cache.pop(oldest_key, None)
+                self._set_result(
+                    "ok" if candidates else "empty",
+                    attempt,
+                    False,
+                    None,
+                    len(candidates),
+                )
+                return candidates
+            except (TimeoutError, ClientError, ValueError) as err:
+                last_error = str(err)
+                _LOGGER.warning(
+                    "Nearby institution search attempt %s/%s failed: %s",
+                    attempt,
+                    _MAX_ATTEMPTS,
+                    err,
+                )
+                if attempt < _MAX_ATTEMPTS:
+                    await asyncio.sleep(0.75 * attempt)
+
+        if cached is not None:
+            candidates = deepcopy(cached[1])
+            self._set_result(
+                "stale_cache",
+                _MAX_ATTEMPTS,
+                True,
+                last_error,
+                len(candidates),
+            )
+            return candidates
+        self._set_result("error", _MAX_ATTEMPTS, False, last_error, 0)
+        return []
+
+    async def _async_request(self, query: str) -> Any:
+        """Execute one rate-limited Overpass request."""
+        async with self._request_lock:
+            delay = 2.0 - (time.monotonic() - self._last_request_started)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._last_request_started = time.monotonic()
+            async with asyncio.timeout(45):
+                async with self._session.post(
+                    self._endpoint,
+                    data={"data": query},
+                    headers={
+                        "User-Agent": self._user_agent,
+                        "Accept": "application/json",
+                    },
+                ) as response:
+                    response.raise_for_status()
+                    return await response.json(content_type=None)
+
+    def _set_result(
+        self,
+        status: str,
+        attempts: int,
+        cache_hit: bool,
+        error: str | None,
+        candidate_count: int,
+    ) -> None:
+        self._last_result = {
+            "status": status,
+            "attempts": attempts,
+            "cache_hit": cache_hit,
+            "error": error,
+            "candidate_count": candidate_count,
+            "completed_at": datetime.now(UTC).isoformat(),
+        }
 
 
 def build_overpass_query(latitude: float, longitude: float, radius: int) -> str:

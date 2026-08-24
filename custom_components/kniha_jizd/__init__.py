@@ -29,44 +29,53 @@ from .const import (
     CONF_COMPANY_LATITUDE,
     CONF_COMPANY_LABEL,
     CONF_COMPANY_LONGITUDE,
+    CONF_COMPANY_RADIUS,
+    CONF_CLIENT_RADIUS,
     CONF_HOME_ADDRESS,
     CONF_HOME_LATITUDE,
     CONF_HOME_LONGITUDE,
+    CONF_HOME_RADIUS,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_LOCATION_SETTLE_SECONDS,
     CONF_NOMINATIM_EMAIL,
     CONF_NOMINATIM_URL,
     CONF_NOMINATIM_USER_AGENT,
     CONF_OVERPASS_URL,
+    CONF_PENDING_REVIEW_HOURS,
     CONF_PLACE_RADIUS,
+    CONF_PRIVATE_RADIUS,
     CONF_RELEVANCE_KEYWORDS,
     CONF_RETURN_CONTEXT_HOURS,
     CONF_TRANSIENT_STOP_MINUTES,
+    CONF_TRANSIENT_RADIUS,
     DEFAULT_COMPANY_ADDRESS,
     DEFAULT_COMPANY_LATITUDE,
     DEFAULT_COMPANY_LABEL,
     DEFAULT_COMPANY_LONGITUDE,
+    DEFAULT_COMPANY_RADIUS,
+    DEFAULT_CLIENT_RADIUS,
     DEFAULT_EXPORT_PATH,
     DEFAULT_HOME_ADDRESS,
     DEFAULT_HOME_LATITUDE,
     DEFAULT_HOME_LONGITUDE,
+    DEFAULT_HOME_RADIUS,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_LOCATION_SETTLE_SECONDS,
     DEFAULT_OVERPASS_URL,
+    DEFAULT_PENDING_REVIEW_HOURS,
     DEFAULT_PLACE_RADIUS,
+    DEFAULT_PRIVATE_RADIUS,
     DEFAULT_RELEVANCE_KEYWORDS,
     DEFAULT_RETURN_CONTEXT_HOURS,
     DEFAULT_TRANSIENT_STOP_MINUTES,
+    DEFAULT_TRANSIENT_RADIUS,
     DOMAIN,
     SERVICE_EXPORT_EXCEL,
     SERVICE_UPDATE_TRIP,
 )
-from .download import KnihaJizdDownloadView
 from .export import export_excel
 from .geocoding import NominatimGeocoder
-from .history_api import KnihaJizdHistoryView
 from .manager import KnihaJizdManager
-from .map_api import KnihaJizdMapView
 from .nearby_search import NearbyInstitutionSearcher
 from .panel import async_register_panel, async_unregister_panel
 from .storage import KnihaJizdRepository
@@ -95,9 +104,17 @@ PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up integration-level services."""
 
+    # Keep optional panel HTTP modules out of config-flow imports. This lets the
+    # settings form load even before the integration and its panel are running.
+    from .download import KnihaJizdDownloadView
+    from .history_api import KnihaJizdHistoryView
+    from .map_api import KnihaJizdMapView
+    from .places_api import KnihaJizdPlacesView
+
     hass.http.register_view(KnihaJizdDownloadView(hass))
     hass.http.register_view(KnihaJizdHistoryView(hass))
     hass.http.register_view(KnihaJizdMapView(hass))
+    hass.http.register_view(KnihaJizdPlacesView(hass))
 
     async def _async_export_service(call: ServiceCall) -> dict[str, Any]:
         manager = _get_loaded_manager(hass)
@@ -182,6 +199,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     merged_config.setdefault(CONF_COMPANY_LATITUDE, DEFAULT_COMPANY_LATITUDE)
     merged_config.setdefault(CONF_COMPANY_LONGITUDE, DEFAULT_COMPANY_LONGITUDE)
     merged_config.setdefault(CONF_COMPANY_LABEL, DEFAULT_COMPANY_LABEL)
+    legacy_radius = _legacy_radius(merged_config)
+    merged_config.setdefault(CONF_HOME_RADIUS, min(legacy_radius, DEFAULT_HOME_RADIUS))
+    merged_config.setdefault(
+        CONF_COMPANY_RADIUS, min(legacy_radius, DEFAULT_COMPANY_RADIUS)
+    )
+    merged_config.setdefault(
+        CONF_CLIENT_RADIUS, min(legacy_radius, DEFAULT_CLIENT_RADIUS)
+    )
+    merged_config.setdefault(
+        CONF_PRIVATE_RADIUS, min(legacy_radius, DEFAULT_PRIVATE_RADIUS)
+    )
+    merged_config.setdefault(
+        CONF_TRANSIENT_RADIUS, min(legacy_radius, DEFAULT_TRANSIENT_RADIUS)
+    )
+    merged_config.setdefault(
+        CONF_PENDING_REVIEW_HOURS, DEFAULT_PENDING_REVIEW_HOURS
+    )
     repository = KnihaJizdRepository(hass)
     try:
         await repository.async_initialize()
@@ -227,7 +261,7 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate entries to configured places and current journey matching."""
-    if entry.version >= 7:
+    if entry.version >= 8:
         return True
 
     data = dict(entry.data)
@@ -256,14 +290,40 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         values.setdefault(CONF_COMPANY_LATITUDE, DEFAULT_COMPANY_LATITUDE)
         values.setdefault(CONF_COMPANY_LONGITUDE, DEFAULT_COMPANY_LONGITUDE)
         values.setdefault(CONF_COMPANY_LABEL, DEFAULT_COMPANY_LABEL)
+        legacy_radius = _legacy_radius(values)
+        values.setdefault(CONF_HOME_RADIUS, min(legacy_radius, DEFAULT_HOME_RADIUS))
+        values.setdefault(
+            CONF_COMPANY_RADIUS, min(legacy_radius, DEFAULT_COMPANY_RADIUS)
+        )
+        values.setdefault(
+            CONF_CLIENT_RADIUS, min(legacy_radius, DEFAULT_CLIENT_RADIUS)
+        )
+        values.setdefault(
+            CONF_PRIVATE_RADIUS, min(legacy_radius, DEFAULT_PRIVATE_RADIUS)
+        )
+        values.setdefault(
+            CONF_TRANSIENT_RADIUS, min(legacy_radius, DEFAULT_TRANSIENT_RADIUS)
+        )
+        values.setdefault(
+            CONF_PENDING_REVIEW_HOURS, DEFAULT_PENDING_REVIEW_HOURS
+        )
+        values.pop(CONF_PLACE_RADIUS, None)
 
     hass.config_entries.async_update_entry(
         entry,
         data=data,
         options=options,
-        version=7,
+        version=8,
     )
     return True
+
+
+def _legacy_radius(values: dict[str, Any]) -> int:
+    """Return a validated legacy radius for split-radius migration."""
+    try:
+        return max(25, int(values.get(CONF_PLACE_RADIUS, DEFAULT_PLACE_RADIUS)))
+    except (TypeError, ValueError):
+        return DEFAULT_PLACE_RADIUS
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

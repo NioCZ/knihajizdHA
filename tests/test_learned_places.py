@@ -93,6 +93,29 @@ class LearnedPlacesTest(unittest.TestCase):
             ["business-one", "private-one"],
         )
 
+    def test_unanswered_short_stop_is_visible_for_review_without_km_type(self) -> None:
+        """Count an auto-closed stop separately from private and business totals."""
+        segment = {
+            "id": "review",
+            "date": "2026-08-04",
+            "started_at": "2026-08-04T10:00:00+00:00",
+            "trip_type": "unclassified",
+            "distance_km": 8,
+            "needs_review": True,
+        }
+
+        history = STORAGE_MODULE.calculate_history(
+            [segment], "2026-08", "2026-08-04"
+        )
+        statistics = STORAGE_MODULE.calculate_statistics([segment], "2026-08-04")
+
+        self.assertEqual(history["month_business_km"], 0)
+        self.assertEqual(history["month_private_km"], 0)
+        self.assertEqual(history["month_review_trips"], 1)
+        self.assertEqual(history["days"][0]["review_trips"], 1)
+        self.assertEqual(statistics["review_count_total"], 1)
+        self.assertEqual(statistics["today_review_count"], 1)
+
     def test_known_place_behavior_matches_journey_rules(self) -> None:
         """Auto-classify normal places and hold a private shop on business return."""
         hospital = {
@@ -152,6 +175,13 @@ class LearnedPlacesTest(unittest.TestCase):
                         "anchors": [{"latitude": 50.1, "longitude": 14.1}],
                     },
                     {
+                        "id": "return",
+                        "label": "Staré návratové místo",
+                        "trip_type": "contextual",
+                        "place_role": "return",
+                        "anchors": [{"latitude": 50.15, "longitude": 14.15}],
+                    },
+                    {
                         "id": "client",
                         "label": "Nemocnice",
                         "trip_type": "business",
@@ -167,6 +197,7 @@ class LearnedPlacesTest(unittest.TestCase):
         self.assertEqual(by_id["private"]["radius_m"], 250)
         self.assertEqual(by_id["private"]["place_role"], "private")
         self.assertNotIn("fuel", by_id)
+        self.assertNotIn("return", by_id)
         self.assertEqual(by_id["client"]["radius_m"], 1000)
 
     def test_configured_home_suppresses_old_learned_duplicates(self) -> None:
@@ -187,6 +218,12 @@ class LearnedPlacesTest(unittest.TestCase):
             {
                 "id": "neighbour",
                 "label": "Klient vedle",
+                "latitude": 50.012,
+                "longitude": 14.0,
+            },
+            {
+                "id": "inside-home-zone",
+                "label": "Stará služební duplicita",
                 "latitude": 50.001,
                 "longitude": 14.0,
             },
@@ -243,7 +280,7 @@ class LearnedPlacesTest(unittest.TestCase):
             )
 
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 4)
+            self.assertEqual(document["version"], 5)
             self.assertEqual(len(document["places"]), 1)
             self.assertEqual(len(document["places"][0]["anchors"]), 2)
 
@@ -282,8 +319,8 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertIsNone(match)
             self.assertEqual(fallback["label"], "Laboratoř A")
 
-    def test_existing_private_place_can_become_contextual_return(self) -> None:
-        """Preserve one anchor while teaching home as a context-sensitive return."""
+    def test_return_is_not_learned_over_an_existing_private_place(self) -> None:
+        """Keep return on the trip and preserve the destination's real place type."""
         test_output = ROOT / "test-output"
         test_output.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
@@ -315,10 +352,37 @@ class LearnedPlacesTest(unittest.TestCase):
 
             match = repository._find_place_sync(50.0, 14.0, None, 1000)
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 4)
+            self.assertEqual(document["version"], 5)
             self.assertEqual(len(document["places"]), 1)
-            self.assertEqual(match["place_role"], "return")
-            self.assertEqual(match["trip_type"], "contextual")
+            self.assertNotEqual(match.get("place_role"), "return")
+            self.assertEqual(match["trip_type"], "private")
+
+    def test_migration_removes_pure_return_and_preserves_real_type(self) -> None:
+        """Convert legacy return records without inventing a new map category."""
+        document = {
+            "version": 4,
+            "places": [
+                {
+                    "id": "pure-return",
+                    "trip_type": "contextual",
+                    "trip_types": [],
+                    "place_role": "return",
+                },
+                {
+                    "id": "private-return",
+                    "trip_type": "contextual",
+                    "trip_types": ["private"],
+                    "place_role": "return",
+                },
+            ],
+        }
+
+        changed = STORAGE_MODULE.migrate_return_places(document)
+
+        self.assertTrue(changed)
+        self.assertEqual([place["id"] for place in document["places"]], ["private-return"])
+        self.assertEqual(document["places"][0]["place_role"], "private")
+        self.assertEqual(document["places"][0]["trip_type"], "private")
 
     def test_colocated_private_and_business_labels_form_one_exception(self) -> None:
         """Keep both classifications in one record and draw only one map point."""
@@ -392,7 +456,7 @@ class LearnedPlacesTest(unittest.TestCase):
         changed = STORAGE_MODULE.consolidate_learned_places(document)
 
         self.assertTrue(changed)
-        self.assertEqual(document["version"], 4)
+        self.assertEqual(document["version"], 5)
         self.assertEqual(len(document["places"]), 1)
         self.assertEqual(
             document["places"][0]["trip_types"], ["business", "private"]
@@ -484,6 +548,119 @@ class LearnedPlacesTest(unittest.TestCase):
 
             self.assertEqual(converted["trip_type"], "private")
             self.assertIsNone(converted.get("radius_m"))
+
+    def test_place_management_updates_merges_and_deletes_records(self) -> None:
+        """Expose all requested place-management operations over stable IDs."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.places_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "places": [
+                            {
+                                "id": "one",
+                                "label": "První",
+                                "trip_type": "business",
+                                "place_role": "client",
+                                "anchors": [{"latitude": 50.0, "longitude": 14.0}],
+                            },
+                            {
+                                "id": "two",
+                                "label": "Druhý",
+                                "trip_type": "private",
+                                "place_role": "private",
+                                "anchors": [{"latitude": 50.02, "longitude": 14.0}],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            repository._update_place_sync("one", "Klient A", "mixed", 325)
+            repository._merge_places_sync(
+                ["one", "two"], "Společné místo", "mixed", 300
+            )
+            managed = repository._get_managed_places_sync(500, 250, 200)
+
+            self.assertEqual(len(managed), 1)
+            self.assertEqual(managed[0]["label"], "Společné místo")
+            self.assertEqual(managed[0]["classification"], "mixed")
+            self.assertEqual(managed[0]["radius_m"], 300)
+            self.assertEqual(managed[0]["anchor_count"], 2)
+
+            repository._delete_place_sync("one")
+            self.assertEqual(repository._get_managed_places_sync(500, 250, 200), [])
+
+    def test_manual_historical_correction_retrains_place_exactly(self) -> None:
+        """Replace a wrong learned default instead of creating a mixed duplicate."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.raw_path = Path(temporary_directory) / "raw.json"
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.raw_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "segments": [
+                            {
+                                "id": "trip",
+                                "journey_id": "journey",
+                                "journey_role": "destination",
+                                "ended_at": "2026-08-24T10:00:00+00:00",
+                                "end_latitude": 50.0,
+                                "end_longitude": 14.0,
+                                "end_address": "Albert Kroměříž",
+                                "map_estimate": "Albert Kroměříž",
+                                "matched_place_id": "place",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            repository.places_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "places": [
+                            {
+                                "id": "place",
+                                "label": "Chybný klient",
+                                "trip_type": "business",
+                                "trip_types": ["business"],
+                                "place_role": "client",
+                                "anchors": [{"latitude": 50.0, "longitude": 14.0}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = repository._sync_place_from_trip_sync(
+                "trip", "Soukromá", "private", 500, 250
+            )
+            place = json.loads(
+                repository.places_path.read_text(encoding="utf-8")
+            )["places"][0]
+
+            self.assertTrue(result["place_updated"])
+            self.assertEqual(place["trip_type"], "private")
+            self.assertEqual(place["trip_types"], ["private"])
+            self.assertEqual(place["place_role"], "private")
+            self.assertEqual(place["label"], "Albert Kroměříž")
+            self.assertEqual(place["radius_m"], 250)
 
     def test_raw_statistics_for_entities_and_panel(self) -> None:
         """Calculate daily totals and the last trip from persisted segments."""

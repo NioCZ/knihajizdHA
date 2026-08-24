@@ -16,10 +16,13 @@ from .const import (
     CONF_COMPANY_LATITUDE,
     CONF_COMPANY_LABEL,
     CONF_COMPANY_LONGITUDE,
+    CONF_COMPANY_RADIUS,
+    CONF_CLIENT_RADIUS,
     CONF_GPS_ENTITY,
     CONF_HOME_ADDRESS,
     CONF_HOME_LATITUDE,
     CONF_HOME_LONGITUDE,
+    CONF_HOME_RADIUS,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_LOCATION_SETTLE_SECONDS,
     CONF_NOMINATIM_EMAIL,
@@ -28,10 +31,13 @@ from .const import (
     CONF_NOTIFY_SERVICE,
     CONF_ODOMETER_ENTITY,
     CONF_OVERPASS_URL,
+    CONF_PENDING_REVIEW_HOURS,
     CONF_PLACE_RADIUS,
+    CONF_PRIVATE_RADIUS,
     CONF_RELEVANCE_KEYWORDS,
     CONF_RETURN_CONTEXT_HOURS,
     CONF_TRANSIENT_STOP_MINUTES,
+    CONF_TRANSIENT_RADIUS,
     CONF_TRIGGER_ENTITY,
     CONF_WAIT_TIMEOUT,
     DEFAULT_ADDRESS_ENTITY,
@@ -39,10 +45,13 @@ from .const import (
     DEFAULT_COMPANY_LATITUDE,
     DEFAULT_COMPANY_LABEL,
     DEFAULT_COMPANY_LONGITUDE,
+    DEFAULT_COMPANY_RADIUS,
+    DEFAULT_CLIENT_RADIUS,
     DEFAULT_GPS_ENTITY,
     DEFAULT_HOME_ADDRESS,
     DEFAULT_HOME_LATITUDE,
     DEFAULT_HOME_LONGITUDE,
+    DEFAULT_HOME_RADIUS,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_LOCATION_SETTLE_SECONDS,
     DEFAULT_NOMINATIM_URL,
@@ -50,15 +59,33 @@ from .const import (
     DEFAULT_NOTIFY_SERVICE,
     DEFAULT_ODOMETER_ENTITY,
     DEFAULT_OVERPASS_URL,
-    DEFAULT_PLACE_RADIUS,
+    DEFAULT_PENDING_REVIEW_HOURS,
+    DEFAULT_PRIVATE_RADIUS,
     DEFAULT_RELEVANCE_KEYWORDS,
     DEFAULT_RETURN_CONTEXT_HOURS,
     DEFAULT_TRANSIENT_STOP_MINUTES,
+    DEFAULT_TRANSIENT_RADIUS,
     DEFAULT_TRIGGER_ENTITY,
     DEFAULT_WAIT_TIMEOUT,
     DOMAIN,
     NAME,
 )
+
+
+def _radius_default(
+    defaults: dict[str, Any], key: str, default: int, legacy_cap: int
+) -> int:
+    """Use a saved split radius or conservatively migrate the legacy radius."""
+    if key in defaults:
+        try:
+            return int(defaults[key])
+        except (TypeError, ValueError):
+            return default
+    try:
+        legacy = int(defaults.get(CONF_PLACE_RADIUS, default))
+    except (TypeError, ValueError):
+        legacy = default
+    return max(25, min(legacy, legacy_cap))
 
 
 def _schema(defaults: dict[str, Any]) -> vol.Schema:
@@ -121,6 +148,12 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 vol.Coerce(int),
                 vol.Range(min=5, max=180),
             ),
+            vol.Required(
+                CONF_PENDING_REVIEW_HOURS,
+                default=defaults.get(
+                    CONF_PENDING_REVIEW_HOURS, DEFAULT_PENDING_REVIEW_HOURS
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=168)),
             vol.Optional(
                 CONF_HOME_ADDRESS,
                 default=defaults.get(CONF_HOME_ADDRESS, DEFAULT_HOME_ADDRESS),
@@ -158,12 +191,35 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 default=defaults.get(CONF_COMPANY_LABEL, DEFAULT_COMPANY_LABEL),
             ): selector.TextSelector(),
             vol.Required(
-                CONF_PLACE_RADIUS,
-                default=defaults.get(CONF_PLACE_RADIUS, DEFAULT_PLACE_RADIUS),
-            ): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=25, max=5000),
-            ),
+                CONF_HOME_RADIUS,
+                default=_radius_default(
+                    defaults, CONF_HOME_RADIUS, DEFAULT_HOME_RADIUS, 300
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=25, max=1000)),
+            vol.Required(
+                CONF_COMPANY_RADIUS,
+                default=_radius_default(
+                    defaults, CONF_COMPANY_RADIUS, DEFAULT_COMPANY_RADIUS, 300
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=25, max=1000)),
+            vol.Required(
+                CONF_CLIENT_RADIUS,
+                default=_radius_default(
+                    defaults, CONF_CLIENT_RADIUS, DEFAULT_CLIENT_RADIUS, 500
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=25, max=2000)),
+            vol.Required(
+                CONF_PRIVATE_RADIUS,
+                default=_radius_default(
+                    defaults, CONF_PRIVATE_RADIUS, DEFAULT_PRIVATE_RADIUS, 250
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=25, max=1000)),
+            vol.Required(
+                CONF_TRANSIENT_RADIUS,
+                default=_radius_default(
+                    defaults, CONF_TRANSIENT_RADIUS, DEFAULT_TRANSIENT_RADIUS, 200
+                ),
+            ): vol.All(vol.Coerce(int), vol.Range(min=25, max=1000)),
             vol.Required(
                 CONF_INSTITUTION_SEARCH_RADIUS,
                 default=defaults.get(
@@ -205,7 +261,7 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
 class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kniha jízd."""
 
-    VERSION = 7
+    VERSION = 8
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -225,15 +281,11 @@ class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> KnihaJizdOptionsFlow:
         """Create the options flow."""
-        return KnihaJizdOptionsFlow(config_entry)
+        return KnihaJizdOptionsFlow()
 
 
 class KnihaJizdOptionsFlow(config_entries.OptionsFlow):
     """Allow changing entities and behavior without reinstalling."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Store the entry without relying on newer OptionsFlow helpers."""
-        self._config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -242,5 +294,5 @@ class KnihaJizdOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(data=user_input)
 
-        current = {**self._config_entry.data, **self._config_entry.options}
+        current = {**self.config_entry.data, **self.config_entry.options}
         return self.async_show_form(step_id="init", data_schema=_schema(current))

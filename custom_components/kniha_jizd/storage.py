@@ -19,6 +19,7 @@ from .const import (
     LEARNED_PLACES_FILENAME,
     LEARNED_PRIVATE_RADIUS,
     LEARNED_TRANSIENT_RADIUS,
+    PLACE_ROLE_CLIENT,
     PLACE_ROLE_MIXED,
     PLACE_ROLE_PRIVATE,
     PLACE_ROLE_RETURN,
@@ -27,11 +28,12 @@ from .const import (
     TRIP_TYPE_BUSINESS,
     TRIP_TYPE_CONTEXTUAL,
     TRIP_TYPE_PRIVATE,
+    TRIP_TYPE_UNCLASSIFIED,
 )
 
 _MAX_ANCHORS_PER_PLACE = 50
-_RAW_DATA_VERSION = 4
-_LEARNED_PLACES_VERSION = 4
+_RAW_DATA_VERSION = 5
+_LEARNED_PLACES_VERSION = 5
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -155,25 +157,41 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
-def effective_place_radius(place: dict[str, Any], fallback_radius: float) -> float:
+def _validated_place_radius(value: Any) -> float:
+    """Return a finite user-editable radius inside conservative hard limits."""
+    radius = _optional_float(value)
+    if radius is None or not 25 <= radius <= 5000:
+        raise ValueError("radius_m must be between 25 and 5000")
+    return round(radius, 1)
+
+
+def effective_place_radius(
+    place: dict[str, Any],
+    fallback_radius: float,
+    private_radius: float = LEARNED_PRIVATE_RADIUS,
+    transient_radius: float = LEARNED_TRANSIENT_RADIUS,
+) -> float:
     """Return a conservative matching radius for one learned place."""
     stored_radius = _optional_float(place.get("radius_m"))
     if stored_radius is not None and stored_radius > 0:
         return stored_radius
     role = str(place.get("place_role") or "")
     if len(place_trip_types(place)) > 1 or role == PLACE_ROLE_MIXED:
-        return min(fallback_radius, LEARNED_PRIVATE_RADIUS)
+        return min(fallback_radius, private_radius)
     if role == PLACE_ROLE_TRANSIENT:
-        return min(fallback_radius, LEARNED_TRANSIENT_RADIUS)
+        return min(fallback_radius, transient_radius)
     if role == PLACE_ROLE_PRIVATE or (
         not role and place.get("trip_type") == TRIP_TYPE_PRIVATE
     ):
-        return min(fallback_radius, LEARNED_PRIVATE_RADIUS)
+        return min(fallback_radius, private_radius)
     return fallback_radius
 
 
 def places_for_map(
-    document: dict[str, Any], fallback_radius: float
+    document: dict[str, Any],
+    fallback_radius: float,
+    private_radius: float = LEARNED_PRIVATE_RADIUS,
+    transient_radius: float = LEARNED_TRANSIENT_RADIUS,
 ) -> list[dict[str, Any]]:
     """Flatten durable learned anchors into map markers with effective zones."""
     markers: list[dict[str, Any]] = []
@@ -193,11 +211,14 @@ def places_for_map(
         ) or (
             PLACE_ROLE_PRIVATE if trip_type == TRIP_TYPE_PRIVATE else "client"
         )
-        if role == PLACE_ROLE_TRANSIENT:
-            # These anchors remain internal so a fuel/shop stop can be recognized
-            # again, but they are not meaningful durable destinations on the map.
+        if role in {PLACE_ROLE_RETURN, PLACE_ROLE_TRANSIENT}:
+            # Return and short-stop anchors remain internal journey context. They
+            # are not durable user-facing place categories and would duplicate
+            # configured home/company or otherwise confuse the place map.
             continue
-        radius = effective_place_radius(place, fallback_radius)
+        radius = effective_place_radius(
+            place, fallback_radius, private_radius, transient_radius
+        )
         for index, anchor in enumerate(_place_anchors(place)):
             latitude = _optional_float(anchor.get("latitude"))
             longitude = _optional_float(anchor.get("longitude"))
@@ -234,7 +255,6 @@ def suppress_configured_place_duplicates(
         longitude = _optional_float(marker.get("longitude"))
         duplicate = False
         if latitude is not None and longitude is not None:
-            marker_label = _normalize_label(marker.get("label"))
             for configured in configured_places:
                 configured_latitude = _optional_float(configured.get("latitude"))
                 configured_longitude = _optional_float(configured.get("longitude"))
@@ -247,12 +267,7 @@ def suppress_configured_place_duplicates(
                     configured_longitude,
                 )
                 configured_radius = _optional_float(configured.get("radius_m")) or 0
-                same_label = bool(marker_label) and marker_label == _normalize_label(
-                    configured.get("label")
-                )
-                if distance <= direct_overlap_meters or (
-                    same_label and distance <= configured_radius
-                ):
+                if distance <= max(direct_overlap_meters, configured_radius):
                     duplicate = True
                     break
         if not duplicate:
@@ -422,6 +437,126 @@ def consolidate_learned_places(document: dict[str, Any]) -> bool:
     document["version"] = _LEARNED_PLACES_VERSION
     document["places"] = consolidated
     return changed
+
+
+def migrate_return_places(document: dict[str, Any]) -> bool:
+    """Remove the legacy return-place role while preserving real classifications."""
+    source = document.get("places")
+    if not isinstance(source, list):
+        return False
+    migrated: list[dict[str, Any]] = []
+    changed = False
+    for raw_place in source:
+        if not isinstance(raw_place, dict):
+            changed = True
+            continue
+        place = raw_place.copy()
+        if place.get("place_role") != PLACE_ROLE_RETURN:
+            migrated.append(place)
+            continue
+        trip_types = place_trip_types(place)
+        changed = True
+        if not trip_types:
+            # A pure return anchor carries no durable meaning once return is stored
+            # on the trip itself.
+            continue
+        if len(trip_types) > 1:
+            place["trip_type"] = TRIP_TYPE_CONTEXTUAL
+            place["trip_types"] = [TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE]
+            place["place_role"] = PLACE_ROLE_MIXED
+        elif trip_types[0] == TRIP_TYPE_PRIVATE:
+            place["trip_type"] = TRIP_TYPE_PRIVATE
+            place["trip_types"] = [TRIP_TYPE_PRIVATE]
+            place["place_role"] = PLACE_ROLE_PRIVATE
+        else:
+            place["trip_type"] = TRIP_TYPE_BUSINESS
+            place["trip_types"] = [TRIP_TYPE_BUSINESS]
+            place["place_role"] = PLACE_ROLE_CLIENT
+        migrated.append(place)
+    if migrated != source:
+        document["places"] = migrated
+    return changed
+
+
+def _classification_for_place(place: dict[str, Any]) -> str:
+    """Return the panel classification identifier for one stored place."""
+    role = str(place.get("place_role") or "")
+    trip_types = place_trip_types(place)
+    if role == PLACE_ROLE_TRANSIENT:
+        return "transient"
+    if role == PLACE_ROLE_MIXED or len(trip_types) > 1:
+        return "mixed"
+    if role == PLACE_ROLE_PRIVATE or trip_types == [TRIP_TYPE_PRIVATE]:
+        return "private"
+    return "business"
+
+
+def _apply_place_classification(
+    place: dict[str, Any], classification: str, radius_m: float
+) -> None:
+    """Set exactly one explicit user-selected place classification."""
+    if classification == "business":
+        place.update(
+            trip_type=TRIP_TYPE_BUSINESS,
+            trip_types=[TRIP_TYPE_BUSINESS],
+            place_role=PLACE_ROLE_CLIENT,
+        )
+    elif classification == "private":
+        place.update(
+            trip_type=TRIP_TYPE_PRIVATE,
+            trip_types=[TRIP_TYPE_PRIVATE],
+            place_role=PLACE_ROLE_PRIVATE,
+        )
+    elif classification == "mixed":
+        place.update(
+            trip_type=TRIP_TYPE_CONTEXTUAL,
+            trip_types=[TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE],
+            place_role=PLACE_ROLE_MIXED,
+        )
+    elif classification == "transient":
+        place.update(
+            trip_type=TRIP_TYPE_CONTEXTUAL,
+            trip_types=[],
+            place_role=PLACE_ROLE_TRANSIENT,
+        )
+    else:
+        raise ValueError("classification must be business, private, mixed or transient")
+    place["radius_m"] = radius_m
+    place["updated_at"] = datetime.now(UTC).isoformat()
+
+
+def places_for_management(
+    document: dict[str, Any],
+    client_radius: float,
+    private_radius: float,
+    transient_radius: float,
+) -> list[dict[str, Any]]:
+    """Serialize editable place records without exposing legacy return anchors."""
+    result: list[dict[str, Any]] = []
+    for raw_place in document.get("places", []):
+        if not isinstance(raw_place, dict) or raw_place.get("place_role") == PLACE_ROLE_RETURN:
+            continue
+        place = raw_place.copy()
+        classification = _classification_for_place(place)
+        anchors = _place_anchors(place)
+        result.append(
+            {
+                "id": str(place.get("id") or ""),
+                "label": place.get("label") or place.get("map_name") or "Místo",
+                "map_name": place.get("map_name"),
+                "classification": classification,
+                "trip_types": place_trip_types(place),
+                "place_role": place.get("place_role"),
+                "radius_m": effective_place_radius(
+                    place, client_radius, private_radius, transient_radius
+                ),
+                "anchor_count": len(anchors),
+                "anchors": deepcopy_json(anchors),
+                "transient_capable": bool(place.get("transient_capable")),
+                "updated_at": place.get("updated_at"),
+            }
+        )
+    return sorted(result, key=lambda item: str(item["label"]).casefold())
 
 
 def _whole_km(value: float) -> int:
@@ -886,7 +1021,9 @@ class KnihaJizdRepository:
             )
         else:
             places_data = self._load_places_sync()
-            if consolidate_learned_places(places_data):
+            changed = migrate_return_places(places_data)
+            changed = consolidate_learned_places(places_data) or changed
+            if changed:
                 _write_json_atomic(self.places_path, places_data)
 
     def _load_raw_sync(self) -> dict[str, Any]:
@@ -1015,7 +1152,12 @@ class KnihaJizdRepository:
             segment["purpose"] = purpose
             segment["trip_type"] = trip_type
             segment["classification_source"] = "manual_panel"
+            segment["classification_explanation"] = (
+                "Typ jízdy byl ručně potvrzen v administračním panelu."
+            )
             segment["manually_edited_at"] = edited_at
+            segment["needs_review"] = False
+            segment.pop("review_reason", None)
             changed += 1
         if start_address is not None:
             target["start_address"] = str(start_address).strip()
@@ -1070,19 +1212,296 @@ class KnihaJizdRepository:
         )
 
     async def async_get_places_for_map(
-        self, fallback_radius: float
+        self,
+        fallback_radius: float,
+        private_radius: float = LEARNED_PRIVATE_RADIUS,
+        transient_radius: float = LEARNED_TRANSIENT_RADIUS,
     ) -> list[dict[str, Any]]:
         """Return learned parking anchors for the authenticated panel map."""
         async with self._lock:
             return await self.hass.async_add_executor_job(
-                self._get_places_for_map_sync, fallback_radius
+                self._get_places_for_map_sync,
+                fallback_radius,
+                private_radius,
+                transient_radius,
             )
 
     def _get_places_for_map_sync(
-        self, fallback_radius: float
+        self,
+        fallback_radius: float,
+        private_radius: float = LEARNED_PRIVATE_RADIUS,
+        transient_radius: float = LEARNED_TRANSIENT_RADIUS,
     ) -> list[dict[str, Any]]:
         """Load and serialize learned map anchors in an executor."""
-        return places_for_map(self._load_places_sync(), fallback_radius)
+        return places_for_map(
+            self._load_places_sync(), fallback_radius, private_radius, transient_radius
+        )
+
+    async def async_get_managed_places(
+        self, client_radius: float, private_radius: float, transient_radius: float
+    ) -> list[dict[str, Any]]:
+        """Return editable learned places for the administration panel."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._get_managed_places_sync,
+                client_radius,
+                private_radius,
+                transient_radius,
+            )
+
+    def _get_managed_places_sync(
+        self, client_radius: float, private_radius: float, transient_radius: float
+    ) -> list[dict[str, Any]]:
+        return places_for_management(
+            self._load_places_sync(), client_radius, private_radius, transient_radius
+        )
+
+    async def async_update_place(
+        self, place_id: str, label: str, classification: str, radius_m: float
+    ) -> dict[str, Any]:
+        """Update one learned place explicitly."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._update_place_sync,
+                place_id,
+                label,
+                classification,
+                radius_m,
+            )
+
+    def _update_place_sync(
+        self, place_id: str, label: str, classification: str, radius_m: float
+    ) -> dict[str, Any]:
+        data = self._load_places_sync()
+        places: list[dict[str, Any]] = data["places"]
+        target = next((item for item in places if str(item.get("id")) == place_id), None)
+        if target is None:
+            raise ValueError("place was not found")
+        normalized_label = label.strip()
+        if not normalized_label:
+            raise ValueError("label cannot be empty")
+        radius = _validated_place_radius(radius_m)
+        target["label"] = normalized_label
+        _apply_place_classification(target, classification, radius)
+        data["version"] = _LEARNED_PLACES_VERSION
+        _write_json_atomic(self.places_path, data)
+        return {"updated": place_id}
+
+    async def async_delete_place(self, place_id: str) -> dict[str, Any]:
+        """Delete one learned place while retaining historical trips."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._delete_place_sync, place_id
+            )
+
+    def _delete_place_sync(self, place_id: str) -> dict[str, Any]:
+        data = self._load_places_sync()
+        places: list[dict[str, Any]] = data["places"]
+        remaining = [item for item in places if str(item.get("id")) != place_id]
+        if len(remaining) == len(places):
+            raise ValueError("place was not found")
+        data["places"] = remaining
+        data["version"] = _LEARNED_PLACES_VERSION
+        _write_json_atomic(self.places_path, data)
+        return {"deleted": place_id}
+
+    async def async_merge_places(
+        self,
+        place_ids: list[str],
+        label: str | None,
+        classification: str | None,
+        radius_m: float | None,
+    ) -> dict[str, Any]:
+        """Merge selected duplicate records into the first selected place."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._merge_places_sync,
+                place_ids,
+                label,
+                classification,
+                radius_m,
+            )
+
+    def _merge_places_sync(
+        self,
+        place_ids: list[str],
+        label: str | None,
+        classification: str | None,
+        radius_m: float | None,
+    ) -> dict[str, Any]:
+        unique_ids = list(dict.fromkeys(str(item) for item in place_ids if str(item)))
+        if len(unique_ids) < 2:
+            raise ValueError("select at least two places to merge")
+        data = self._load_places_sync()
+        places: list[dict[str, Any]] = data["places"]
+        selected = [
+            next((item for item in places if str(item.get("id")) == place_id), None)
+            for place_id in unique_ids
+        ]
+        if any(item is None for item in selected):
+            raise ValueError("one or more selected places were not found")
+        merged = selected[0].copy()  # type: ignore[union-attr]
+        target_id = str(merged.get("id") or unique_ids[0])
+        for incoming in selected[1:]:
+            merged = _merge_place_records(merged, incoming)  # type: ignore[arg-type]
+        merged["id"] = target_id
+        final_label = str(label or merged.get("label") or "").strip()
+        if not final_label:
+            raise ValueError("label cannot be empty")
+        merged["label"] = final_label
+        final_classification = classification or _classification_for_place(merged)
+        final_radius = _validated_place_radius(
+            radius_m
+            if radius_m is not None
+            else effective_place_radius(merged, LEARNED_PRIVATE_RADIUS)
+        )
+        _apply_place_classification(merged, final_classification, final_radius)
+        selected_ids = set(unique_ids)
+        data["places"] = [
+            merged if str(item.get("id")) == target_id else item
+            for item in places
+            if str(item.get("id")) not in selected_ids
+            or str(item.get("id")) == target_id
+        ]
+        data["version"] = _LEARNED_PLACES_VERSION
+        consolidate_learned_places(data)
+        _write_json_atomic(self.places_path, data)
+        return {"merged": unique_ids, "place_id": target_id}
+
+    async def async_sync_place_from_trip(
+        self,
+        segment_id: str,
+        purpose: str,
+        trip_type: str,
+        client_radius: float,
+        private_radius: float,
+    ) -> dict[str, Any]:
+        """Apply a manual historical correction to the destination's learned place."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._sync_place_from_trip_sync,
+                segment_id,
+                purpose,
+                trip_type,
+                client_radius,
+                private_radius,
+            )
+
+    def _sync_place_from_trip_sync(
+        self,
+        segment_id: str,
+        purpose: str,
+        trip_type: str,
+        client_radius: float,
+        private_radius: float,
+    ) -> dict[str, Any]:
+        raw = self._load_raw_sync()
+        segments: list[dict[str, Any]] = raw["segments"]
+        selected = next(
+            (item for item in segments if str(item.get("id")) == segment_id), None
+        )
+        if selected is None:
+            raise ValueError("trip segment was not found")
+        journey_id = selected.get("journey_id")
+        journey = [
+            item
+            for item in segments
+            if item is selected or (journey_id and item.get("journey_id") == journey_id)
+        ]
+        destinations = [
+            item for item in journey if item.get("journey_role") != "transient_stop"
+        ]
+        target = max(
+            destinations or [selected], key=lambda item: str(item.get("ended_at") or "")
+        )
+        if target.get("configured_place") in {"home", "company"}:
+            return {"place_updated": False, "reason": "configured_place"}
+        latitude = _optional_float(target.get("end_latitude"))
+        longitude = _optional_float(target.get("end_longitude"))
+        address = target.get("end_address_raw") or target.get("end_address")
+        has_coordinates = latitude is not None and longitude is not None
+        if not has_coordinates and not address:
+            return {"place_updated": False, "reason": "missing_destination"}
+
+        data = self._load_places_sync()
+        migrate_return_places(data)
+        consolidate_learned_places(data)
+        places: list[dict[str, Any]] = data["places"]
+        matched_id = str(target.get("matched_place_id") or "")
+        match = next(
+            (item for item in places if matched_id and str(item.get("id")) == matched_id),
+            None,
+        )
+        if match is None:
+            closest: tuple[float, dict[str, Any]] | None = None
+            if has_coordinates:
+                for place in places:
+                    for anchor in _place_anchors(place):
+                        anchor_latitude = _optional_float(anchor.get("latitude"))
+                        anchor_longitude = _optional_float(anchor.get("longitude"))
+                        if anchor_latitude is None or anchor_longitude is None:
+                            continue
+                        distance = _haversine_meters(
+                            latitude, longitude, anchor_latitude, anchor_longitude
+                        )
+                        if distance <= max(client_radius, private_radius) and (
+                            closest is None or distance < closest[0]
+                        ):
+                            closest = (distance, place)
+                match = closest[1] if closest is not None else None
+            else:
+                normalized_address = _normalize_address(str(address or ""))
+                if normalized_address:
+                    match = next(
+                        (
+                            place
+                            for place in places
+                            if any(
+                                _normalize_address(anchor.get("address"))
+                                == normalized_address
+                                for anchor in _place_anchors(place)
+                            )
+                        ),
+                        None,
+                    )
+
+        classification = "private" if trip_type == TRIP_TYPE_PRIVATE else "business"
+        radius = private_radius if classification == "private" else client_radius
+        label = (
+            str(
+                target.get("map_estimate")
+                or target.get("end_address")
+                or "Soukromé místo"
+            )
+            if classification == "private"
+            else str(purpose or target.get("map_estimate") or "Klient")
+        ).strip()
+        if match is None:
+            match = {
+                "id": uuid4().hex,
+                "label": label,
+                "map_name": target.get("map_estimate"),
+                "anchors": [
+                    {
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "address": address,
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    }
+                ],
+            }
+            places.append(match)
+        else:
+            match["label"] = label
+        _apply_place_classification(match, classification, radius)
+        target["matched_place_id"] = match["id"]
+        target["manual_place_correction"] = True
+        target["classification_explanation"] = "Ruční oprava změnila i výchozí typ místa."
+        data["version"] = _LEARNED_PLACES_VERSION
+        _write_json_atomic(self.places_path, data)
+        raw["version"] = _RAW_DATA_VERSION
+        _write_json_atomic(self.raw_path, raw)
+        return {"place_updated": True, "place_id": match["id"]}
 
     async def async_find_place(
         self,
@@ -1090,6 +1509,8 @@ class KnihaJizdRepository:
         longitude: float | None,
         address: str | None,
         radius_meters: float,
+        private_radius: float = LEARNED_PRIVATE_RADIUS,
+        transient_radius: float = LEARNED_TRANSIENT_RADIUS,
     ) -> dict[str, Any] | None:
         """Find the closest coordinate match or an exact normalized address."""
         async with self._lock:
@@ -1099,6 +1520,8 @@ class KnihaJizdRepository:
                 longitude,
                 address,
                 radius_meters,
+                private_radius,
+                transient_radius,
             )
 
     def _find_place_sync(
@@ -1107,13 +1530,17 @@ class KnihaJizdRepository:
         longitude: float | None,
         address: str | None,
         radius_meters: float,
+        private_radius: float = LEARNED_PRIVATE_RADIUS,
+        transient_radius: float = LEARNED_TRANSIENT_RADIUS,
     ) -> dict[str, Any] | None:
         """Find a learned place in an executor."""
         places = self._load_places_sync()["places"]
         closest: tuple[float, dict[str, Any], dict[str, Any]] | None = None
         if latitude is not None and longitude is not None:
             for place in places:
-                place_radius = effective_place_radius(place, radius_meters)
+                place_radius = effective_place_radius(
+                    place, radius_meters, private_radius, transient_radius
+                )
                 for anchor in _place_anchors(place):
                     anchor_latitude = _optional_float(anchor.get("latitude"))
                     anchor_longitude = _optional_float(anchor.get("longitude"))
@@ -1132,6 +1559,10 @@ class KnihaJizdRepository:
             if closest is not None:
                 result = closest[1].copy()
                 result["match_distance_m"] = round(closest[0], 1)
+                result["match_radius_m"] = effective_place_radius(
+                    closest[1], radius_meters, private_radius, transient_radius
+                )
+                result["match_method"] = "gps"
                 result["matched_address"] = closest[2].get("address")
                 return result
             # With valid GPS the configured circle is authoritative. An address
@@ -1145,6 +1576,10 @@ class KnihaJizdRepository:
                     if _normalize_address(anchor.get("address")) == normalized:
                         result = place.copy()
                         result["matched_address"] = anchor.get("address")
+                        result["match_radius_m"] = effective_place_radius(
+                            place, radius_meters, private_radius, transient_radius
+                        )
+                        result["match_method"] = "address"
                         return result
         return None
 
@@ -1157,6 +1592,9 @@ class KnihaJizdRepository:
 
     def _learn_place_sync(self, place: dict[str, Any]) -> None:
         """Persist a customer and append a confirmed parking anchor."""
+        if place.get("place_role") == PLACE_ROLE_RETURN:
+            # Return is stored on a trip (journey_role), never as a place.
+            return
         data = self._load_places_sync()
         data["version"] = _LEARNED_PLACES_VERSION
         places: list[dict[str, Any]] = data["places"]
@@ -1331,6 +1769,18 @@ def calculate_statistics(
         "today_segments": len(today_segments),
         "today_business_km": _sum_distance(today_segments, "business"),
         "today_private_km": _sum_distance(today_segments, "private"),
+        "review_count_total": sum(
+            1
+            for segment in valid_segments
+            if segment.get("needs_review")
+            or segment.get("trip_type") == TRIP_TYPE_UNCLASSIFIED
+        ),
+        "today_review_count": sum(
+            1
+            for segment in today_segments
+            if segment.get("needs_review")
+            or segment.get("trip_type") == TRIP_TYPE_UNCLASSIFIED
+        ),
         "today_rows": deepcopy_json(today_segments),
         "today_odometer_check": odometer_day_check(today_segments),
         "last_segment": deepcopy_json(last_segment),
@@ -1363,15 +1813,20 @@ def calculate_history(
                 "private_km": 0.0,
                 "business_trips": 0,
                 "private_trips": 0,
+                "review_trips": 0,
+                "trips": 0,
             },
         )
         trip_type = segment.get("trip_type")
+        day["trips"] += 1
         if trip_type == TRIP_TYPE_BUSINESS:
             day["business_km"] += _distance(segment)
             day["business_trips"] += 1
         elif trip_type == TRIP_TYPE_PRIVATE:
             day["private_km"] += _distance(segment)
             day["private_trips"] += 1
+        if segment.get("needs_review") or trip_type == TRIP_TYPE_UNCLASSIFIED:
+            day["review_trips"] += 1
 
     calendar_days: list[dict[str, Any]] = []
     for local_date in sorted(days):
@@ -1381,7 +1836,6 @@ def calculate_history(
                 **day,
                 "business_km": _whole_km(day["business_km"]),
                 "private_km": _whole_km(day["private_km"]),
-                "trips": day["business_trips"] + day["private_trips"],
             }
         )
 
@@ -1410,6 +1864,12 @@ def calculate_history(
                 for segment in month_segments
                 if segment.get("trip_type") == TRIP_TYPE_PRIVATE
             )
+        ),
+        "month_review_trips": sum(
+            1
+            for segment in month_segments
+            if segment.get("needs_review")
+            or segment.get("trip_type") == TRIP_TYPE_UNCLASSIFIED
         ),
         "month_trips": len(month_segments),
         "rows": selected_rows,
