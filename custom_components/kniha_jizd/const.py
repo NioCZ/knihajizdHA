@@ -86,6 +86,7 @@ TRIP_TYPE_PRIVATE: Final = "private"
 TRIP_TYPE_CONTEXTUAL: Final = "contextual"
 
 PLACE_ROLE_CLIENT: Final = "client"
+PLACE_ROLE_MIXED: Final = "mixed"
 PLACE_ROLE_PRIVATE: Final = "private"
 PLACE_ROLE_RETURN: Final = "return"
 PLACE_ROLE_TRANSIENT: Final = "transient"

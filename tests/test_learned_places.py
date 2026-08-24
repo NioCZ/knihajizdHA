@@ -44,8 +44,97 @@ storage_spec.loader.exec_module(STORAGE_MODULE)
 class LearnedPlacesTest(unittest.TestCase):
     """Verify grouping and matching of multiple parking points."""
 
-    def test_map_uses_conservative_private_and_transient_zones(self) -> None:
-        """Keep broad client zones from being reused for contextual places."""
+    def test_history_aggregates_calendar_days_and_selected_rows(self) -> None:
+        """Provide colored month totals and only the chosen day's table rows."""
+        history = STORAGE_MODULE.calculate_history(
+            [
+                {
+                    "id": "business-one",
+                    "date": "2026-08-04",
+                    "started_at": "2026-08-04T08:00:00+00:00",
+                    "trip_type": "business",
+                    "distance_km": 12.4,
+                },
+                {
+                    "id": "private-one",
+                    "date": "2026-08-04",
+                    "started_at": "2026-08-04T18:00:00+00:00",
+                    "trip_type": "private",
+                    "distance_km": 3.4,
+                },
+                {
+                    "id": "business-two",
+                    "date": "2026-08-10",
+                    "started_at": "2026-08-10T09:00:00+00:00",
+                    "trip_type": "business",
+                    "distance_km": 5.7,
+                },
+                {
+                    "id": "other-month",
+                    "date": "2026-07-31",
+                    "trip_type": "business",
+                    "distance_km": 100,
+                },
+            ],
+            "2026-08",
+            "2026-08-04",
+        )
+
+        self.assertEqual(history["month_business_km"], 18)
+        self.assertEqual(history["month_private_km"], 3)
+        self.assertEqual(history["month_trips"], 3)
+        self.assertEqual(len(history["days"]), 2)
+        self.assertEqual(history["days"][0]["business_trips"], 1)
+        self.assertEqual(history["days"][0]["private_trips"], 1)
+        self.assertEqual(history["days"][0]["business_km"], 12)
+        self.assertEqual(history["days"][0]["private_km"], 3)
+        self.assertEqual(
+            [row["id"] for row in history["rows"]],
+            ["business-one", "private-one"],
+        )
+
+    def test_known_place_behavior_matches_journey_rules(self) -> None:
+        """Auto-classify normal places and hold a private shop on business return."""
+        hospital = {
+            "trip_type": "business",
+            "trip_types": ["business"],
+            "place_role": "client",
+        }
+        shop = {
+            "trip_type": "private",
+            "trip_types": ["private"],
+            "place_role": "private",
+        }
+        exception = {
+            "trip_type": "contextual",
+            "trip_types": ["business", "private"],
+            "place_role": "mixed",
+        }
+        business_shop = {
+            "trip_type": "business",
+            "trip_types": ["business"],
+            "place_role": "client",
+            "transient_capable": True,
+        }
+
+        self.assertEqual(
+            STORAGE_MODULE.learned_place_behavior(hospital, False), "business"
+        )
+        self.assertEqual(
+            STORAGE_MODULE.learned_place_behavior(shop, False), "private"
+        )
+        self.assertEqual(
+            STORAGE_MODULE.learned_place_behavior(shop, True), "transient"
+        )
+        self.assertEqual(
+            STORAGE_MODULE.learned_place_behavior(exception, False), "confirm"
+        )
+        self.assertEqual(
+            STORAGE_MODULE.learned_place_behavior(business_shop, True), "business"
+        )
+
+    def test_map_uses_private_zones_and_omits_transient_places(self) -> None:
+        """Keep private zones conservative and short stops off the map."""
         markers = STORAGE_MODULE.places_for_map(
             {
                 "places": [
@@ -77,8 +166,46 @@ class LearnedPlacesTest(unittest.TestCase):
         by_id = {marker["place_id"]: marker for marker in markers}
         self.assertEqual(by_id["private"]["radius_m"], 250)
         self.assertEqual(by_id["private"]["place_role"], "private")
-        self.assertEqual(by_id["fuel"]["radius_m"], 200)
+        self.assertNotIn("fuel", by_id)
         self.assertEqual(by_id["client"]["radius_m"], 1000)
+
+    def test_configured_home_suppresses_old_learned_duplicates(self) -> None:
+        """Prefer one configured home marker over private/business learned copies."""
+        markers = [
+            {
+                "id": "old-private",
+                "label": "Soukromá",
+                "latitude": 50.0002,
+                "longitude": 14.0,
+            },
+            {
+                "id": "old-return",
+                "label": "Domov",
+                "latitude": 50.004,
+                "longitude": 14.0,
+            },
+            {
+                "id": "neighbour",
+                "label": "Klient vedle",
+                "latitude": 50.001,
+                "longitude": 14.0,
+            },
+        ]
+        configured = [
+            {
+                "id": "configured:home",
+                "label": "Domov",
+                "latitude": 50.0,
+                "longitude": 14.0,
+                "radius_m": 1000,
+            }
+        ]
+
+        visible = STORAGE_MODULE.suppress_configured_place_duplicates(
+            markers, configured
+        )
+
+        self.assertEqual([marker["id"] for marker in visible], ["neighbour"])
 
     def test_same_customer_keeps_two_distant_anchors(self) -> None:
         """Two confirmations with one label remain one customer with two anchors."""
@@ -116,7 +243,7 @@ class LearnedPlacesTest(unittest.TestCase):
             )
 
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 3)
+            self.assertEqual(document["version"], 4)
             self.assertEqual(len(document["places"]), 1)
             self.assertEqual(len(document["places"][0]["anchors"]), 2)
 
@@ -188,10 +315,131 @@ class LearnedPlacesTest(unittest.TestCase):
 
             match = repository._find_place_sync(50.0, 14.0, None, 1000)
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 3)
+            self.assertEqual(document["version"], 4)
             self.assertEqual(len(document["places"]), 1)
             self.assertEqual(match["place_role"], "return")
             self.assertEqual(match["trip_type"], "contextual")
+
+    def test_colocated_private_and_business_labels_form_one_exception(self) -> None:
+        """Keep both classifications in one record and draw only one map point."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository._learn_place_sync(
+                {
+                    "id": "private",
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "address": "Společné parkoviště",
+                    "label": "Soukromý cíl",
+                    "trip_type": "private",
+                    "place_role": "private",
+                }
+            )
+            repository._learn_place_sync(
+                {
+                    "id": "business",
+                    "latitude": 50.0001,
+                    "longitude": 14.0,
+                    "address": "Společné parkoviště",
+                    "label": "Služební cíl",
+                    "trip_type": "business",
+                    "place_role": "client",
+                }
+            )
+
+            document = json.loads(repository.places_path.read_text(encoding="utf-8"))
+            markers = STORAGE_MODULE.places_for_map(document, 1000)
+
+            self.assertEqual(len(document["places"]), 1)
+            self.assertEqual(
+                document["places"][0]["trip_types"], ["business", "private"]
+            )
+            self.assertEqual(document["places"][0]["place_role"], "mixed")
+            self.assertEqual(len(markers), 1)
+            self.assertEqual(markers[0]["place_role"], "mixed")
+
+    def test_migration_merges_legacy_colocated_duplicates(self) -> None:
+        """Collapse old private/business records into one physical exception."""
+        document = {
+            "version": 3,
+            "places": [
+                {
+                    "id": "old-private",
+                    "label": "Soukromé místo",
+                    "trip_type": "private",
+                    "place_role": "private",
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "address": "Stejné parkoviště",
+                },
+                {
+                    "id": "old-business",
+                    "label": "Služební místo",
+                    "trip_type": "business",
+                    "place_role": "client",
+                    "latitude": 50.0001,
+                    "longitude": 14.0,
+                    "address": "Stejné parkoviště",
+                },
+            ],
+        }
+
+        changed = STORAGE_MODULE.consolidate_learned_places(document)
+
+        self.assertTrue(changed)
+        self.assertEqual(document["version"], 4)
+        self.assertEqual(len(document["places"]), 1)
+        self.assertEqual(
+            document["places"][0]["trip_types"], ["business", "private"]
+        )
+        self.assertEqual(document["places"][0]["place_role"], "mixed")
+        self.assertEqual(len(document["places"][0]["anchors"]), 1)
+
+    def test_expired_short_stop_can_become_a_known_private_destination(self) -> None:
+        """Reclassify one transient record without creating a duplicate point."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository._learn_place_sync(
+                {
+                    "id": "shop",
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "label": "Obchod",
+                    "trip_type": "contextual",
+                    "place_role": "transient",
+                }
+            )
+            repository._learn_place_sync(
+                {
+                    "id": "shop",
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "label": "Obchod",
+                    "trip_type": "private",
+                    "place_role": "private",
+                    "transient_capable": True,
+                    "transient_kind": "shop",
+                }
+            )
+
+            place = json.loads(
+                repository.places_path.read_text(encoding="utf-8")
+            )["places"][0]
+
+            self.assertEqual(place["trip_types"], ["private"])
+            self.assertEqual(place["place_role"], "private")
+            self.assertTrue(place["transient_capable"])
+            self.assertEqual(place["transient_kind"], "shop")
 
     def test_transient_place_uses_its_small_stored_radius(self) -> None:
         """Keep a learned fuel stop from swallowing a nearby customer."""

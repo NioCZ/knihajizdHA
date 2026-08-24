@@ -74,9 +74,9 @@ class KnihaJizdMap extends HTMLElement {
       home: "Domov",
       company: "Firma",
       client: "Klient",
+      mixed: "Služební / soukromé",
       private: "Soukromé místo",
       return: "Návratové místo",
-      transient: "Krátká zastávka",
       car: "Auto",
     }[role] || "Místo";
   }
@@ -207,11 +207,13 @@ class KnihaJizdMap extends HTMLElement {
         .zone { stroke-width:2; fill-opacity:.12; stroke-opacity:.7; }
         .zone.active { stroke-width:4; fill-opacity:.2; stroke-opacity:1; }
         .zone.client { fill:#1976d2; stroke:#1976d2; } .zone.private { fill:#8e44ad; stroke:#8e44ad; }
+        .zone.mixed { fill:#6d4c41; stroke:#6d4c41; }
         .zone.transient { fill:#ef6c00; stroke:#ef6c00; } .zone.return { fill:#00acc1; stroke:#00acc1; }
         .zone.home { fill:#2e7d32; stroke:#2e7d32; } .zone.company { fill:#00897b; stroke:#00897b; }
         .marker { position:absolute; transform:translate(-50%,-100%); border:2px solid white; border-radius:999px; width:24px; height:24px; padding:0; box-shadow:0 2px 7px rgba(0,0,0,.4); cursor:pointer; background:#1976d2; color:white; }
         .marker::after { content:""; position:absolute; left:7px; bottom:-6px; width:7px; height:7px; background:inherit; transform:rotate(45deg); border-right:2px solid white; border-bottom:2px solid white; }
         .marker.private { background:#8e44ad; } .marker.transient { background:#ef6c00; }
+        .marker.mixed { background:#6d4c41; }
         .marker.return { background:#00acc1; } .marker.home { background:#2e7d32; }
         .marker.company { background:#00897b; } .marker.selected { outline:3px solid var(--warning-color,#fbc02d); z-index:4; }
         .marker.car { width:32px; height:32px; background:#d32f2f; z-index:6; transform:translate(-50%,-50%); font-size:17px; line-height:27px; }
@@ -233,6 +235,7 @@ class KnihaJizdMap extends HTMLElement {
         .legend span { display:flex; gap:7px; align-items:center; }
         .swatch { width:11px; height:11px; border-radius:50%; background:#1976d2; }
         .swatch.private { background:#8e44ad; } .swatch.transient { background:#ef6c00; }
+        .swatch.mixed { background:#6d4c41; }
         .swatch.return { background:#00acc1; } .swatch.home { background:#2e7d32; }
         .swatch.company { background:#00897b; } .swatch.car { background:#d32f2f; }
         .empty { display:grid; place-items:center; height:100%; color:#455a64; padding:24px; text-align:center; }
@@ -247,7 +250,8 @@ class KnihaJizdMap extends HTMLElement {
         </div>
         <aside><div class="car-info info-card"></div><div class="selection-info info-card"></div><div class="info-card"><h3>Legenda</h3><div class="legend">
           <span><i class="swatch car"></i>Auto</span><span><i class="swatch client"></i>Klient</span>
-          <span><i class="swatch private"></i>Soukromé</span><span><i class="swatch transient"></i>Krátká zastávka</span>
+          <span><i class="swatch private"></i>Soukromé</span>
+          <span><i class="swatch mixed"></i>Služební / soukromé</span>
           <span><i class="swatch return"></i>Návrat</span><span><i class="swatch home"></i>Domov</span>
           <span><i class="swatch company"></i>Firma</span>
         </div></div></aside>

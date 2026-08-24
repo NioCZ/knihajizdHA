@@ -19,15 +19,19 @@ from .const import (
     LEARNED_PLACES_FILENAME,
     LEARNED_PRIVATE_RADIUS,
     LEARNED_TRANSIENT_RADIUS,
+    PLACE_ROLE_MIXED,
     PLACE_ROLE_PRIVATE,
+    PLACE_ROLE_RETURN,
     PLACE_ROLE_TRANSIENT,
     RAW_DATA_FILENAME,
+    TRIP_TYPE_BUSINESS,
+    TRIP_TYPE_CONTEXTUAL,
     TRIP_TYPE_PRIVATE,
 )
 
 _MAX_ANCHORS_PER_PLACE = 50
 _RAW_DATA_VERSION = 4
-_LEARNED_PLACES_VERSION = 3
+_LEARNED_PLACES_VERSION = 4
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -61,6 +65,46 @@ def _normalize_address(value: str | None) -> str:
 def _normalize_label(value: Any) -> str:
     """Normalize a customer label for anchor grouping."""
     return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
+def place_trip_types(place: dict[str, Any]) -> list[str]:
+    """Return the durable business/private classifications of one place."""
+    selected: set[str] = set()
+    stored = place.get("trip_types")
+    if isinstance(stored, list):
+        selected.update(
+            str(item)
+            for item in stored
+            if item in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}
+        )
+    trip_type = place.get("trip_type")
+    if trip_type in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}:
+        selected.add(str(trip_type))
+    return [
+        trip_type
+        for trip_type in (TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE)
+        if trip_type in selected
+    ]
+
+
+def learned_place_behavior(
+    place: dict[str, Any], has_business_return_context: bool
+) -> str:
+    """Choose automatic handling for one known physical place."""
+    role = str(place.get("place_role") or "")
+    trip_types = place_trip_types(place)
+    if role == PLACE_ROLE_TRANSIENT or (
+        has_business_return_context
+        and trip_types == [TRIP_TYPE_PRIVATE]
+    ):
+        return "transient"
+    if len(trip_types) > 1 or role == PLACE_ROLE_MIXED:
+        return "confirm"
+    if role == PLACE_ROLE_RETURN:
+        return "return"
+    if role == PLACE_ROLE_PRIVATE or trip_types == [TRIP_TYPE_PRIVATE]:
+        return "private"
+    return "business"
 
 
 def _haversine_meters(
@@ -117,6 +161,8 @@ def effective_place_radius(place: dict[str, Any], fallback_radius: float) -> flo
     if stored_radius is not None and stored_radius > 0:
         return stored_radius
     role = str(place.get("place_role") or "")
+    if len(place_trip_types(place)) > 1 or role == PLACE_ROLE_MIXED:
+        return min(fallback_radius, LEARNED_PRIVATE_RADIUS)
     if role == PLACE_ROLE_TRANSIENT:
         return min(fallback_radius, LEARNED_TRANSIENT_RADIUS)
     if role == PLACE_ROLE_PRIVATE or (
@@ -129,7 +175,7 @@ def effective_place_radius(place: dict[str, Any], fallback_radius: float) -> flo
 def places_for_map(
     document: dict[str, Any], fallback_radius: float
 ) -> list[dict[str, Any]]:
-    """Flatten learned anchors into safe map markers with their effective zones."""
+    """Flatten durable learned anchors into map markers with effective zones."""
     markers: list[dict[str, Any]] = []
     places = document.get("places")
     if not isinstance(places, list):
@@ -139,9 +185,18 @@ def places_for_map(
             continue
         place_id = str(place.get("id") or "")
         trip_type = str(place.get("trip_type") or "") or None
-        role = str(place.get("place_role") or "") or (
+        trip_types = place_trip_types(place)
+        role = (
+            PLACE_ROLE_MIXED
+            if len(trip_types) > 1
+            else str(place.get("place_role") or "")
+        ) or (
             PLACE_ROLE_PRIVATE if trip_type == TRIP_TYPE_PRIVATE else "client"
         )
+        if role == PLACE_ROLE_TRANSIENT:
+            # These anchors remain internal so a fuel/shop stop can be recognized
+            # again, but they are not meaningful durable destinations on the map.
+            continue
         radius = effective_place_radius(place, fallback_radius)
         for index, anchor in enumerate(_place_anchors(place)):
             latitude = _optional_float(anchor.get("latitude"))
@@ -155,6 +210,7 @@ def places_for_map(
                     "label": place.get("label") or place.get("map_name") or "Místo",
                     "map_name": place.get("map_name"),
                     "trip_type": trip_type,
+                    "trip_types": trip_types,
                     "place_role": role,
                     "radius_m": radius,
                     "latitude": latitude,
@@ -164,6 +220,208 @@ def places_for_map(
                 }
             )
     return markers
+
+
+def suppress_configured_place_duplicates(
+    markers: list[dict[str, Any]],
+    configured_places: list[dict[str, Any]],
+    direct_overlap_meters: float = 75,
+) -> list[dict[str, Any]]:
+    """Prefer a configured marker over learned markers for the same location."""
+    visible: list[dict[str, Any]] = []
+    for marker in markers:
+        latitude = _optional_float(marker.get("latitude"))
+        longitude = _optional_float(marker.get("longitude"))
+        duplicate = False
+        if latitude is not None and longitude is not None:
+            marker_label = _normalize_label(marker.get("label"))
+            for configured in configured_places:
+                configured_latitude = _optional_float(configured.get("latitude"))
+                configured_longitude = _optional_float(configured.get("longitude"))
+                if configured_latitude is None or configured_longitude is None:
+                    continue
+                distance = _haversine_meters(
+                    latitude,
+                    longitude,
+                    configured_latitude,
+                    configured_longitude,
+                )
+                configured_radius = _optional_float(configured.get("radius_m")) or 0
+                same_label = bool(marker_label) and marker_label == _normalize_label(
+                    configured.get("label")
+                )
+                if distance <= direct_overlap_meters or (
+                    same_label and distance <= configured_radius
+                ):
+                    duplicate = True
+                    break
+        if not duplicate:
+            visible.append(marker)
+    return visible
+
+
+def _places_overlap(
+    first: dict[str, Any], second: dict[str, Any], max_distance_meters: float = 25
+) -> bool:
+    """Return whether two records describe the same physical parking point."""
+    first_anchors = _place_anchors(first)
+    second_anchors = _place_anchors(second)
+    compared_coordinates = False
+    for first_anchor in first_anchors:
+        first_latitude = _optional_float(first_anchor.get("latitude"))
+        first_longitude = _optional_float(first_anchor.get("longitude"))
+        if first_latitude is None or first_longitude is None:
+            continue
+        for second_anchor in second_anchors:
+            second_latitude = _optional_float(second_anchor.get("latitude"))
+            second_longitude = _optional_float(second_anchor.get("longitude"))
+            if second_latitude is None or second_longitude is None:
+                continue
+            compared_coordinates = True
+            if (
+                _haversine_meters(
+                    first_latitude,
+                    first_longitude,
+                    second_latitude,
+                    second_longitude,
+                )
+                <= max_distance_meters
+            ):
+                return True
+    if compared_coordinates:
+        return False
+    first_addresses = {
+        _normalize_address(anchor.get("address")) for anchor in first_anchors
+    } - {""}
+    second_addresses = {
+        _normalize_address(anchor.get("address")) for anchor in second_anchors
+    } - {""}
+    return bool(first_addresses & second_addresses)
+
+
+def _merge_place_records(
+    existing: dict[str, Any], incoming: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge two colocated records without creating a second map point."""
+    merged = existing.copy()
+    anchors = _place_anchors(existing)
+    for candidate in _place_anchors(incoming):
+        candidate_latitude = _optional_float(candidate.get("latitude"))
+        candidate_longitude = _optional_float(candidate.get("longitude"))
+        duplicate_index: int | None = None
+        for index, anchor in enumerate(anchors):
+            anchor_latitude = _optional_float(anchor.get("latitude"))
+            anchor_longitude = _optional_float(anchor.get("longitude"))
+            if (
+                candidate_latitude is not None
+                and candidate_longitude is not None
+                and anchor_latitude is not None
+                and anchor_longitude is not None
+                and _haversine_meters(
+                    candidate_latitude,
+                    candidate_longitude,
+                    anchor_latitude,
+                    anchor_longitude,
+                )
+                <= 25
+            ) or (
+                candidate_latitude is None
+                and _normalize_address(candidate.get("address"))
+                and _normalize_address(candidate.get("address"))
+                == _normalize_address(anchor.get("address"))
+            ):
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            anchors.append(candidate.copy())
+        else:
+            anchors[duplicate_index] = {
+                **anchors[duplicate_index],
+                **{key: value for key, value in candidate.items() if value is not None},
+            }
+
+    for key in ("label", "map_name", "updated_at"):
+        if incoming.get(key):
+            merged[key] = incoming[key]
+    combined_trip_types = [
+        trip_type
+        for trip_type in (TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE)
+        if trip_type in {*place_trip_types(existing), *place_trip_types(incoming)}
+    ]
+    merged["trip_types"] = combined_trip_types
+    incoming_role = incoming.get("place_role")
+    existing_role = existing.get("place_role")
+    if len(combined_trip_types) > 1:
+        merged["trip_type"] = TRIP_TYPE_CONTEXTUAL
+        merged["place_role"] = PLACE_ROLE_MIXED
+        merged["radius_m"] = min(
+            effective_place_radius(existing, LEARNED_PRIVATE_RADIUS),
+            effective_place_radius(incoming, LEARNED_PRIVATE_RADIUS),
+        )
+    elif combined_trip_types:
+        merged["trip_type"] = combined_trip_types[0]
+        if incoming_role and not (
+            incoming_role == PLACE_ROLE_TRANSIENT
+            and existing_role not in {None, PLACE_ROLE_TRANSIENT}
+        ):
+            merged["place_role"] = incoming_role
+        elif existing_role:
+            merged["place_role"] = existing_role
+        if incoming.get("radius_m") is not None:
+            merged["radius_m"] = incoming["radius_m"]
+    else:
+        merged["trip_type"] = incoming.get("trip_type") or existing.get("trip_type")
+        merged["place_role"] = incoming_role or existing_role
+        if incoming.get("radius_m") is not None:
+            merged["radius_m"] = incoming["radius_m"]
+    merged["transient_capable"] = bool(
+        existing.get("transient_capable") or incoming.get("transient_capable")
+    )
+    if incoming.get("transient_kind") or existing.get("transient_kind"):
+        merged["transient_kind"] = incoming.get("transient_kind") or existing.get(
+            "transient_kind"
+        )
+    merged["anchors"] = anchors[-_MAX_ANCHORS_PER_PLACE:]
+    for legacy_key in ("latitude", "longitude", "address"):
+        merged.pop(legacy_key, None)
+    return merged
+
+
+def consolidate_learned_places(document: dict[str, Any]) -> bool:
+    """Normalize and merge colocated legacy records into one place."""
+    source = document.get("places")
+    if not isinstance(source, list):
+        return False
+    consolidated: list[dict[str, Any]] = []
+    for raw_place in source:
+        if not isinstance(raw_place, dict):
+            continue
+        place = raw_place.copy()
+        place["trip_types"] = place_trip_types(place)
+        place["anchors"] = _place_anchors(place)[-_MAX_ANCHORS_PER_PLACE:]
+        for legacy_key in ("latitude", "longitude", "address"):
+            place.pop(legacy_key, None)
+        replacement_index: int | None = None
+        for index, existing in enumerate(consolidated):
+            if (
+                place.get("id")
+                and place.get("id") == existing.get("id")
+            ) or _places_overlap(existing, place):
+                replacement_index = index
+                break
+        if replacement_index is None:
+            consolidated.append(place)
+        else:
+            consolidated[replacement_index] = _merge_place_records(
+                consolidated[replacement_index], place
+            )
+    changed = (
+        consolidated != source
+        or document.get("version") != _LEARNED_PLACES_VERSION
+    )
+    document["version"] = _LEARNED_PLACES_VERSION
+    document["places"] = consolidated
+    return changed
 
 
 def _whole_km(value: float) -> int:
@@ -627,7 +885,9 @@ class KnihaJizdRepository:
                 {"version": _LEARNED_PLACES_VERSION, "places": []},
             )
         else:
-            self._load_places_sync()
+            places_data = self._load_places_sync()
+            if consolidate_learned_places(places_data):
+                _write_json_atomic(self.places_path, places_data)
 
     def _load_raw_sync(self) -> dict[str, Any]:
         """Load and validate raw data."""
@@ -794,6 +1054,21 @@ class KnihaJizdRepository:
         """Calculate raw-log statistics in an executor."""
         return calculate_statistics(self._load_raw_sync()["segments"], local_date)
 
+    async def async_get_history(
+        self, month: str, selected_date: str
+    ) -> dict[str, Any]:
+        """Return calendar totals and persisted rows for one selected day."""
+        async with self._lock:
+            return await self.hass.async_add_executor_job(
+                self._get_history_sync, month, selected_date
+            )
+
+    def _get_history_sync(self, month: str, selected_date: str) -> dict[str, Any]:
+        """Build history data from the raw log in an executor."""
+        return calculate_history(
+            self._load_raw_sync()["segments"], month, selected_date
+        )
+
     async def async_get_places_for_map(
         self, fallback_radius: float
     ) -> list[dict[str, Any]]:
@@ -917,15 +1192,19 @@ class KnihaJizdRepository:
                 "id": place_id or uuid4().hex,
                 "label": place.get("label"),
                 "trip_type": trip_type,
+                "trip_types": place_trip_types(place),
                 "place_role": place.get("place_role"),
                 "radius_m": place.get("radius_m"),
                 "map_name": place.get("map_name"),
                 "updated_at": place.get("updated_at"),
+                "transient_capable": bool(place.get("transient_capable")),
+                "transient_kind": place.get("transient_kind"),
                 "anchors": [new_anchor],
             }
             places.append(learned)
         else:
             learned = places[replacement_index].copy()
+            existing_trip_types = place_trip_types(learned)
             previous_place_role = learned.get("place_role")
             anchors = _place_anchors(learned)
             new_latitude = _optional_float(new_anchor.get("latitude"))
@@ -985,12 +1264,34 @@ class KnihaJizdRepository:
                     ),
                     "map_name": place.get("map_name") or learned.get("map_name"),
                     "updated_at": place.get("updated_at"),
+                    "transient_capable": bool(
+                        learned.get("transient_capable")
+                        or place.get("transient_capable")
+                    ),
+                    "transient_kind": place.get("transient_kind")
+                    or learned.get("transient_kind"),
                     "anchors": anchors[-_MAX_ANCHORS_PER_PLACE:],
                 }
             )
+            combined_trip_types = [
+                selected
+                for selected in (TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE)
+                if selected in {*existing_trip_types, *place_trip_types(place)}
+            ]
+            if trip_type == TRIP_TYPE_CONTEXTUAL and place_role in {
+                PLACE_ROLE_RETURN,
+                PLACE_ROLE_TRANSIENT,
+            }:
+                combined_trip_types = []
+            learned["trip_types"] = combined_trip_types
+            if len(combined_trip_types) > 1:
+                learned["trip_type"] = TRIP_TYPE_CONTEXTUAL
+                learned["place_role"] = PLACE_ROLE_MIXED
+                learned["radius_m"] = LEARNED_PRIVATE_RADIUS
             for legacy_key in ("latitude", "longitude", "address"):
                 learned.pop(legacy_key, None)
             places[replacement_index] = learned
+        consolidate_learned_places(data)
         _write_json_atomic(self.places_path, data)
 
 
@@ -1033,6 +1334,85 @@ def calculate_statistics(
         "today_rows": deepcopy_json(today_segments),
         "today_odometer_check": odometer_day_check(today_segments),
         "last_segment": deepcopy_json(last_segment),
+    }
+
+
+def calculate_history(
+    segments: list[dict[str, Any]], month: str, selected_date: str
+) -> dict[str, Any]:
+    """Aggregate one calendar month and return rows for the selected day."""
+    valid_segments = [segment for segment in segments if isinstance(segment, dict)]
+    month_segments = [
+        segment
+        for segment in valid_segments
+        if str(segment.get("date") or "").startswith(f"{month}-")
+    ]
+
+    def _distance(segment: dict[str, Any]) -> float:
+        value = _optional_float(segment.get("distance_km"))
+        return max(0.0, value) if value is not None else 0.0
+
+    days: dict[str, dict[str, Any]] = {}
+    for segment in month_segments:
+        local_date = str(segment.get("date") or "")
+        day = days.setdefault(
+            local_date,
+            {
+                "date": local_date,
+                "business_km": 0.0,
+                "private_km": 0.0,
+                "business_trips": 0,
+                "private_trips": 0,
+            },
+        )
+        trip_type = segment.get("trip_type")
+        if trip_type == TRIP_TYPE_BUSINESS:
+            day["business_km"] += _distance(segment)
+            day["business_trips"] += 1
+        elif trip_type == TRIP_TYPE_PRIVATE:
+            day["private_km"] += _distance(segment)
+            day["private_trips"] += 1
+
+    calendar_days: list[dict[str, Any]] = []
+    for local_date in sorted(days):
+        day = days[local_date]
+        calendar_days.append(
+            {
+                **day,
+                "business_km": _whole_km(day["business_km"]),
+                "private_km": _whole_km(day["private_km"]),
+                "trips": day["business_trips"] + day["private_trips"],
+            }
+        )
+
+    selected_rows = sorted(
+        (
+            deepcopy_json(segment)
+            for segment in month_segments
+            if str(segment.get("date") or "") == selected_date
+        ),
+        key=lambda segment: str(segment.get("started_at") or ""),
+    )
+    return {
+        "month": month,
+        "selected_date": selected_date,
+        "days": calendar_days,
+        "month_business_km": _whole_km(
+            sum(
+                _distance(segment)
+                for segment in month_segments
+                if segment.get("trip_type") == TRIP_TYPE_BUSINESS
+            )
+        ),
+        "month_private_km": _whole_km(
+            sum(
+                _distance(segment)
+                for segment in month_segments
+                if segment.get("trip_type") == TRIP_TYPE_PRIVATE
+            )
+        ),
+        "month_trips": len(month_segments),
+        "rows": selected_rows,
     }
 
 

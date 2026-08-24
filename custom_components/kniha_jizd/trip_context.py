@@ -15,9 +15,24 @@ def infer_return_context(
     max_start_distance_m: float,
 ) -> dict[str, Any] | None:
     """Recognize a leg starting where the previous business leg ended."""
+    context = infer_trip_context(
+        segment, previous, max_gap_hours, max_start_distance_m
+    )
+    if context is None or context.get("previous_trip_type") != "business":
+        return None
+    return context
+
+
+def infer_trip_context(
+    segment: dict[str, Any],
+    previous: dict[str, Any] | None,
+    max_gap_hours: float,
+    max_start_distance_m: float,
+) -> dict[str, Any] | None:
+    """Recognize a continuous leg and carry its business/private classification."""
     if (
         not isinstance(previous, dict)
-        or previous.get("trip_type") != "business"
+        or previous.get("trip_type") not in {"business", "private"}
         or previous.get("journey_role") == "return"
     ):
         return None
@@ -61,6 +76,7 @@ def infer_return_context(
         "suggested": True,
         "previous_segment_id": previous.get("id"),
         "previous_purpose": previous.get("purpose"),
+        "previous_trip_type": previous.get("trip_type"),
         "previous_ended_at": previous.get("ended_at"),
         "gap_minutes": round(gap_seconds / 60, 1),
         "start_match_method": match_method,

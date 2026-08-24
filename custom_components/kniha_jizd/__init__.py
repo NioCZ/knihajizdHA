@@ -64,6 +64,7 @@ from .const import (
 from .download import KnihaJizdDownloadView
 from .export import export_excel
 from .geocoding import NominatimGeocoder
+from .history_api import KnihaJizdHistoryView
 from .manager import KnihaJizdManager
 from .map_api import KnihaJizdMapView
 from .nearby_search import NearbyInstitutionSearcher
@@ -95,6 +96,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up integration-level services."""
 
     hass.http.register_view(KnihaJizdDownloadView(hass))
+    hass.http.register_view(KnihaJizdHistoryView(hass))
     hass.http.register_view(KnihaJizdMapView(hass))
 
     async def _async_export_service(call: ServiceCall) -> dict[str, Any]:

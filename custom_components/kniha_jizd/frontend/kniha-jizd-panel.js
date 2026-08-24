@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.9.0";
+import "./kniha-jizd-map.js?v=1.10.0";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -16,6 +16,11 @@ class KnihaJizdPanel extends HTMLElement {
     this._mapLoadedAt = 0;
     this._mapRefreshTimer = null;
     this._month = this._currentMonth();
+    this._historyMonth = this._currentMonth();
+    this._historyDate = this._currentDate();
+    this._historyData = null;
+    this._historyLoading = false;
+    this._historyError = "";
   }
 
   set hass(value) {
@@ -87,6 +92,11 @@ class KnihaJizdPanel extends HTMLElement {
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   }
 
+  _currentDate() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  }
+
   _statusLabel(value) {
     return {
       idle: "Připraveno",
@@ -137,13 +147,17 @@ class KnihaJizdPanel extends HTMLElement {
       this._message = `Úprava se nezdařila: ${error.message || error}`;
     } finally {
       this._savingTrip = null;
-      this._render();
+      if (this._activeTab === "history") {
+        await this._loadHistoryData();
+      } else {
+        this._render();
+      }
     }
   }
 
-  _tripTable(rows) {
+  _tripTable(rows, emptyMessage = "Pro vybraný den není zaznamenána žádná jízda.") {
     if (!Array.isArray(rows) || rows.length === 0) {
-      return '<div class="muted">Dnes zatím není zaznamenána žádná jízda.</div>';
+      return `<div class="muted">${this._text(emptyMessage)}</div>`;
     }
     return `<div class="table-wrap"><table><thead><tr>
       <th>Čas</th><th>Odkud</th><th>Kam</th><th>km</th><th>Zákazník / účel</th><th>Typ</th><th>Stav</th><th></th>
@@ -164,6 +178,114 @@ class KnihaJizdPanel extends HTMLElement {
         <td><button class="save-trip" ${disabled ? "disabled" : ""}>Uložit</button></td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
+  }
+
+  _historyDateLabel(value) {
+    const parts = String(value || "").split("-").map(Number);
+    if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return "—";
+    return new Intl.DateTimeFormat("cs-CZ", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    }).format(new Date(parts[0], parts[1] - 1, parts[2], 12));
+  }
+
+  _historyMonthLabel(value) {
+    const parts = String(value || "").split("-").map(Number);
+    if (parts.length !== 2 || parts.some((part) => !Number.isFinite(part))) return "—";
+    return new Intl.DateTimeFormat("cs-CZ", {
+      month: "long",
+      year: "numeric",
+    }).format(new Date(parts[0], parts[1] - 1, 1, 12));
+  }
+
+  _historyCalendar() {
+    const [year, month] = this._historyMonth.split("-").map(Number);
+    if (!Number.isInteger(year) || !Number.isInteger(month)) return "";
+    const summaries = new Map(
+      (this._historyData?.days || []).map((day) => [day.date, day]),
+    );
+    const firstWeekday = (new Date(year, month - 1, 1, 12).getDay() + 6) % 7;
+    const daysInMonth = new Date(year, month, 0, 12).getDate();
+    const cells = Array.from(
+      { length: firstWeekday },
+      () => '<div class="calendar-empty" aria-hidden="true"></div>',
+    );
+    for (let dayNumber = 1; dayNumber <= daysInMonth; dayNumber += 1) {
+      const dateValue = `${this._historyMonth}-${String(dayNumber).padStart(2, "0")}`;
+      const summary = summaries.get(dateValue) || {};
+      const businessKm = Number(summary.business_km || 0);
+      const privateKm = Number(summary.private_km || 0);
+      const businessTrips = Number(summary.business_trips || 0);
+      const privateTrips = Number(summary.private_trips || 0);
+      const classes = [
+        "calendar-day",
+        dateValue === this._historyDate ? "selected" : "",
+        dateValue === this._currentDate() ? "today" : "",
+        summary.trips ? "has-trips" : "",
+      ].filter(Boolean).join(" ");
+      cells.push(`<button class="${classes}" data-history-date="${dateValue}" aria-label="${this._text(this._historyDateLabel(dateValue))}">
+        <span class="day-number">${dayNumber}</span>
+        <span class="day-values">
+          ${businessTrips ? `<span class="calendar-value business" title="Služební">${this._number(businessKm)} km</span>` : ""}
+          ${privateTrips ? `<span class="calendar-value private" title="Soukromé">${this._number(privateKm)} km</span>` : ""}
+        </span>
+      </button>`);
+    }
+    return `<div class="calendar-weekdays" aria-hidden="true">
+      ${["Po", "Út", "St", "Čt", "Pá", "So", "Ne"].map((day) => `<span>${day}</span>`).join("")}
+    </div><div class="calendar-grid">${cells.join("")}</div>`;
+  }
+
+  async _loadHistoryData() {
+    if (!this._hass || this._historyLoading) return;
+    this._historyLoading = true;
+    this._historyError = "";
+    this._render();
+    try {
+      const query = `month=${encodeURIComponent(this._historyMonth)}&date=${encodeURIComponent(this._historyDate)}`;
+      this._historyData = await this._hass.callApi(
+        "GET",
+        `kniha_jizd/history?${query}`,
+      );
+    } catch (error) {
+      this._historyError = error.message || String(error);
+    } finally {
+      this._historyLoading = false;
+      this._render();
+    }
+  }
+
+  async _changeHistoryMonth(value, preferLatest = true) {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) return;
+    this._historyMonth = value;
+    this._historyDate = value === this._currentMonth()
+      ? this._currentDate()
+      : `${value}-01`;
+    this._historyData = null;
+    await this._loadHistoryData();
+    const days = this._historyData?.days || [];
+    if (preferLatest && value !== this._currentMonth() && days.length) {
+      const latestDate = days[days.length - 1]?.date;
+      if (latestDate && latestDate !== this._historyDate) {
+        this._historyDate = latestDate;
+        await this._loadHistoryData();
+      }
+    }
+  }
+
+  async _shiftHistoryMonth(offset) {
+    const [year, month] = this._historyMonth.split("-").map(Number);
+    const shifted = new Date(year, month - 1 + offset, 1, 12);
+    const value = `${shifted.getFullYear()}-${String(shifted.getMonth() + 1).padStart(2, "0")}`;
+    await this._changeHistoryMonth(value);
+  }
+
+  async _selectHistoryDate(value) {
+    if (!String(value).startsWith(`${this._historyMonth}-`)) return;
+    this._historyDate = value;
+    await this._loadHistoryData();
   }
 
   _check(label, ok, detail) {
@@ -208,10 +330,11 @@ class KnihaJizdPanel extends HTMLElement {
   }
 
   async _selectTab(tab) {
-    if (!new Set(["overview", "map"]).has(tab)) return;
+    if (!new Set(["overview", "history", "map"]).has(tab)) return;
     this._activeTab = tab;
     this._render();
     if (tab === "map" && !this._mapData) await this._loadMapData();
+    if (tab === "history" && !this._historyData) await this._loadHistoryData();
   }
 
   _syncMapElement() {
@@ -270,6 +393,10 @@ class KnihaJizdPanel extends HTMLElement {
     const attrs = status?.attributes || {};
     const odometerCheck = attrs.odometer_day_check || {};
     const todayTripRows = attrs.today_trips || [];
+    const historyRows = this._historyData?.rows || [];
+    const selectedDay = (this._historyData?.days || []).find(
+      (day) => day.date === this._historyDate,
+    ) || {};
     const last = lastTrip?.attributes || {};
     const rawDownloadUrl = exportEntity?.attributes?.download_url;
     const expiresAt = Date.parse(exportEntity?.attributes?.expires_at || "");
@@ -324,7 +451,33 @@ class KnihaJizdPanel extends HTMLElement {
         .map-heading h2 { margin:0; }
         .map-heading button { padding:9px 14px; }
         .map-loading { min-height:20px; margin-bottom:12px; color:var(--secondary-text-color); }
-        @media (max-width:600px) { main { padding:16px; } dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:8px; } }
+        .history-heading { display:flex; justify-content:space-between; align-items:center; gap:14px; margin-bottom:16px; flex-wrap:wrap; }
+        .history-heading h2 { margin:0; text-transform:capitalize; }
+        .history-month-nav { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+        .history-month-nav button { padding:9px 13px; }
+        .history-month-nav input { margin:0; }
+        .calendar-legend { display:flex; gap:14px; flex-wrap:wrap; margin:0 0 12px; color:var(--secondary-text-color); }
+        .calendar-legend span { display:flex; align-items:center; gap:6px; }
+        .legend-dot { width:10px; height:10px; border-radius:999px; background:#1976d2; }
+        .legend-dot.private { background:#8e44ad; }
+        .calendar-weekdays, .calendar-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px; }
+        .calendar-weekdays { margin-bottom:6px; color:var(--secondary-text-color); text-align:center; font-size:12px; font-weight:700; }
+        .calendar-day { min-width:0; min-height:96px; display:flex; flex-direction:column; align-items:stretch; gap:6px; padding:8px; color:var(--primary-text-color); background:var(--secondary-background-color); border:1px solid transparent; border-radius:10px; text-align:left; }
+        .calendar-day:hover { border-color:var(--primary-color); }
+        .calendar-day.selected { outline:3px solid var(--primary-color); outline-offset:0; }
+        .calendar-day.today .day-number { color:var(--primary-color); }
+        .calendar-day.has-trips { border-color:var(--divider-color); }
+        .day-number { font-size:16px; font-weight:800; }
+        .day-values { display:flex; flex-direction:column; gap:4px; margin-top:auto; min-width:0; }
+        .calendar-value { display:block; overflow:hidden; padding:3px 5px; border-radius:6px; color:#fff; background:#1976d2; font-size:11px; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
+        .calendar-value.private { background:#8e44ad; }
+        .history-status { min-height:20px; margin:0 0 12px; color:var(--secondary-text-color); }
+        @media (max-width:600px) {
+          main { padding:16px; } dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:8px; }
+          .calendar-weekdays, .calendar-grid { gap:3px; }
+          .calendar-day { min-height:75px; padding:5px; border-radius:7px; }
+          .calendar-value { padding:2px 3px; font-size:9px; }
+        }
       </style>
       <main>
         <header><div><h1>Kniha jízd</h1><div class="muted">Průběžný stav integrace a export reportů</div></div>
@@ -332,6 +485,7 @@ class KnihaJizdPanel extends HTMLElement {
         </header>
         <nav class="tabs" aria-label="Části panelu">
           <button class="tab ${this._activeTab === "overview" ? "active" : ""}" data-tab="overview">Přehled</button>
+          <button class="tab ${this._activeTab === "history" ? "active" : ""}" data-tab="history">Historie</button>
           <button class="tab ${this._activeTab === "map" ? "active" : ""}" data-tab="map">Mapa míst</button>
         </nav>
         <div ${this._activeTab === "overview" ? "" : "hidden"}>
@@ -379,7 +533,7 @@ class KnihaJizdPanel extends HTMLElement {
         </section>
         <section class="card daily-trips"><h2>Dnešní jízdy</h2>
           <div class="muted">Uložené i čekající jízdy lze opravit. Zákazník je u služební jízdy volitelný. Segmenty stejné celé cesty se upraví společně.</div>
-          ${this._tripTable(todayTripRows)}
+          ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.")}
         </section>
         <section class="card"><h2>Excel report</h2>
           <div class="muted">Oba listy budou obsahovat pouze jízdy z vybraného měsíce.</div>
@@ -389,6 +543,37 @@ class KnihaJizdPanel extends HTMLElement {
           <div class="message">${this._text(this._message, exportEntity?.attributes?.generated_at ? `Poslední export: ${exportEntity.attributes.generated_at}, měsíc ${exportEntity.attributes.month}` : "Dosud nebyl vytvořen export.")}</div>
         </section>
         </div>
+        ${this._activeTab === "history" ? `<div class="history-view">
+          <section class="card daily-trips">
+            <div class="history-heading">
+              <div><h2>${this._text(this._historyMonthLabel(this._historyMonth))}</h2><div class="muted">Kliknutím na den zobrazíte jeho jízdy.</div></div>
+              <div class="history-month-nav">
+                <button id="history-previous" aria-label="Předchozí měsíc">‹</button>
+                <input id="history-month" type="month" value="${this._text(this._historyMonth)}" aria-label="Měsíc historie">
+                <button id="history-next" aria-label="Další měsíc">›</button>
+                <button id="refresh-history" ${this._historyLoading ? "disabled" : ""}>Aktualizovat</button>
+              </div>
+            </div>
+            <div class="history-status">${this._historyError
+              ? `Historii se nepodařilo načíst: ${this._text(this._historyError)}`
+              : this._historyLoading
+                ? "Načítám historii…"
+                : this._historyData
+                  ? `Za měsíc: ${this._number(this._historyData.month_business_km)} služebních km, ${this._number(this._historyData.month_private_km)} soukromých km, ${this._text(this._historyData.month_trips, "0")} záznamů.`
+                  : "Historie ještě není načtená."}</div>
+            <div class="calendar-legend"><span><i class="legend-dot"></i>Služební km</span><span><i class="legend-dot private"></i>Soukromé km</span></div>
+            ${this._historyCalendar()}
+          </section>
+          <section class="grid">
+            <article class="card"><div class="muted">Vybraný den</div><div class="metric">${this._text(this._historyDateLabel(this._historyDate))}</div></article>
+            <article class="card"><div class="muted">Služební</div><div class="metric">${this._number(selectedDay.business_km || 0)} km</div><small>${this._text(selectedDay.business_trips, "0")} jízd</small></article>
+            <article class="card"><div class="muted">Soukromé</div><div class="metric">${this._number(selectedDay.private_km || 0)} km</div><small>${this._text(selectedDay.private_trips, "0")} jízd</small></article>
+          </section>
+          <section class="card daily-trips"><h2>Jízdy vybraného dne</h2>
+            <div class="muted">Historické záznamy lze opravit stejně jako dnešní jízdy.</div>
+            ${this._tripTable(historyRows)}
+          </section>
+        </div>` : ""}
         ${this._activeTab === "map" ? `<section class="card">
           <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Aktuální auto, naučené parkovací body, rozpoznávací poloměry a dnešní úseky.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
           <div class="map-loading"></div>
@@ -397,6 +582,28 @@ class KnihaJizdPanel extends HTMLElement {
       </main>`;
     this.shadowRoot.querySelectorAll(".tab").forEach((button) => {
       button.addEventListener("click", () => this._selectTab(button.dataset.tab));
+    });
+    this.shadowRoot.getElementById("history-previous")?.addEventListener(
+      "click",
+      () => this._shiftHistoryMonth(-1),
+    );
+    this.shadowRoot.getElementById("history-next")?.addEventListener(
+      "click",
+      () => this._shiftHistoryMonth(1),
+    );
+    this.shadowRoot.getElementById("history-month")?.addEventListener(
+      "change",
+      (event) => this._changeHistoryMonth(event.target.value),
+    );
+    this.shadowRoot.getElementById("refresh-history")?.addEventListener(
+      "click",
+      () => this._loadHistoryData(),
+    );
+    this.shadowRoot.querySelectorAll(".calendar-day").forEach((button) => {
+      button.addEventListener(
+        "click",
+        () => this._selectHistoryDate(button.dataset.historyDate),
+      );
     });
     this.shadowRoot.getElementById("refresh-map")?.addEventListener("click", () => this._loadMapData());
     this.shadowRoot.getElementById("month")?.addEventListener("change", (event) => {

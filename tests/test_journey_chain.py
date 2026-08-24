@@ -131,6 +131,53 @@ class JourneyChainTest(unittest.TestCase):
         self.assertEqual(destination["journey_distance_km"], 23.75)
         self.assertTrue(destination["journey_distance_complete"])
 
+    def test_map_collapses_transient_stops_into_final_destination(self) -> None:
+        """Show one whole route without exposing fuel and shop stop points."""
+        routes = [
+            {
+                "id": "fuel",
+                "journey_id": "journey",
+                "journey_role": "transient_stop",
+                "started_at": "2026-08-24T08:00:00+00:00",
+                "start_latitude": 50.0,
+                "start_longitude": 14.0,
+                "end_latitude": 50.1,
+                "end_longitude": 14.1,
+            },
+            {
+                "id": "customer",
+                "journey_id": "journey",
+                "journey_role": "destination",
+                "started_at": "2026-08-24T08:20:00+00:00",
+                "start_latitude": 50.1,
+                "start_longitude": 14.1,
+                "end_latitude": 50.2,
+                "end_longitude": 14.2,
+            },
+        ]
+
+        visible = CHAIN_MODULE.map_routes_without_transient_stops(routes)
+
+        self.assertEqual(len(visible), 1)
+        self.assertEqual(visible[0]["id"], "customer")
+        self.assertEqual(visible[0]["start_latitude"], 50.0)
+        self.assertEqual(visible[0]["end_latitude"], 50.2)
+        self.assertEqual(visible[0]["collapsed_stop_count"], 1)
+
+    def test_map_hides_unfinished_transient_stop(self) -> None:
+        """Do not show a short stop before a meaningful destination is known."""
+        visible = CHAIN_MODULE.map_routes_without_transient_stops(
+            [
+                {
+                    "id": "shop",
+                    "journey_id": "journey",
+                    "journey_role": "transient_stop",
+                }
+            ]
+        )
+
+        self.assertEqual(visible, [])
+
 
 if __name__ == "__main__":
     unittest.main()

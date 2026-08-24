@@ -73,11 +73,17 @@ from .journey_chain import (
     apply_journey_classification,
     continuation_details,
     detect_transient_stop,
+    map_routes_without_transient_stops,
 )
 from .nearby_search import NearbyInstitutionSearcher
 from .odometer_logic import odometer_update_signal
-from .storage import KnihaJizdRepository
-from .trip_context import infer_return_context
+from .storage import (
+    KnihaJizdRepository,
+    learned_place_behavior,
+    place_trip_types,
+    suppress_configured_place_duplicates,
+)
+from .trip_context import infer_trip_context
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -457,6 +463,9 @@ class KnihaJizdManager:
         ):
             if marker["latitude"] is not None and marker["longitude"] is not None:
                 configured_places.append(marker)
+        learned_places = suppress_configured_place_duplicates(
+            learned_places, configured_places
+        )
 
         location = self._capture_location()
         car_latitude = _as_float(location.get("latitude"))
@@ -525,9 +534,32 @@ class KnihaJizdManager:
             "car": car,
             "configured_places": configured_places,
             "learned_places": learned_places,
-            "today_routes": sorted(
-                routes.values(), key=lambda row: str(row.get("started_at") or "")
-            ),
+            "today_routes": map_routes_without_transient_stops(list(routes.values())),
+        }
+
+    async def async_get_history_data(
+        self, month: str, selected_date: str
+    ) -> dict[str, Any]:
+        """Build calendar totals and editable rows for the history panel."""
+        history = await self.repository.async_get_history(month, selected_date)
+        local_date = dt_util.now().date().isoformat()
+        if selected_date == local_date:
+            rows = self._today_trip_rows()
+        else:
+            stored_rows = history.get("rows")
+            rows = (
+                [
+                    _panel_trip_row(segment, "saved")
+                    for segment in stored_rows
+                    if isinstance(segment, dict)
+                ]
+                if isinstance(stored_rows, list)
+                else []
+            )
+        return {
+            **history,
+            "generated_at": _iso_utc(datetime.now(UTC)),
+            "rows": rows,
         }
 
     @callback
@@ -866,6 +898,8 @@ class KnihaJizdManager:
                 "transient_continuation": None,
                 "return_of_segment_id": None,
                 "return_context": None,
+                "private_return_context": None,
+                "trip_context": None,
                 "matched_place_id": None,
                 "return_destination_label": None,
                 "map_estimate": None,
@@ -1246,15 +1280,29 @@ class KnihaJizdManager:
                         or start_map_result["display_name"]
                     )
 
+        trip_context = infer_trip_context(
+            segment,
+            self._statistics.get("last_segment"),
+            self.return_context_hours,
+            self.place_radius,
+        )
+        if trip_context is not None:
+            segment["trip_context"] = trip_context
         segment["return_context"] = (
-            infer_return_context(
-                segment,
-                self._statistics.get("last_segment"),
-                self.return_context_hours,
-                self.place_radius,
+            (
+                trip_context
+                if isinstance(trip_context, dict)
+                and trip_context.get("previous_trip_type") == TRIP_TYPE_BUSINESS
+                else None
             )
             or segment.get("return_context")
             or self._journey_return_context(segment)
+        )
+        segment["private_return_context"] = (
+            trip_context
+            if isinstance(trip_context, dict)
+            and trip_context.get("previous_trip_type") == TRIP_TYPE_PRIVATE
+            else segment.get("private_return_context")
         )
         if await self._async_handle_configured_destination(segment):
             return
@@ -1279,19 +1327,27 @@ class KnihaJizdManager:
                     or learned_place["matched_address"]
                 )
             place_role = learned_place.get("place_role")
-            if place_role == PLACE_ROLE_TRANSIENT:
+            trip_types = place_trip_types(learned_place)
+            behavior = learned_place_behavior(
+                learned_place, bool(segment.get("return_context"))
+            )
+            segment["matched_place_role"] = place_role
+            segment["known_place_trip_types"] = trip_types
+            if behavior == "transient":
                 segment["transient_stop"] = {
                     "detected": True,
-                    "kind": "learned",
+                    "kind": learned_place.get("transient_kind") or "learned",
                     "name": str(learned_place.get("label") or "Mezizastávka"),
-                    "detection_source": "learned_place",
+                    "detection_source": (
+                        "learned_place"
+                        if place_role == PLACE_ROLE_TRANSIENT
+                        else "learned_contextual_place"
+                    ),
+                    "default_trip_types": trip_types,
                 }
                 await self._async_hold_transient(segment)
                 return
-            if (
-                place_role == PLACE_ROLE_PRIVATE
-                or learned_place.get("trip_type") == TRIP_TYPE_PRIVATE
-            ):
+            if behavior == "private":
                 await self._async_finalize_segment(
                     segment,
                     purpose="Soukromá",
@@ -1300,7 +1356,11 @@ class KnihaJizdManager:
                     learn_place=False,
                 )
                 return
-            if place_role == PLACE_ROLE_RETURN and segment.get("return_context"):
+            if behavior == "confirm":
+                segment["known_place_exception"] = True
+                await self._async_queue_pending(segment)
+                return
+            if behavior == "return" and segment.get("return_context"):
                 await self._async_finalize_return(
                     segment,
                     source="learned_return_context",
@@ -1308,7 +1368,7 @@ class KnihaJizdManager:
                 )
                 return
             if (
-                place_role == PLACE_ROLE_RETURN
+                behavior == "return"
                 or (
                     segment.get("return_context")
                     and place_role != PLACE_ROLE_CLIENT
@@ -1441,6 +1501,16 @@ class KnihaJizdManager:
                     learn_place=True,
                 )
                 return True
+            if segment.get("private_return_context"):
+                segment["journey_role"] = "return"
+                await self._async_finalize_segment(
+                    segment,
+                    purpose="Soukromá",
+                    trip_type=TRIP_TYPE_PRIVATE,
+                    source="configured_home_private_return",
+                    learn_place=False,
+                )
+                return True
             segment["return_context"] = {
                 "suggested": True,
                 "reason": "configured_home_destination",
@@ -1534,6 +1604,19 @@ class KnihaJizdManager:
             stop["expired"] = True
             stop["max_duration_minutes"] = self.transient_stop_minutes
         segment["journey_role"] = "destination"
+        if (
+            isinstance(stop, dict)
+            and stop.get("detection_source") == "learned_contextual_place"
+            and stop.get("default_trip_types") == [TRIP_TYPE_PRIVATE]
+        ):
+            await self._async_finalize_segment(
+                segment,
+                purpose="Soukromá",
+                trip_type=TRIP_TYPE_PRIVATE,
+                source="learned_private_after_transient_wait",
+                learn_place=False,
+            )
+            return
         await self._async_queue_pending(segment)
 
     def _find_runtime_continuation(
@@ -1755,7 +1838,13 @@ class KnihaJizdManager:
         ]
         return_context = segment.get("return_context")
         transient_stop = segment.get("transient_stop")
-        if isinstance(return_context, dict) and return_context.get("suggested"):
+        known_place_exception = bool(segment.get("known_place_exception"))
+        if known_place_exception:
+            base_message = (
+                f"Místo {estimate} je výjimka používaná služebně i soukromě. "
+                "Potvrďte typ této jízdy."
+            )
+        elif isinstance(return_context, dict) and return_context.get("suggested"):
             previous_purpose = return_context.get("previous_purpose")
             if previous_purpose:
                 base_message = (
@@ -1800,7 +1889,18 @@ class KnihaJizdManager:
             )
             return
 
-        if isinstance(return_context, dict) and return_context.get("suggested"):
+        if known_place_exception:
+            actions = [
+                {
+                    "action": _action_id(ACTION_CONFIRM, segment_id),
+                    "title": "Služební",
+                },
+                {
+                    "action": _action_id(ACTION_PRIVATE, segment_id),
+                    "title": "Soukromá",
+                },
+            ]
+        elif isinstance(return_context, dict) and return_context.get("suggested"):
             actions = [
                 {
                     "action": _action_id(ACTION_RETURN, segment_id),
@@ -1957,21 +2057,15 @@ class KnihaJizdManager:
             elif action == ACTION_PRIVATE:
                 purpose = "Soukromá"
                 trip_type = TRIP_TYPE_PRIVATE
-                learn_place = not bool(segment.get("matched_place_id"))
+                learn_place = expired_transient or not bool(
+                    segment.get("matched_place_id")
+                )
                 place_role = PLACE_ROLE_PRIVATE
                 learned_label = str(
                     segment.get("map_estimate")
                     or segment.get("end_address")
                     or "Soukromé místo"
                 )
-
-            if expired_transient:
-                # Fuel stations, shops and rest areas are inherently contextual.
-                # One long stop must not make every future visit permanently
-                # business or private.
-                learn_place = False
-                place_role = None
-                learned_label = None
 
             if selected_candidate is not None:
                 segment["map_estimate"] = purpose
@@ -2044,6 +2138,12 @@ class KnihaJizdManager:
         place_role: str | None = None,
     ) -> None:
         """Store a classification immediately and persist once km are ready."""
+        if segment.get("configured_place") in {"home", "company"}:
+            # Home/company already have an authoritative configured zone. The
+            # trip may be private or business without creating another map place.
+            learn_place = False
+            learned_label = None
+            place_role = None
         segment_id = str(segment["id"])
         segment["purpose"] = purpose
         segment["trip_type"] = trip_type
@@ -2127,6 +2227,9 @@ class KnihaJizdManager:
         place_role: str | None = None,
     ) -> None:
         """Write a ready segment and optionally learn its destination."""
+        if segment.get("configured_place") in {"home", "company"}:
+            # Also protect segments restored with pre-fix classification options.
+            learn_place = False
         async with self._journey_lock:
             segment["journey_id"] = segment.get("journey_id") or uuid4().hex
             inherited = self._journey_transient_segments(segment)
@@ -2153,6 +2256,11 @@ class KnihaJizdManager:
                     and segment.get("end_longitude") is not None
                 )
             ):
+                transient_stop = segment.get("transient_stop")
+                transient_capable = bool(
+                    isinstance(transient_stop, dict)
+                    and transient_stop.get("detected")
+                )
                 await self.repository.async_learn_place(
                     {
                         "id": (
@@ -2178,6 +2286,12 @@ class KnihaJizdManager:
                             else {}
                         ),
                         "map_name": segment.get("map_estimate"),
+                        "transient_capable": transient_capable,
+                        "transient_kind": (
+                            transient_stop.get("kind")
+                            if isinstance(transient_stop, dict)
+                            else None
+                        ),
                         "updated_at": _iso_utc(datetime.now(UTC)),
                     }
                 )
@@ -2214,6 +2328,12 @@ class KnihaJizdManager:
         """Learn a confirmed intermediate POI using a deliberately small radius."""
         stop = segment.get("transient_stop")
         if not isinstance(stop, dict):
+            return
+        if segment.get("matched_place_id") and segment.get(
+            "matched_place_role"
+        ) not in {None, PLACE_ROLE_TRANSIENT}:
+            # A known private/business destination may be a contextual stop, but
+            # its durable default classification must not be replaced by transient.
             return
         if not (
             segment.get("end_address")
@@ -2444,6 +2564,7 @@ def _map_trip_row(segment: dict[str, Any], status: str) -> dict[str, Any]:
         "end_address": segment.get("end_address"),
         "purpose": segment.get("purpose"),
         "trip_type": segment.get("trip_type"),
+        "journey_id": segment.get("journey_id"),
         "journey_role": segment.get("journey_role"),
         "status": status,
     }

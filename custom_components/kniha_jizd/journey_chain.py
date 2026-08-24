@@ -172,6 +172,53 @@ def apply_journey_classification(
         segment["journey_distance_complete"] = journey_distance_complete
 
 
+def map_routes_without_transient_stops(
+    routes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Hide short stops and collapse their journey into one visible map route."""
+    visible: list[dict[str, Any]] = []
+    journeys: dict[str, list[dict[str, Any]]] = {}
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        journey_id = str(route.get("journey_id") or "").strip()
+        if journey_id:
+            journeys.setdefault(journey_id, []).append(route)
+        elif route.get("journey_role") != "transient_stop":
+            visible.append(route.copy())
+
+    for journey_routes in journeys.values():
+        ordered = sorted(
+            journey_routes, key=lambda row: str(row.get("started_at") or "")
+        )
+        transient = [
+            row for row in ordered if row.get("journey_role") == "transient_stop"
+        ]
+        destinations = [
+            row for row in ordered if row.get("journey_role") != "transient_stop"
+        ]
+        if not destinations:
+            continue
+        if not transient:
+            visible.extend(row.copy() for row in destinations)
+            continue
+
+        collapsed = destinations[-1].copy()
+        first = ordered[0]
+        for field in (
+            "started_at",
+            "start_latitude",
+            "start_longitude",
+            "start_address",
+        ):
+            if first.get(field) is not None:
+                collapsed[field] = first[field]
+        collapsed["collapsed_stop_count"] = len(transient)
+        visible.append(collapsed)
+
+    return sorted(visible, key=lambda row: str(row.get("started_at") or ""))
+
+
 def _nearby_institution_is_anchor(
     candidates: list[dict[str, Any]] | None,
 ) -> bool:

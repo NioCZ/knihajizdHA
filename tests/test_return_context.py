@@ -62,6 +62,16 @@ class ReturnContextTest(unittest.TestCase):
 
         self.assertIsNone(context)
 
+    def test_private_context_is_available_for_a_trip_home(self) -> None:
+        """Carry a private destination to the continuous homebound leg."""
+        context = CONTEXT_MODULE.infer_trip_context(
+            _current(), _previous("private"), 18, 1000
+        )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(context["previous_trip_type"], "private")
+        self.assertEqual(context["previous_segment_id"], "outbound")
+
     def test_previous_return_does_not_start_another_return_chain(self) -> None:
         """Avoid treating a later departure from home or hotel as another return."""
         previous = _previous()

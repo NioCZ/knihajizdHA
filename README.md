@@ -213,6 +213,12 @@ Soukromé cíle se učí pod názvem mapového místa s konzervativní zónou 25
 takže několik různých soukromých cílů nesplyne do jedné široké kilometrové zóny.
 V raw jízdě zůstává účel `Soukromá`.
 
+Každý fyzický parkovací bod má jediný záznam. Běžné známé místo nese právě jednu
+výchozí klasifikaci (`business` nebo `private`) a další návštěva se zařadí
+automaticky. Pokud je stejné místo vědomě potvrzené oběma způsoby, uloží se jako
+jedna výjimka s oběma hodnotami a telefon se při další návštěvě zeptá pouze na typ
+jízdy; druhý bod na mapě nevznikne.
+
 ### Denní tabulka a dodatečné opravy
 
 Panel **Kniha jízd** zobrazuje všechny dnešní uložené i rozpracované segmenty.
@@ -248,10 +254,27 @@ Záložka **Mapa míst** v administračním panelu načítá přes přihlášen�
   použitého rozpoznávacího poloměru,
 - dnešní uložené i rozpracované úseky jízdy.
 
-Mapa rozlišuje klienty, soukromá a návratová místa i krátké zastávky. Zóny klientů
-používají nastavený poloměr, soukromá místa 250 m a potvrzené benzinky či jiné
-tranzitní body 200 m. Podklad tvoří dlaždice OpenStreetMap; značky a zóny zůstávají
-funkční jako interní vrstva panelu.
+Mapa rozlišuje klienty, soukromá a návratová místa. Nakonfigurovaný domov a firma
+mají vždy jen jeden bod bez ohledu na to, zda tam vedla soukromá nebo služební
+jízda. Krátké zastávky, například benzinky a obchody, se na mapě nekreslí a jejich
+úseky se sloučí do celé cesty k výslednému cíli. Interně zůstávají zapamatované jen
+pro správné rozpoznání návaznosti jízd. Podklad tvoří dlaždice OpenStreetMap.
+
+Krátká zastávka nevyvolá okamžitou notifikaci. Integrace čeká nastavený počet
+minut na pokračování: pokud další jízda začne, zastávka zdědí klasifikaci celé
+cesty. Pokud nepokračuje, přijde běžná otázka a potvrzený obchod či jiné místo se
+uloží jako standardní soukromý nebo služební cíl. Každé známé soukromé místo po
+služebním cíli nejdřív počká na možné pokračování: při odjezdu v limitu zdědí
+služební cestu, bez pokračování se samo uloží jako soukromý cíl. Známé služební
+místo má naopak přednost a zaznamená se jako skutečný cíl i při krátké návštěvě.
+
+### Historie a kalendář
+
+Záložka **Historie** umožňuje přepínat měsíce a vybrat libovolný den. Kalendář
+zobrazuje u každého dne modře služební a fialově soukromé kilometry. Po kliknutí
+na den se zobrazí jeho souhrn a stejná editovatelná tabulka jízd jako v dnešním
+přehledu. Historická data poskytuje pouze přihlášené administrační API a oprava
+řádku se promítne do denních i měsíčních součtů.
 
 ## Rozpoznání nemocnic a výzkumných pracovišť
 
