@@ -31,9 +31,10 @@ from .const import (
     TRIP_TYPE_UNCLASSIFIED,
 )
 
-_MAX_ANCHORS_PER_PLACE = 50
+_PHYSICAL_POINT_MERGE_DISTANCE_M = 25
+_MAX_ANCHORS_PER_PLACE = 1
 _RAW_DATA_VERSION = 5
-_LEARNED_PLACES_VERSION = 5
+_LEARNED_PLACES_VERSION = 6
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -62,11 +63,6 @@ def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 def _normalize_address(value: str | None) -> str:
     """Normalize an address for conservative exact matching."""
     return re.sub(r"\s+", " ", (value or "").strip().casefold())
-
-
-def _normalize_label(value: Any) -> str:
-    """Normalize a customer label for anchor grouping."""
-    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
 
 
 def place_trip_types(place: dict[str, Any]) -> list[str]:
@@ -276,7 +272,9 @@ def suppress_configured_place_duplicates(
 
 
 def _places_overlap(
-    first: dict[str, Any], second: dict[str, Any], max_distance_meters: float = 25
+    first: dict[str, Any],
+    second: dict[str, Any],
+    max_distance_meters: float = _PHYSICAL_POINT_MERGE_DISTANCE_M,
 ) -> bool:
     """Return whether two records describe the same physical parking point."""
     first_anchors = _place_anchors(first)
@@ -402,8 +400,71 @@ def _merge_place_records(
     return merged
 
 
+def split_multi_anchor_places(document: dict[str, Any]) -> bool:
+    """Migrate every geographically distinct anchor to its own place record."""
+    source = document.get("places")
+    if not isinstance(source, list):
+        return False
+    split_places: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for raw_place in source:
+        if not isinstance(raw_place, dict):
+            continue
+        place = raw_place.copy()
+        anchors: list[dict[str, Any]] = []
+        for candidate in _place_anchors(place):
+            duplicate_index = next(
+                (
+                    index
+                    for index, anchor in enumerate(anchors)
+                    if _places_overlap(
+                        {"anchors": [anchor]},
+                        {"anchors": [candidate]},
+                    )
+                ),
+                None,
+            )
+            if duplicate_index is None:
+                anchors.append(candidate.copy())
+            else:
+                anchors[duplicate_index] = {
+                    **anchors[duplicate_index],
+                    **{
+                        key: value
+                        for key, value in candidate.items()
+                        if value is not None
+                    },
+                }
+
+        records = anchors or [None]
+        original_id = str(place.get("id") or "")
+        for anchor_index, anchor in enumerate(records):
+            point = place.copy()
+            point_id = original_id if anchor_index == 0 else ""
+            if not point_id or point_id in used_ids:
+                point_id = uuid4().hex
+            used_ids.add(point_id)
+            point["id"] = point_id
+            point["trip_types"] = place_trip_types(point)
+            point["anchors"] = [anchor.copy()] if anchor is not None else []
+            if anchor is not None and anchor.get("updated_at"):
+                point["updated_at"] = anchor["updated_at"]
+            for legacy_key in ("latitude", "longitude", "address"):
+                point.pop(legacy_key, None)
+            split_places.append(point)
+
+    changed = (
+        split_places != source
+        or document.get("version") != _LEARNED_PLACES_VERSION
+    )
+    document["version"] = _LEARNED_PLACES_VERSION
+    document["places"] = split_places
+    return changed
+
+
 def consolidate_learned_places(document: dict[str, Any]) -> bool:
-    """Normalize and merge colocated legacy records into one place."""
+    """Keep one record per physical point and merge only GPS duplicates."""
+    split_changed = split_multi_anchor_places(document)
     source = document.get("places")
     if not isinstance(source, list):
         return False
@@ -418,20 +479,21 @@ def consolidate_learned_places(document: dict[str, Any]) -> bool:
             place.pop(legacy_key, None)
         replacement_index: int | None = None
         for index, existing in enumerate(consolidated):
-            if (
-                place.get("id")
-                and place.get("id") == existing.get("id")
-            ) or _places_overlap(existing, place):
+            if _places_overlap(existing, place):
                 replacement_index = index
                 break
         if replacement_index is None:
+            existing_ids = {str(item.get("id") or "") for item in consolidated}
+            if not place.get("id") or str(place.get("id")) in existing_ids:
+                place["id"] = uuid4().hex
             consolidated.append(place)
         else:
             consolidated[replacement_index] = _merge_place_records(
                 consolidated[replacement_index], place
             )
     changed = (
-        consolidated != source
+        split_changed
+        or consolidated != source
         or document.get("version") != _LEARNED_PLACES_VERSION
     )
     document["version"] = _LEARNED_PLACES_VERSION
@@ -1353,7 +1415,7 @@ class KnihaJizdRepository:
         classification: str | None,
         radius_m: float | None,
     ) -> dict[str, Any]:
-        """Merge selected duplicate records into the first selected place."""
+        """Merge selected colocated GPS duplicates into one physical point."""
         async with self._lock:
             return await self.hass.async_add_executor_job(
                 self._merge_places_sync,
@@ -1381,6 +1443,13 @@ class KnihaJizdRepository:
         ]
         if any(item is None for item in selected):
             raise ValueError("one or more selected places were not found")
+        if any(
+            not _places_overlap(selected[0], incoming)  # type: ignore[arg-type]
+            for incoming in selected[1:]
+        ):
+            raise ValueError(
+                "Vybraná místa nejsou stejný fyzický bod (maximum je 25 m)."
+            )
         merged = selected[0].copy()  # type: ignore[union-attr]
         target_id = str(merged.get("id") or unique_ids[0])
         for incoming in selected[1:]:
@@ -1632,32 +1701,19 @@ class KnihaJizdRepository:
             )
 
     def _learn_place_sync(self, place: dict[str, Any]) -> None:
-        """Persist a customer and append a confirmed parking anchor."""
+        """Persist one confirmed physical point without grouping by its label."""
         if place.get("place_role") == PLACE_ROLE_RETURN:
             # Return is stored on a trip (journey_role), never as a place.
             return
         data = self._load_places_sync()
+        migrate_return_places(data)
+        consolidate_learned_places(data)
         data["version"] = _LEARNED_PLACES_VERSION
         places: list[dict[str, Any]] = data["places"]
         place_id = place.get("id")
         normalized_address = _normalize_address(place.get("address"))
-        normalized_label = _normalize_label(place.get("label"))
         trip_type = place.get("trip_type")
         place_role = place.get("place_role")
-
-        replacement_index: int | None = None
-        for index, existing in enumerate(places):
-            if place_id and existing.get("id") == place_id:
-                replacement_index = index
-                break
-            if (
-                normalized_label
-                and _normalize_label(existing.get("label")) == normalized_label
-                and existing.get("trip_type") == trip_type
-                and existing.get("place_role") == place_role
-            ):
-                replacement_index = index
-                break
 
         new_anchor = {
             "latitude": place.get("latitude"),
@@ -1665,10 +1721,22 @@ class KnihaJizdRepository:
             "address": place.get("address"),
             "updated_at": place.get("updated_at"),
         }
+        incoming_point = {"anchors": [new_anchor]}
+
+        replacement_index: int | None = None
+        for index, existing in enumerate(places):
+            if _places_overlap(existing, incoming_point):
+                replacement_index = index
+                break
 
         if replacement_index is None:
+            requested_id = str(place_id or "")
+            if not requested_id or any(
+                str(existing.get("id") or "") == requested_id for existing in places
+            ):
+                requested_id = uuid4().hex
             learned = {
-                "id": place_id or uuid4().hex,
+                "id": requested_id,
                 "label": place.get("label"),
                 "trip_type": trip_type,
                 "trip_types": place_trip_types(place),
@@ -1685,7 +1753,7 @@ class KnihaJizdRepository:
             learned = places[replacement_index].copy()
             existing_trip_types = place_trip_types(learned)
             previous_place_role = learned.get("place_role")
-            anchors = _place_anchors(learned)
+            anchors = _place_anchors(learned)[-_MAX_ANCHORS_PER_PLACE:]
             new_latitude = _optional_float(new_anchor.get("latitude"))
             new_longitude = _optional_float(new_anchor.get("longitude"))
             duplicate_index: int | None = None
@@ -1716,7 +1784,7 @@ class KnihaJizdRepository:
                     break
 
             if duplicate_index is None:
-                anchors.append(new_anchor)
+                anchors = [new_anchor]
             else:
                 anchors[duplicate_index] = {
                     **anchors[duplicate_index],

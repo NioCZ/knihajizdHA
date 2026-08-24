@@ -1,4 +1,4 @@
-"""Tests for multi-anchor learned customer locations."""
+"""Tests for independent learned physical locations."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ storage_spec.loader.exec_module(STORAGE_MODULE)
 
 
 class LearnedPlacesTest(unittest.TestCase):
-    """Verify grouping and matching of multiple parking points."""
+    """Verify migration, deduplication and matching of physical points."""
 
     def test_history_aggregates_calendar_days_and_selected_rows(self) -> None:
         """Provide colored month totals and only the chosen day's table rows."""
@@ -244,8 +244,8 @@ class LearnedPlacesTest(unittest.TestCase):
 
         self.assertEqual([marker["id"] for marker in visible], ["neighbour"])
 
-    def test_same_customer_keeps_two_distant_anchors(self) -> None:
-        """Two confirmations with one label remain one customer with two anchors."""
+    def test_same_label_keeps_two_distant_physical_places(self) -> None:
+        """A shared label must never group geographically distant points."""
         test_output = ROOT / "test-output"
         test_output.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
@@ -268,7 +268,7 @@ class LearnedPlacesTest(unittest.TestCase):
             )
             repository._learn_place_sync(
                 {
-                    "id": "second",
+                    "id": "first",
                     "latitude": 50.018,
                     "longitude": 14.0,
                     "address": "Zadní vjezd",
@@ -280,9 +280,14 @@ class LearnedPlacesTest(unittest.TestCase):
             )
 
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 5)
-            self.assertEqual(len(document["places"]), 1)
-            self.assertEqual(len(document["places"][0]["anchors"]), 2)
+            self.assertEqual(document["version"], 6)
+            self.assertEqual(len(document["places"]), 2)
+            self.assertTrue(
+                all(len(place["anchors"]) == 1 for place in document["places"])
+            )
+            self.assertNotEqual(
+                document["places"][0]["id"], document["places"][1]["id"]
+            )
 
             first_match = repository._find_place_sync(50.0005, 14.0, None, 1000)
             second_match = repository._find_place_sync(50.0175, 14.0, None, 1000)
@@ -352,7 +357,7 @@ class LearnedPlacesTest(unittest.TestCase):
 
             match = repository._find_place_sync(50.0, 14.0, None, 1000)
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 5)
+            self.assertEqual(document["version"], 6)
             self.assertEqual(len(document["places"]), 1)
             self.assertNotEqual(match.get("place_role"), "return")
             self.assertEqual(match["trip_type"], "private")
@@ -456,7 +461,7 @@ class LearnedPlacesTest(unittest.TestCase):
         changed = STORAGE_MODULE.consolidate_learned_places(document)
 
         self.assertTrue(changed)
-        self.assertEqual(document["version"], 5)
+        self.assertEqual(document["version"], 6)
         self.assertEqual(len(document["places"]), 1)
         self.assertEqual(
             document["places"][0]["trip_types"], ["business", "private"]
@@ -575,7 +580,9 @@ class LearnedPlacesTest(unittest.TestCase):
                                 "label": "Druhý",
                                 "trip_type": "private",
                                 "place_role": "private",
-                                "anchors": [{"latitude": 50.02, "longitude": 14.0}],
+                                "anchors": [
+                                    {"latitude": 50.0001, "longitude": 14.0}
+                                ],
                             },
                         ],
                     }
@@ -593,10 +600,102 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertEqual(managed[0]["label"], "Společné místo")
             self.assertEqual(managed[0]["classification"], "mixed")
             self.assertEqual(managed[0]["radius_m"], 300)
-            self.assertEqual(managed[0]["anchor_count"], 2)
+            self.assertEqual(managed[0]["anchor_count"], 1)
 
             repository._delete_place_sync("one")
             self.assertEqual(repository._get_managed_places_sync(500, 250, 200), [])
+
+    def test_migration_splits_distant_anchors_into_independent_places(self) -> None:
+        """Upgrade old grouped data without losing any physical point."""
+        document = {
+            "version": 5,
+            "places": [
+                {
+                    "id": "private-group",
+                    "label": "Soukromé místo",
+                    "trip_type": "private",
+                    "place_role": "private",
+                    "anchors": [
+                        {
+                            "latitude": 49.29442,
+                            "longitude": 17.39996,
+                            "address": "Kroměříž",
+                        },
+                        {
+                            "latitude": 49.20441,
+                            "longitude": 17.57316,
+                            "address": "Zlín",
+                        },
+                        {
+                            "latitude": 49.78772,
+                            "longitude": 18.41292,
+                            "address": "Havířov",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        changed = STORAGE_MODULE.consolidate_learned_places(document)
+
+        self.assertTrue(changed)
+        self.assertEqual(document["version"], 6)
+        self.assertEqual(len(document["places"]), 3)
+        self.assertEqual(
+            {place["anchors"][0]["address"] for place in document["places"]},
+            {"Kroměříž", "Zlín", "Havířov"},
+        )
+        self.assertEqual(len({place["id"] for place in document["places"]}), 3)
+        self.assertTrue(
+            all(len(place["anchors"]) == 1 for place in document["places"])
+        )
+        migrated_ids = [place["id"] for place in document["places"]]
+
+        changed_again = STORAGE_MODULE.consolidate_learned_places(document)
+
+        self.assertFalse(changed_again)
+        self.assertEqual(
+            [place["id"] for place in document["places"]], migrated_ids
+        )
+
+    def test_manual_merge_rejects_distant_points(self) -> None:
+        """The management API cannot recreate a geographically mixed record."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.places_path.write_text(
+                json.dumps(
+                    {
+                        "version": 6,
+                        "places": [
+                            {
+                                "id": "kromeriz",
+                                "label": "Soukromé místo",
+                                "trip_type": "private",
+                                "place_role": "private",
+                                "anchors": [{"latitude": 49.3, "longitude": 17.4}],
+                            },
+                            {
+                                "id": "haviřov",
+                                "label": "Soukromé místo",
+                                "trip_type": "private",
+                                "place_role": "private",
+                                "anchors": [{"latitude": 49.8, "longitude": 18.4}],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "maximum je 25 m"):
+                repository._merge_places_sync(
+                    ["kromeriz", "haviřov"], None, None, None
+                )
 
     def test_place_management_can_delete_only_one_physical_anchor(self) -> None:
         """Removing a duplicate map point must preserve the logical place."""

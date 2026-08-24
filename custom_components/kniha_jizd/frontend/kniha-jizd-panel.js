@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.11.3";
+import "./kniha-jizd-map.js?v=1.12.0";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -487,24 +487,6 @@ class KnihaJizdPanel extends HTMLElement {
     this._placeAction({ action: "delete", place_id: placeId }, placeId);
   }
 
-  _deletePlaceAnchor(button) {
-    const placeId = button?.dataset?.placeId;
-    const anchorIndex = Number(button?.dataset?.anchorIndex);
-    const anchorLabel = button?.dataset?.anchorLabel || "tento bod";
-    if (
-      !placeId
-      || !Number.isInteger(anchorIndex)
-      || !window.confirm(
-        `Opravdu odstranit ${anchorLabel}? Pokud je to poslední bod, odstraní se i naučené místo. Historické jízdy zůstanou zachované.`,
-      )
-    ) return;
-    this._placeAction({
-      action: "delete_anchor",
-      place_id: placeId,
-      anchor_index: anchorIndex,
-    }, `${placeId}:${anchorIndex}`);
-  }
-
   _togglePlaceSelection(input) {
     const selected = new Set(this._selectedPlaces);
     if (input.checked) selected.add(String(input.value));
@@ -519,7 +501,7 @@ class KnihaJizdPanel extends HTMLElement {
   _mergeSelectedPlaces() {
     const placeIds = [...this._selectedPlaces];
     if (placeIds.length < 2) return;
-    if (!window.confirm(`Sloučit ${placeIds.length} vybraná místa do jednoho záznamu?`)) return;
+    if (!window.confirm(`Sloučit ${placeIds.length} vybrané GPS duplicity? Sloučení projde pouze tehdy, když jsou všechny body nejvýše 25 m od sebe.`)) return;
     this._placeAction({ action: "merge", place_ids: placeIds }, "merge");
   }
 
@@ -547,24 +529,20 @@ class KnihaJizdPanel extends HTMLElement {
     }).join("");
     const learnedRows = places.map((place) => {
       const anchors = Array.isArray(place.anchors) ? place.anchors : [];
-      const anchorRows = anchors.length ? anchors.map((anchor, index) => {
-        const markerId = `${place.id}:${index}`;
-        const visible = visiblePointIds.has(markerId);
-        const hasCoordinates = [anchor.latitude, anchor.longitude].every(
-          (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)),
-        );
-        const hiddenLabel = place.classification === "transient"
-          ? "Skryto – krátká zastávka"
-          : hasCoordinates
-            ? "Skryto – v zóně domova/firmy"
-            : "Skryto – bez souřadnic";
-        const anchorLabel = anchor.address || `${place.label}, bod ${index + 1}`;
-        return `<div class="place-anchor">
-          <div><strong>Bod ${index + 1}: ${this._text(anchor.address, "bez adresy")}</strong><small>${this._number(anchor.latitude, 5)}, ${this._number(anchor.longitude, 5)}</small></div>
+      const anchor = anchors[0] || {};
+      const visible = visiblePointIds.has(`${place.id}:0`);
+      const hasCoordinates = [anchor.latitude, anchor.longitude].every(
+        (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)),
+      );
+      const hiddenLabel = place.classification === "transient"
+        ? "Skryto – krátká zastávka"
+        : hasCoordinates
+          ? "Skryto – v zóně domova/firmy"
+          : "Skryto – bez souřadnic";
+      const point = anchors.length ? `<div class="place-anchor">
+          <div><strong>${this._text(anchor.address, "bez adresy")}</strong><small>${this._number(anchor.latitude, 5)}, ${this._number(anchor.longitude, 5)}</small></div>
           <span class="map-point-status ${visible ? "visible" : "hidden"}">${visible ? "Na mapě" : hiddenLabel}</span>
-          <button class="delete-anchor danger" data-place-id="${this._text(place.id)}" data-anchor-index="${index}" data-anchor-label="${this._text(anchorLabel)}" ${disabled ? "disabled" : ""}>Odstranit bod</button>
-        </div>`;
-      }).join("") : '<div class="muted">Místo nemá použitelný uložený bod.</div>';
+        </div>` : '<div class="muted">Bod nemá použitelné souřadnice ani adresu.</div>';
       return `<tr data-place-id="${this._text(place.id)}">
         <td><input class="place-select" type="checkbox" value="${this._text(place.id)}" ${this._selectedPlaces.has(String(place.id)) ? "checked" : ""} ${disabled ? "disabled" : ""}></td>
         <td><input class="place-label" type="text" value="${this._text(place.label, "")}" ${disabled ? "disabled" : ""}></td>
@@ -575,12 +553,12 @@ class KnihaJizdPanel extends HTMLElement {
           <option value="transient" ${place.classification === "transient" ? "selected" : ""}>Krátká zastávka</option>
         </select></td>
         <td><input class="place-radius" type="number" min="25" max="5000" step="25" value="${this._text(place.radius_m, "")}" ${disabled ? "disabled" : ""}> m</td>
-        <td><div class="place-anchor-list">${anchorRows}</div></td>
-        <td><div class="place-actions"><button class="save-place" ${disabled ? "disabled" : ""}>Uložit</button><button class="delete-place danger" ${disabled ? "disabled" : ""}>Odstranit celé místo</button></div></td>
+        <td>${point}</td>
+        <td><div class="place-actions"><button class="save-place" ${disabled ? "disabled" : ""}>Uložit</button><button class="delete-place danger" ${disabled ? "disabled" : ""}>Odstranit bod</button></div></td>
       </tr>`;
     }).join("");
     return `<div class="table-wrap places-table" data-scroll-key="places"><table><thead><tr>
-      <th></th><th>Název</th><th>Typ</th><th>Poloměr</th><th>Fyzické body</th><th></th>
+      <th></th><th>Název</th><th>Typ</th><th>Poloměr</th><th>Fyzický bod</th><th></th>
     </tr></thead><tbody>${configuredRows}${learnedRows}</tbody></table></div>`;
   }
 
@@ -702,7 +680,6 @@ class KnihaJizdPanel extends HTMLElement {
         .places-table td:nth-child(5) { min-width:430px; }
         .place-actions { display:flex; gap:6px; }
         .place-actions button { padding:8px 10px; white-space:nowrap; }
-        .place-anchor-list { display:flex; flex-direction:column; gap:8px; }
         .place-anchor { display:flex; align-items:center; gap:8px; min-width:0; padding:7px; border:1px solid var(--divider-color); border-radius:8px; }
         .place-anchor > div { flex:1; min-width:150px; }
         .place-anchor strong, .place-anchor small { display:block; }
@@ -827,8 +804,8 @@ class KnihaJizdPanel extends HTMLElement {
           <kniha-jizd-map></kniha-jizd-map>
         </section>` : ""}
         ${this._activeTab === "places" ? `<section class="card daily-trips">
-          <div class="places-heading"><div><h2>Správa míst</h2><div class="muted">Tabulka obsahuje konfigurovaná místa i všechny fyzické body naučených míst. Běžné místo má jeden typ; volbu „Služební i soukromé“ používejte jen pro skutečnou výjimku.</div></div>
-            <div class="place-toolbar"><span class="selected-place-count">${this._selectedPlaces.size} vybráno</span><button id="merge-places" ${this._selectedPlaces.size < 2 || this._savingPlace ? "disabled" : ""}>Sloučit vybrané</button><button id="refresh-places" ${this._placesLoading || this._savingPlace ? "disabled" : ""}>Aktualizovat</button></div>
+          <div class="places-heading"><div><h2>Správa míst</h2><div class="muted">Každý řádek je jeden samostatný fyzický bod. Shodný název body nespojuje; volbu „Služební i soukromé“ používejte jen pro skutečnou výjimku na tomto bodě.</div></div>
+            <div class="place-toolbar"><span class="selected-place-count">${this._selectedPlaces.size} vybráno</span><button id="merge-places" ${this._selectedPlaces.size < 2 || this._savingPlace ? "disabled" : ""}>Sloučit GPS duplicity</button><button id="refresh-places" ${this._placesLoading || this._savingPlace ? "disabled" : ""}>Aktualizovat</button></div>
           </div>
           <div class="radius-summary">Aktivní výchozí poloměry: domov ${this._number(this._placesData?.radii?.home)} m · firma ${this._number(this._placesData?.radii?.company)} m · klient ${this._number(this._placesData?.radii?.business)} m · soukromé ${this._number(this._placesData?.radii?.private)} m · zastávka ${this._number(this._placesData?.radii?.transient)} m</div>
           <div class="history-status">${this._placesError ? `Správu míst se nepodařilo načíst: ${this._text(this._placesError)}` : this._placesLoading ? "Načítám místa…" : this._text(this._placesMessage, this._placesData ? `${this._placesData.places?.length || 0} naučených míst obsahuje ${this._placesData.stored_point_count || 0} fyzických bodů. Na mapě je ${this._placesData.map_point_count || 0} bodů včetně konfigurovaného domova a firmy.` : "Místa ještě nejsou načtená.")}</div>
@@ -875,9 +852,6 @@ class KnihaJizdPanel extends HTMLElement {
     });
     this.shadowRoot.querySelectorAll(".delete-place").forEach((button) => {
       button.addEventListener("click", () => this._deletePlace(button));
-    });
-    this.shadowRoot.querySelectorAll(".delete-anchor").forEach((button) => {
-      button.addEventListener("click", () => this._deletePlaceAnchor(button));
     });
     this.shadowRoot.querySelectorAll(".place-select").forEach((input) => {
       input.addEventListener("change", () => this._togglePlaceSelection(input));

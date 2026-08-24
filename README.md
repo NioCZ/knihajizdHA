@@ -254,7 +254,7 @@ Záložka **Mapa míst** v administračním panelu načítá přes přihlášen�
 
 - aktuální GPS auta, použitý zdroj polohy a informaci, zda je auto uvnitř známé zóny,
 - nakonfigurovaný domov a firmu,
-- všechny kotvy z `learned_places.json` včetně názvu, role, adresy a skutečně
+- všechny fyzické body z `learned_places.json` včetně názvu, role, adresy a skutečně
   použitého rozpoznávacího poloměru,
 - dnešní uložené i rozpracované úseky jízdy.
 
@@ -280,11 +280,12 @@ neomezeně v runtime frontě.
 
 ### Správa míst
 
-Záložka **Správa míst** zobrazuje každý fyzický záznam, počet jeho parkovacích
-kotev, typ a skutečný poloměr. Místo lze přejmenovat, přepnout mezi služebním,
+Záložka **Správa míst** zobrazuje každý fyzický bod jako samostatný řádek, jeho
+typ a skutečný poloměr. Bod lze přejmenovat, přepnout mezi služebním,
 soukromým, smíšenou výjimkou a interní krátkou zastávkou, změnit mu poloměr nebo
-je odstranit. Zaškrtnuté duplicity lze sloučit; historické jízdy zůstávají při
-odstranění místa zachované.
+jej odstranit. Shodný název vzdálené body nikdy nespojí. Automaticky se sloučí jen
+GPS duplicity vzdálené nejvýše 25 m; stejné omezení chrání i ruční sloučení.
+Historické jízdy zůstávají při odstranění bodu zachované.
 
 ### Historie a kalendář
 
@@ -332,11 +333,12 @@ Do notifikace se vloží až tři nejlepší výsledky se vzdáleností. Tlačí
 vybere první; v textovém vstupu lze napsat číslo druhého/třetího výsledku nebo úplně
 vlastní název. Kompletní skóre, důvody a kandidáti zůstávají v raw datech pro audit.
 
-Jeden zákazník může mít v `learned_places.json` více potvrzených parkovacích bodů
-(`anchors`). Když je stejný název potvrzen na vzdálenějším parkovišti, nový bod se
-přidá ke stejnému zákazníkovi. Starý formát s jednou dvojicí latitude/longitude se
-načítá zpětně kompatibilně. Volitelným ručním polem `radius_m` lze konkrétnímu
-zákazníkovi přepsat globální poloměr.
+Každý záznam v `learned_places.json` představuje právě jeden fyzický bod. Stejný
+název může mít více samostatných bodů (například různé pobočky), ale každý má své
+ID, klasifikaci a poloměr. Při aktualizaci se staré vícekotvové záznamy automaticky
+rozdělí; pouze body do 25 m se ponechají jako jedna GPS duplicita. Starý formát
+s jednou dvojicí latitude/longitude se načítá zpětně kompatibilně. Volitelným
+ručním polem `radius_m` lze konkrétnímu bodu přepsat globální poloměr.
 
 ## Datové soubory
 
