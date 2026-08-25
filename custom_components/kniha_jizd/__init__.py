@@ -133,8 +133,26 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         manager.set_export_running(month)
         try:
+            configured_places = {
+                "home": {
+                    "address": manager.home_address,
+                    "latitude": manager.home_latitude,
+                    "longitude": manager.home_longitude,
+                    "radius_m": manager.home_radius,
+                },
+                "company": {
+                    "address": manager.company_address,
+                    "latitude": manager.company_latitude,
+                    "longitude": manager.company_longitude,
+                    "radius_m": manager.company_radius,
+                },
+            }
             result = await hass.async_add_executor_job(
-                export_excel, manager.repository.raw_path, output_path, month
+                export_excel,
+                manager.repository.raw_path,
+                output_path,
+                month,
+                configured_places,
             )
         except (ImportError, OSError, ValueError, TypeError) as err:
             manager.set_export_error(str(err))

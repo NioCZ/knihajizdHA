@@ -143,6 +143,61 @@ class ExportExcelTest(unittest.TestCase):
         self.assertEqual(rows[0]["Zákazník"], "Fakultní nemocnice")
         self.assertEqual(rows[0]["Služební km"], 18)
 
+    def test_summary_uses_exact_configured_home_and_company_addresses(self) -> None:
+        """Nearby mobile fixes are canonicalized only in the daily summary."""
+        segments = [
+            {
+                "date": "2026-08-25",
+                "started_at": "2026-08-25T06:10:00+00:00",
+                "start_address": "Vrchlického 682/4, Kroměříž",
+                "start_latitude": 49.29810,
+                "start_longitude": 17.39210,
+                "end_address": "Výstavní 380/20, Brno",
+                "end_latitude": 49.18920,
+                "end_longitude": 16.58420,
+                "purpose": "Firma",
+                "trip_type": "business",
+                "distance_km": 66,
+                "configured_place": "company",
+            },
+            {
+                "date": "2026-08-25",
+                "started_at": "2026-08-25T14:00:00+00:00",
+                "start_address": "Výstavní 380/20, Brno",
+                "start_latitude": 49.18920,
+                "start_longitude": 16.58420,
+                "end_address": "Vrchlického 682/4, Kroměříž",
+                "end_latitude": 49.29810,
+                "end_longitude": 17.39210,
+                "purpose": "Návrat",
+                "trip_type": "business",
+                "distance_km": 66,
+                "configured_place": "home",
+            },
+        ]
+        configured_places = {
+            "home": {
+                "address": "Vrchlického 699/2, Kroměříž",
+                "latitude": 49.29800,
+                "longitude": 17.39200,
+                "radius_m": 300,
+            },
+            "company": {
+                "address": "Výstavní 378/18, Brno",
+                "latitude": 49.18910,
+                "longitude": 16.58410,
+                "radius_m": 300,
+            },
+        }
+
+        rows = EXPORT_MODULE._build_summary_rows(segments, configured_places)
+
+        self.assertEqual(rows[0]["Start/Odkud"], "Vrchlického 699/2, Kroměříž")
+        self.assertEqual(rows[0]["Přes"], "Výstavní 378/18, Brno")
+        self.assertEqual(rows[0]["Cíl/Kam"], "Vrchlického 699/2, Kroměříž")
+        self.assertEqual(segments[0]["start_address"], "Vrchlického 682/4, Kroměříž")
+        self.assertEqual(segments[1]["end_address"], "Vrchlického 682/4, Kroměříž")
+
     def test_month_filter_excludes_other_periods(self) -> None:
         """Keep both workbook sheets inside the requested calendar month."""
         test_output = ROOT / "test-output"

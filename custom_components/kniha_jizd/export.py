@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
-from math import floor
+from math import asin, cos, floor, radians, sin, sqrt
 from pathlib import Path
 import re
 from typing import Any
@@ -23,7 +23,10 @@ _IMPLICIT_TRANSIENT_STOP_SECONDS = 3 * 60
 
 
 def export_excel(
-    raw_path: Path, output_path: Path, month: str | None = None
+    raw_path: Path,
+    output_path: Path,
+    month: str | None = None,
+    configured_places: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a two-sheet xlsx file, optionally restricted to one month."""
     import pandas as pd
@@ -44,7 +47,7 @@ def export_excel(
             if isinstance(segment, dict) and _segment_belongs_to_month(segment, month)
         ]
 
-    summary_rows = _build_summary_rows(segments)
+    summary_rows = _build_summary_rows(segments, configured_places)
     summary_frame = pd.DataFrame(summary_rows, columns=SUMMARY_COLUMNS)
     if not summary_frame.empty:
         summary_frame["Datum"] = pd.to_datetime(
@@ -101,7 +104,10 @@ def _segment_belongs_to_month(segment: dict[str, Any], month: str) -> bool:
     return date.startswith(f"{month}-")
 
 
-def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_summary_rows(
+    segments: list[dict[str, Any]],
+    configured_places: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Aggregate raw segments by local calendar date."""
     by_date: dict[str, list[dict[str, Any]]] = {}
     for segment in segments:
@@ -135,10 +141,12 @@ def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         route_nodes: list[str] = []
         if business_segments:
             route_nodes.append(
-                str(business_segments[0].get("start_address") or "")
+                _summary_route_address(
+                    business_segments[0], "start", configured_places
+                )
             )
             route_nodes.extend(
-                str(segment.get("end_address") or "")
+                _summary_route_address(segment, "end", configured_places)
                 for segment in visible_business_segments
             )
         route_nodes = _deduplicate_adjacent(route_nodes)
@@ -169,6 +177,81 @@ def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _summary_route_address(
+    segment: dict[str, Any],
+    side: str,
+    configured_places: dict[str, dict[str, Any]] | None,
+) -> str:
+    """Use an exact configured address in the summary without changing raw data."""
+    observed = str(segment.get(f"{side}_address") or "")
+    if not configured_places:
+        return observed
+
+    explicit_place = segment.get(
+        "start_configured_place" if side == "start" else "configured_place"
+    )
+    if isinstance(explicit_place, str):
+        explicit_rule = configured_places.get(explicit_place)
+        if isinstance(explicit_rule, dict):
+            configured_address = str(explicit_rule.get("address") or "").strip()
+            if configured_address:
+                return configured_address
+
+    for place_name in ("home", "company"):
+        place = configured_places.get(place_name)
+        if not isinstance(place, dict):
+            continue
+        configured_address = str(place.get("address") or "").strip()
+        if configured_address and _segment_side_matches_place(segment, side, place):
+            return configured_address
+    return observed
+
+
+def _segment_side_matches_place(
+    segment: dict[str, Any], side: str, place: dict[str, Any]
+) -> bool:
+    """Match one stored route endpoint against a configured GPS zone."""
+    distance_m = _coordinate_distance_m(
+        segment.get(f"{side}_latitude"),
+        segment.get(f"{side}_longitude"),
+        place.get("latitude"),
+        place.get("longitude"),
+    )
+    if distance_m is None:
+        return False
+    try:
+        radius_m = float(place.get("radius_m"))
+    except (TypeError, ValueError):
+        return False
+    return distance_m <= radius_m
+
+
+def _coordinate_distance_m(
+    latitude: Any,
+    longitude: Any,
+    reference_latitude: Any,
+    reference_longitude: Any,
+) -> float | None:
+    """Return the distance between two GPS points in metres."""
+    try:
+        latitude_value = float(latitude)
+        longitude_value = float(longitude)
+        reference_latitude_value = float(reference_latitude)
+        reference_longitude_value = float(reference_longitude)
+    except (TypeError, ValueError):
+        return None
+    earth_radius_m = 6_371_000.0
+    delta_latitude = radians(reference_latitude_value - latitude_value)
+    delta_longitude = radians(reference_longitude_value - longitude_value)
+    a = (
+        sin(delta_latitude / 2) ** 2
+        + cos(radians(latitude_value))
+        * cos(radians(reference_latitude_value))
+        * sin(delta_longitude / 2) ** 2
+    )
+    return 2 * earth_radius_m * asin(sqrt(a))
 
 
 def _date_from_timestamp(value: Any) -> str:

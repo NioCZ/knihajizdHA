@@ -107,6 +107,10 @@ všechny další zadané části. PSČ, stát, interpunkce ani diakritika shodu
 neovlivní. Použitá metoda a vzdálenost se ukládají do
 `configured_place_match` v raw datech.
 
+Při sestavení souhrnného Excelu se každý bod uvnitř nastaveného okruhu domova
+nebo firmy zapíše přesnou adresou z konfigurace. Nepřesná mobilní adresa (např.
+vedlejší číslo domu) zůstává jen v detailu jízd a v listu **Raw data** pro audit.
+
 - Nastavená adresa domova se rozpozná jako **Domov**. Při platné návaznosti na
   předchozího zákazníka se automaticky použije služební návrat; bez návaznosti se
   integrace zeptá, protože cesta domů může být také soukromá.
@@ -389,7 +393,8 @@ nemusí ležet ve veřejně dostupném `/config/www`. Nový export starý odkaz 
   unikátní zákazníci a součty služebních/soukromých kilometrů. Soukromé segmenty
   přispívají pouze do **Soukromé km**; jejich adresy ani interní účel se do
   souhrnné trasy a zákazníků nevkládají. U čistě soukromého dne proto zůstávají
-  sloupce Odkud/Přes/Kam/Zákazník prázdné.
+  sloupce Odkud/Přes/Kam/Zákazník prázdné. Rozpoznaný domov a firma se zde vždy
+  zobrazí přesnou adresou z konfigurace, ne sousední adresou určenou mobilem.
 - **Raw data**: všechny segmenty vybraného měsíce ve stejných polích jako JSON log.
   Zde zůstávají původní adresy i u soukromých jízd pro případný audit a opravu.
 
