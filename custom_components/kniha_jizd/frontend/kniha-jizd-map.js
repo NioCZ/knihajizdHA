@@ -11,6 +11,25 @@ class KnihaJizdMap extends HTMLElement {
     this._resizeObserver = null;
     this.addEventListener("click", (event) => {
       const elements = event.composedPath().filter((item) => item instanceof Element);
+      const deleteButton = elements.find((item) => item.matches(".delete-selected-place"));
+      if (deleteButton) {
+        const selected = this._markers().find((item) => String(item.id) === String(this._selectedId));
+        const anchorIndex = Number(selected?.anchor_index);
+        if (selected?.place_id && Number.isInteger(anchorIndex) && anchorIndex >= 0) {
+          this.dispatchEvent(new CustomEvent("kniha-jizd-delete-map-place", {
+            bubbles: true,
+            composed: true,
+            detail: {
+              markerId: selected.id,
+              placeId: selected.place_id,
+              anchorIndex,
+              label: selected.label,
+              address: selected.address,
+            },
+          }));
+        }
+        return;
+      }
       const marker = elements.find((item) => item.matches(".marker[data-id]"));
       if (marker) {
         this._selectedId = marker.dataset.id;
@@ -27,7 +46,10 @@ class KnihaJizdMap extends HTMLElement {
   set data(value) {
     const hadData = Boolean(this._data);
     this._data = value && typeof value === "object" ? value : null;
-    this._selectedId = this._selectedId || this._data?.car?.current_zone?.id || null;
+    const markerIds = new Set(this._markers().map((item) => String(item.id)));
+    if (!this._selectedId || !markerIds.has(String(this._selectedId))) {
+      this._selectedId = this._data?.car?.current_zone?.id || null;
+    }
     this._renderShell();
     if (hadData && this._center) {
       this._renderInfo();
@@ -228,6 +250,8 @@ class KnihaJizdMap extends HTMLElement {
         .info-card h3 { margin:0 0 10px; font-size:16px; }
         .info-card dl { display:grid; grid-template-columns:95px minmax(0,1fr); gap:7px 9px; margin:0; }
         .info-card dt { color:var(--secondary-text-color); } .info-card dd { margin:0; overflow-wrap:anywhere; }
+        .selection-actions { display:flex; margin-top:14px; }
+        .selection-actions button { width:100%; border:0; border-radius:9px; padding:10px 12px; color:#fff; background:var(--error-color,#c62828); cursor:pointer; font:600 14px sans-serif; }
         .zone-state { font-weight:700; color:var(--success-color,#2e7d32); }
         .zone-state.outside { color:var(--warning-color,#ef6c00); }
         .legend { display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:13px; }
@@ -284,13 +308,22 @@ class KnihaJizdMap extends HTMLElement {
     const selected = this._markers().find((item) => String(item.id) === String(this._selectedId));
     const selection = this.shadowRoot.querySelector(".selection-info");
     if (selected) {
+      const anchorIndex = Number(selected.anchor_index);
+      const canDelete = selected.place_id
+        && !String(selected.place_id).startsWith("configured:")
+        && Number.isInteger(anchorIndex)
+        && anchorIndex >= 0;
       selection.innerHTML = `<h3>${this._text(selected.label)}</h3><dl>
         <dt>Typ</dt><dd>${this._roleLabel(selected.place_role)}</dd>
         <dt>Zóna</dt><dd>${this._number(selected.radius_m)} m</dd>
         <dt>Adresa</dt><dd>${this._text(selected.address)}</dd>
         <dt>Souřadnice</dt><dd>${this._number(selected.latitude, 5)}, ${this._number(selected.longitude, 5)}</dd>
         <dt>Naposledy</dt><dd>${this._text(selected.updated_at)}</dd>
-      </dl>`;
+      </dl>${canDelete
+        ? '<div class="selection-actions"><button class="delete-selected-place">Odstranit označený bod</button></div>'
+        : String(selected.place_id || "").startsWith("configured:")
+          ? '<small>Domov a firma se upravují v nastavení integrace.</small>'
+          : ""}`;
     } else {
       const learnedCount = this._data?.learned_places?.length || 0;
       const routeCount = this._data?.today_routes?.length || 0;

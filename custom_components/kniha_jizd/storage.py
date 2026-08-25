@@ -224,6 +224,7 @@ def places_for_map(
                 {
                     "id": f"{place_id}:{index}",
                     "place_id": place_id or None,
+                    "anchor_index": index,
                     "label": place.get("label") or place.get("map_name") or "Místo",
                     "map_name": place.get("map_name"),
                     "trip_type": trip_type,

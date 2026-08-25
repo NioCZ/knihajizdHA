@@ -240,7 +240,9 @@ U každého ukazuje adresy, kilometry, zákazníka, typ a stav zpracování. Pol
 **Odkud**, **Kam**, **km**, **Zákazník / účel** a **Typ** lze upravit tlačítkem
 **Uložit**. Zákazník je u služební cesty volitelný; prázdná hodnota se v
 souhrnném Excelu nezobrazí. Příchozí aktualizace HA během psaní ani otevřený
-výběr typu už tabulku nepřekreslí.
+výběr typu už tabulku nepřekreslí. Rozpracované hodnoty zůstanou zachované i po
+opuštění pole, otevřené vysvětlení rozhodnutí se samo nezavře a po uložení se
+zobrazí opravená hodnota místo krátkého návratu ke starému stavu.
 
 To funguje také v případě, kdy byla mobilní notifikace omylem smazána: segment
 zůstane ve stavu **Čeká na zařazení** a lze jej dokončit přímo v tabulce. Pokud
@@ -276,7 +278,10 @@ jízda. Krátké zastávky, například benzinky a obchody, se na mapě nekresl�
 úseky se sloučí do celé cesty k výslednému cíli. Interně zůstávají zapamatované jen
 pro správné rozpoznání návaznosti jízd. Totéž platí pro interní návratový kontext:
 ovlivní zařazení trasy, ale nevytváří kategorii místa na mapě. Podklad tvoří
-dlaždice OpenStreetMap.
+dlaždice OpenStreetMap. Po výběru naučeného bodu lze přímo v jeho detailu použít
+**Odstranit označený bod**. Smaže se jen vybraný fyzický GPS bod; historické jízdy
+zůstanou zachované. Konfigurovaný domov a firmu mapa odstranit nedovolí, protože
+se upravují v nastavení integrace.
 
 Krátká zastávka nevyvolá okamžitou notifikaci. Integrace čeká nastavený počet
 minut na pokračování: pokud další jízda začne, zastávka zdědí klasifikaci celé
@@ -308,7 +313,8 @@ na den se zobrazí jeho souhrn a stejná editovatelná tabulka jízd jako v dne�
 přehledu. Historická data poskytuje pouze přihlášené administrační API a oprava
 řádku se promítne do denních i měsíčních součtů. Sloupec **Rozhodnutí** rozbalí
 zdroj klasifikace, nalezené místo, vzdálenost a poloměr, návratový kontext i stav
-vyhledávání okolních institucí.
+vyhledávání okolních institucí. Při rychlém přepínání dnů nebo měsíců se použije
+poslední volba; opožděná starší odpověď už tabulku nevrátí zpět.
 
 ## Rozpoznání nemocnic a výzkumných pracovišť
 

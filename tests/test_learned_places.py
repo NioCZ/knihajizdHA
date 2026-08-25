@@ -196,6 +196,7 @@ class LearnedPlacesTest(unittest.TestCase):
         by_id = {marker["place_id"]: marker for marker in markers}
         self.assertEqual(by_id["private"]["radius_m"], 250)
         self.assertEqual(by_id["private"]["place_role"], "private")
+        self.assertEqual(by_id["private"]["anchor_index"], 0)
         self.assertNotIn("fuel", by_id)
         self.assertNotIn("return", by_id)
         self.assertEqual(by_id["client"]["radius_m"], 1000)
@@ -733,6 +734,17 @@ class LearnedPlacesTest(unittest.TestCase):
                     }
                 ),
                 encoding="utf-8",
+            )
+
+            markers = STORAGE_MODULE.places_for_map(
+                json.loads(repository.places_path.read_text(encoding="utf-8")),
+                500,
+                250,
+                200,
+            )
+            self.assertEqual(
+                [(marker["id"], marker["anchor_index"]) for marker in markers],
+                [("one:0", 0), ("one:1", 1)],
             )
 
             result = repository._delete_place_anchor_sync("one", 1)
