@@ -64,6 +64,33 @@ class OdometerLogicTest(unittest.TestCase):
 
         self.assertEqual(signal, "post_disconnect_update")
 
+    def test_delayed_previous_boundary_corrects_the_next_trip_start(self) -> None:
+        """Do not count the previous leg again when the cloud updated after reconnect."""
+        first_ended = datetime(2026, 8, 25, 8, 10, tzinfo=UTC)
+        next_started = first_ended + timedelta(seconds=48)
+
+        corrected = MODULE.propagated_start_odometer(
+            first_ended,
+            98723.0,
+            next_started,
+            98711.0,
+        )
+
+        self.assertEqual(corrected, 98723.0)
+
+    def test_previous_boundary_never_replaces_a_newer_next_start(self) -> None:
+        """A later or higher start counter is already the better boundary."""
+        first_ended = datetime(2026, 8, 25, 8, 10, tzinfo=UTC)
+
+        self.assertIsNone(
+            MODULE.propagated_start_odometer(
+                first_ended,
+                98723.0,
+                first_ended + timedelta(minutes=1),
+                98724.0,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

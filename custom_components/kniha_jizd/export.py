@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import json
 from math import floor
 from pathlib import Path
@@ -18,6 +19,7 @@ SUMMARY_COLUMNS = [
     "Služební km",
     "Soukromé km",
 ]
+_IMPLICIT_TRANSIENT_STOP_SECONDS = 3 * 60
 
 
 def export_excel(
@@ -116,6 +118,20 @@ def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for segment in day_segments
             if segment.get("trip_type") == "business"
         ]
+        visible_business_segments = []
+        for index, segment in enumerate(business_segments):
+            next_segment = (
+                business_segments[index + 1]
+                if index + 1 < len(business_segments)
+                else None
+            )
+            if segment.get("journey_role") == "transient_stop":
+                continue
+            if next_segment is not None and _is_very_short_stop(
+                segment, next_segment
+            ):
+                continue
+            visible_business_segments.append(segment)
         route_nodes: list[str] = []
         if business_segments:
             route_nodes.append(
@@ -123,13 +139,13 @@ def _build_summary_rows(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             route_nodes.extend(
                 str(segment.get("end_address") or "")
-                for segment in business_segments
+                for segment in visible_business_segments
             )
         route_nodes = _deduplicate_adjacent(route_nodes)
 
         customers = _unique_nonempty(
             str(segment.get("purpose") or "")
-            for segment in business_segments
+            for segment in visible_business_segments
         )
         business_km = sum(
             _number(segment.get("distance_km"))
@@ -172,6 +188,33 @@ def _number(value: Any) -> float:
 def _whole_km(value: float) -> int:
     """Round exported kilometre totals to a whole number."""
     return int(floor(max(0.0, value) + 0.5))
+
+
+def _is_very_short_stop(
+    segment: dict[str, Any], next_segment: dict[str, Any]
+) -> bool:
+    """Hide an untagged stop when the next leg leaves the same place immediately."""
+    ended_at = _parse_iso_datetime(segment.get("ended_at"))
+    next_started_at = _parse_iso_datetime(next_segment.get("started_at"))
+    if ended_at is None or next_started_at is None:
+        return False
+    gap_seconds = (next_started_at - ended_at).total_seconds()
+    if gap_seconds < 0 or gap_seconds > _IMPLICIT_TRANSIENT_STOP_SECONDS:
+        return False
+    end_address = str(segment.get("end_address") or "").strip().casefold()
+    next_start_address = str(next_segment.get("start_address") or "").strip().casefold()
+    return bool(end_address and end_address == next_start_address)
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    """Parse one stored ISO timestamp for short-stop comparisons."""
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _deduplicate_adjacent(values: list[str]) -> list[str]:

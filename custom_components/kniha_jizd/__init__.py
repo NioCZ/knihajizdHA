@@ -261,7 +261,7 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate entries to configured places and current journey matching."""
-    if entry.version >= 8:
+    if entry.version >= 9:
         return True
 
     data = dict(entry.data)
@@ -308,12 +308,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_PENDING_REVIEW_HOURS, DEFAULT_PENDING_REVIEW_HOURS
         )
         values.pop(CONF_PLACE_RADIUS, None)
+        values.pop("wait_timeout", None)
 
     hass.config_entries.async_update_entry(
         entry,
         data=data,
         options=options,
-        version=8,
+        version=9,
     )
     return True
 

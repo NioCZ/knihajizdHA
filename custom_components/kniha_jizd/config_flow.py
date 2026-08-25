@@ -39,7 +39,6 @@ from .const import (
     CONF_TRANSIENT_STOP_MINUTES,
     CONF_TRANSIENT_RADIUS,
     CONF_TRIGGER_ENTITY,
-    CONF_WAIT_TIMEOUT,
     DEFAULT_ADDRESS_ENTITY,
     DEFAULT_COMPANY_ADDRESS,
     DEFAULT_COMPANY_LABEL,
@@ -62,7 +61,6 @@ from .const import (
     DEFAULT_TRANSIENT_STOP_MINUTES,
     DEFAULT_TRANSIENT_RADIUS,
     DEFAULT_TRIGGER_ENTITY,
-    DEFAULT_WAIT_TIMEOUT,
     DOMAIN,
     NAME,
 )
@@ -131,13 +129,6 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 CONF_NOTIFY_SERVICE,
                 default=defaults.get(CONF_NOTIFY_SERVICE, DEFAULT_NOTIFY_SERVICE),
             ): selector.TextSelector(),
-            vol.Required(
-                CONF_WAIT_TIMEOUT,
-                default=defaults.get(CONF_WAIT_TIMEOUT, DEFAULT_WAIT_TIMEOUT),
-            ): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=60, max=1800),
-            ),
             vol.Required(
                 CONF_LOCATION_SETTLE_SECONDS,
                 default=defaults.get(
@@ -294,7 +285,7 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
 class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kniha jízd."""
 
-    VERSION = 8
+    VERSION = 9
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

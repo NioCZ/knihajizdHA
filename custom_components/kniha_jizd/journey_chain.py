@@ -172,6 +172,16 @@ def apply_journey_classification(
         segment["journey_distance_complete"] = journey_distance_complete
 
 
+def normalize_trip_purpose(value: Any, trip_type: str) -> str:
+    """Keep the customer optional and remove the private sentinel from business trips."""
+    if trip_type == "private":
+        return "Soukromá"
+    purpose = str(value or "").strip()
+    if trip_type == "business" and _normalize(purpose) == "soukroma":
+        return ""
+    return purpose
+
+
 def map_routes_without_transient_stops(
     routes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:

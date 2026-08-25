@@ -1221,14 +1221,30 @@ class KnihaJizdRepository:
             segment["needs_review"] = False
             segment.pop("review_reason", None)
             changed += 1
-        if start_address is not None:
+        if (
+            start_address is not None
+            and str(start_address).strip()
+            != str(target.get("start_address") or "").strip()
+        ):
             target["start_address"] = str(start_address).strip()
             target["start_address_manual"] = True
-        if end_address is not None:
+        if (
+            end_address is not None
+            and str(end_address).strip()
+            != str(target.get("end_address") or "").strip()
+        ):
             target["end_address"] = str(end_address).strip()
             target["end_address_manual"] = True
         manual_distance = _optional_float(distance_km)
-        if manual_distance is not None:
+        current_distance = _optional_float(target.get("distance_km"))
+        if (
+            manual_distance is not None
+            and (
+                target.get("manual_distance_override")
+                or current_distance is None
+                or _whole_km(manual_distance) != _whole_km(current_distance)
+            )
+        ):
             if "distance_km_raw" not in target:
                 target["distance_km_raw"] = target.get("distance_km")
             target["distance_km"] = _whole_km(manual_distance)

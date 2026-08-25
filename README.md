@@ -79,10 +79,10 @@ umí kromě čistého číselného stavu přečíst také hodnotu s jednotkou ne
   metadata `State.last_updated`) **po** odpojení a současně vyšší stav počitadla
   než na začátku segmentu. U chybějícího počátečního stavu stačí nový čas a
   platná hodnota.
-- Pokud oba primární signály nepřijdou, použije se po timeoutu (výchozí 600 s)
-  poslední dostupná hodnota. Raw data pak obsahují
-  `odometer_wait_timed_out: true` a
-  `odometer_completion_source: timeout_latest_value`.
+- Pokud primární signál ještě nepřišel, segment zůstane ve stavu čekání na
+  tachometr bez časového limitu. Po restartu Home Assistantu se čekání obnoví a
+  jízda se zapíše až po důvěryhodné novější hodnotě; zastaralý stav ani `0 km`
+  se jako náhradní výsledek nepoužije.
 - Potvrzené služební místo ve výchozím okruhu 500 m se zařadí automaticky.
   Soukromé místo používá výchozí okruh 250 m. U neznámého cíle se
   v okruhu 3 000 m vyhledají a obodují odborné instituce a odešle se notifikace.
@@ -150,11 +150,15 @@ Segmenty se spojí do jednoho `journey_id`, pouze když:
   použije se tato užší hodnota,
 - známý konečný a nový počáteční stav tachometru se neliší o více než 1 km.
 
+Velmi krátké stání do 3 minut se při odjezdu ze stejného místa považuje za
+mezizastávku i bez spolehlivé mapové kategorie. Tím se například rychlé zastavení
+na benzince nebo krátké vysazení nepropíše jako samostatný bod denní trasy.
+
 Skutečný cíl následně zařadí celý řetězec. Například `firma → benzinka → klient`
 převezme zákazníka i služební typ z klienta; `domov → obchod → domov` převezme
 soukromý typ z domova. Totéž funguje při návratu `klient → odpočívadlo → hotel`.
-Mezizastávky se v agregovaném Excelu zachovají ve sloupci **Přes**, ale jejich
-kilometry se započítají ke konečnému účelu.
+Mezizastávky se v agregovaném Excelu ve sloupci **Přes** nezobrazují, ale jejich
+kilometry se stále započítají ke konečnému účelu celé jízdy.
 
 Obyčejné parkoviště se samo o sobě nepovažuje za tranzitní zastávku, aby nezmizela
 skutečná návštěva zákazníka, který ještě není dobře zakreslený v OpenStreetMap.
@@ -172,9 +176,10 @@ Rozpracovaný řetězec je uložen v HA Store a přežije restart Home Assistant
 Aktivní jízda, čekající ukončení i nezodpovězená notifikace jsou uloženy v interním
 HA Store. Restart Home Assistantu proto rozpracovanou jízdu nezahodí. Pokud začne
 další jízda dříve, než cloud doplní předchozí tachometr, její počáteční stav se po
-doručení důvěryhodné předchozí finální hodnoty opraví na tuto hodnotu. Aktualizace
-doručená až po startu další jízdy se označí jako sdílená a čeká na zpětné
-vyrovnání, aby se celý přírůstek nepřipsal nesprávnému úseku.
+doručení důvěryhodné předchozí finální hodnoty opraví na tuto hodnotu. Čekající
+segmenty se zpracovávají od nejstaršího; opožděná hodnota se zároveň stane
+počáteční hranicí bezprostředně následujícího segmentu, takže se stejné kilometry
+nezapočítají znovu.
 
 ### Zpětná kontrola kilometrů
 
@@ -189,6 +194,9 @@ Panel ukazuje **Denní kontrolu km**: přírůstek odometru, součet přiřazen�
 segmentů, rozdíl a počet dosud neuzavřených úseků. Raw data zachovávají původní
 `distance_km_raw` i způsob výsledku v `distance_reconciliation_source`. Ručně
 opravené km mají `manual_distance_override: true` a automatika je nepřepíše.
+Panel proto ruční přepis nastaví pouze tehdy, když uživatel pole kilometrů
+skutečně změní; pouhá změna typu nebo volitelného zákazníka automatické km
+nezamkne.
 
 Pokud některá dřívější cloudová hodnota odporuje novějšímu koncovému stavu
 (například segmenty dávají 163 km, ale rozdíl prvního a posledního odometru je
@@ -344,8 +352,9 @@ ručním polem `radius_m` lze konkrétnímu bodu přepsat globální poloměr.
 
 `/config/kniha_jizd_raw.json` má kořenový objekt s verzí formátu a polem
 `segments`. Každý segment obsahuje stabilní ID, lokální datum, přesné UTC časy,
-oba raw stavy tachometru, čas finální aktualizace, příznak timeoutu, celé adresy,
-GPS, účel, typ jízdy, zdroj klasifikace a mapový odhad.
+oba raw stavy tachometru, čas finální aktualizace, kompatibilní příznak timeoutu
+(u nových jízd vždy `false`), celé adresy, GPS, účel, typ jízdy, zdroj
+klasifikace a mapový odhad.
 Pro české cíle se v běžných sloupcích odstraní PSČ, stát a administrativní kraj;
 plná původní hodnota zůstává v `start_address_raw` a `end_address_raw`. Zahraniční
 adresa se nezkracuje.

@@ -932,6 +932,47 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertEqual(segment["distance_km"], 14)
             self.assertTrue(segment["manual_distance_override"])
 
+    def test_unchanged_panel_values_do_not_lock_automatic_distance(self) -> None:
+        """Saving only classification must not turn displayed zero into an override."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.raw_path = Path(temporary_directory) / "raw.json"
+            repository.raw_path.write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "segments": [
+                            {
+                                "id": "segment",
+                                "date": "2026-08-25",
+                                "purpose": "Soukromá",
+                                "trip_type": "private",
+                                "start_address": "Brno",
+                                "end_address": "Kroměříž",
+                                "distance_km": 0,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            repository._update_trip_sync(
+                "segment", "", "business", "Brno", "Kroměříž", 0
+            )
+            segment = json.loads(
+                repository.raw_path.read_text(encoding="utf-8")
+            )["segments"][0]
+
+            self.assertNotIn("manual_distance_override", segment)
+            self.assertNotIn("start_address_manual", segment)
+            self.assertNotIn("end_address_manual", segment)
+
     def test_combined_cloud_increment_is_reassigned_to_zero_leg(self) -> None:
         """Split one later trusted counter increase across both driven legs."""
         segments = [

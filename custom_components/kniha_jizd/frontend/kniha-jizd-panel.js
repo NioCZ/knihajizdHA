@@ -131,10 +131,16 @@ class KnihaJizdPanel extends HTMLElement {
     const segmentId = row?.dataset?.segmentId;
     const purpose = row?.querySelector(".trip-purpose")?.value?.trim() || "";
     const tripType = row?.querySelector(".trip-type")?.value || "business";
-    const startAddress = row?.querySelector(".trip-start")?.value?.trim() || "";
-    const endAddress = row?.querySelector(".trip-end")?.value?.trim() || "";
-    const distanceValue = row?.querySelector(".trip-distance")?.value;
+    const startInput = row?.querySelector(".trip-start");
+    const endInput = row?.querySelector(".trip-end");
+    const distanceInput = row?.querySelector(".trip-distance");
+    const startAddress = startInput?.value?.trim() || "";
+    const endAddress = endInput?.value?.trim() || "";
+    const distanceValue = distanceInput?.value ?? "";
     const distanceKm = distanceValue === "" ? undefined : Number(distanceValue);
+    const startChanged = startAddress !== (startInput?.dataset?.originalValue ?? "");
+    const endChanged = endAddress !== (endInput?.dataset?.originalValue ?? "");
+    const distanceChanged = distanceValue !== (distanceInput?.dataset?.originalValue ?? "");
     if (!segmentId) return;
     if (tripType === "unclassified") {
       this._message = "Před uložením vyberte služební nebo soukromý typ jízdy.";
@@ -149,9 +155,9 @@ class KnihaJizdPanel extends HTMLElement {
         segment_id: segmentId,
         purpose,
         trip_type: tripType,
-        start_address: startAddress,
-        end_address: endAddress,
-        ...(Number.isFinite(distanceKm) ? { distance_km: distanceKm } : {}),
+        ...(startChanged ? { start_address: startAddress } : {}),
+        ...(endChanged ? { end_address: endAddress } : {}),
+        ...(distanceChanged && Number.isFinite(distanceKm) ? { distance_km: distanceKm } : {}),
       });
       this._message = "Jízda byla upravena. Pokud tachometr ještě čeká, dokončí se automaticky.";
     } catch (error) {
@@ -182,9 +188,9 @@ class KnihaJizdPanel extends HTMLElement {
       const disabled = !trip.editable || this._savingTrip === trip.id;
       return `<tr data-segment-id="${this._text(trip.id)}">
         <td>${this._time(trip.started_at)}</td>
-        <td><input class="trip-start" type="text" value="${this._text(trip.start_address, "")}" placeholder="Místo odjezdu" ${disabled ? "disabled" : ""}></td>
-        <td><input class="trip-end" type="text" value="${this._text(trip.end_address, "")}" placeholder="Místo příjezdu" ${disabled ? "disabled" : ""}></td>
-        <td><input class="trip-distance" type="number" min="0" step="1" value="${trip.distance_km ?? ""}" ${disabled ? "disabled" : ""}></td>
+        <td><input class="trip-start" type="text" value="${this._text(trip.start_address, "")}" data-original-value="${this._text(trip.start_address, "")}" placeholder="Místo odjezdu" ${disabled ? "disabled" : ""}></td>
+        <td><input class="trip-end" type="text" value="${this._text(trip.end_address, "")}" data-original-value="${this._text(trip.end_address, "")}" placeholder="Místo příjezdu" ${disabled ? "disabled" : ""}></td>
+        <td><input class="trip-distance" type="number" min="0" step="1" value="${trip.distance_km ?? ""}" data-original-value="${trip.distance_km ?? ""}" ${disabled ? "disabled" : ""}></td>
         <td><input class="trip-purpose" type="text" value="${this._text(trip.purpose, "")}" placeholder="Volitelný zákazník / účel" ${disabled ? "disabled" : ""}></td>
         <td><select class="trip-type" ${disabled ? "disabled" : ""}>
           ${reviewSelected ? '<option value="unclassified" selected disabled>Nevyřešená – vyberte typ</option>' : ""}

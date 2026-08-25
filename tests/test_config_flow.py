@@ -170,13 +170,22 @@ class ConfigFlowTests(unittest.TestCase):
         self.assertEqual("device_tracker.car", result["data_schema"]["gps_entity"])
         self.assertEqual(420, result["data_schema"]["wait_timeout"])
 
+    def test_schema_has_no_odometer_timeout(self) -> None:
+        """Kilometres must wait for a trustworthy counter update without a limit."""
+        module = _load_config_flow()
+
+        schema = module._schema({"wait_timeout": 600})
+        fields = {marker.schema for marker in schema.schema}
+
+        self.assertNotIn("wait_timeout", fields)
+
     def test_options_flow_persists_cleared_coordinates(self) -> None:
         """An omitted optional number must override an older saved coordinate."""
         module = _load_config_flow()
         entry = _ConfigEntry({}, {})
         flow = module.KnihaJizdConfigFlow.async_get_options_flow(entry)
 
-        result = asyncio.run(flow.async_step_init({"wait_timeout": 600}))
+        result = asyncio.run(flow.async_step_init({"location_settle_seconds": 60}))
 
         self.assertEqual("create_entry", result["type"])
         for key in (

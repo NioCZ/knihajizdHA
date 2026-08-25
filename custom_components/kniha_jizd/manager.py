@@ -56,7 +56,6 @@ from .const import (
     CONF_TRANSIENT_STOP_MINUTES,
     CONF_TRANSIENT_RADIUS,
     CONF_TRIGGER_ENTITY,
-    CONF_WAIT_TIMEOUT,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
     PLACE_ROLE_CLIENT,
@@ -76,9 +75,10 @@ from .journey_chain import (
     continuation_details,
     detect_transient_stop,
     map_routes_without_transient_stops,
+    normalize_trip_purpose,
 )
 from .nearby_search import NearbyInstitutionSearcher
-from .odometer_logic import odometer_update_signal
+from .odometer_logic import odometer_update_signal, propagated_start_odometer
 from .storage import (
     KnihaJizdRepository,
     learned_place_behavior,
@@ -88,6 +88,7 @@ from .storage import (
 from .trip_context import infer_trip_context
 
 _LOGGER = logging.getLogger(__name__)
+_IMPLICIT_TRANSIENT_STOP_MINUTES = 3.0
 
 _ACTION_PATTERN = re.compile(
     rf"^{ACTION_PREFIX}_({ACTION_CONFIRM}|{ACTION_NEW}|{ACTION_PRIVATE}|"
@@ -121,7 +122,6 @@ class KnihaJizdManager:
         self.notify_service = _normalize_notify_service(
             str(config[CONF_NOTIFY_SERVICE])
         )
-        self.wait_timeout = float(config[CONF_WAIT_TIMEOUT])
         self.location_settle_seconds = float(config[CONF_LOCATION_SETTLE_SECONDS])
         self.return_context_hours = float(config[CONF_RETURN_CONTEXT_HOURS])
         self.transient_stop_minutes = float(config[CONF_TRANSIENT_STOP_MINUTES])
@@ -179,6 +179,7 @@ class KnihaJizdManager:
         self._resolution_lock = asyncio.Lock()
         self._journey_lock = asyncio.Lock()
         self._finalization_lock = asyncio.Lock()
+        self._odometer_completion_condition = asyncio.Condition()
         self._runtime_lock = asyncio.Lock()
         self._stopping = False
         self._runtime_store: Store[dict[str, Any]] = Store(
@@ -787,9 +788,7 @@ class KnihaJizdManager:
         """Correct a persisted or unfinished trip from the sidebar panel."""
         if trip_type not in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}:
             raise ValueError("trip_type must be business or private")
-        selected_purpose = purpose.strip()
-        if trip_type == TRIP_TYPE_PRIVATE:
-            selected_purpose = "Soukromá"
+        selected_purpose = normalize_trip_purpose(purpose, trip_type)
 
         runtime = self._find_runtime_segment(segment_id)
         if runtime is not None:
@@ -802,14 +801,30 @@ class KnihaJizdManager:
                 if destination is not None:
                     runtime = destination
             runtime_id = str(runtime["id"])
-            if start_address is not None:
+            if (
+                start_address is not None
+                and str(start_address).strip()
+                != str(runtime.get("start_address") or "").strip()
+            ):
                 runtime["start_address"] = str(start_address).strip()
                 runtime["start_address_manual"] = True
-            if end_address is not None:
+            if (
+                end_address is not None
+                and str(end_address).strip()
+                != str(runtime.get("end_address") or "").strip()
+            ):
                 runtime["end_address"] = str(end_address).strip()
                 runtime["end_address_manual"] = True
             manual_distance = _as_float(distance_km)
-            if manual_distance is not None:
+            current_distance = _as_float(runtime.get("distance_km"))
+            if (
+                manual_distance is not None
+                and (
+                    runtime.get("manual_distance_override")
+                    or current_distance is None
+                    or _whole_km(manual_distance) != _whole_km(current_distance)
+                )
+            ):
                 if "distance_km_raw" not in runtime:
                     runtime["distance_km_raw"] = runtime.get("distance_km")
                 runtime["distance_km"] = _whole_km(manual_distance)
@@ -1110,75 +1125,86 @@ class KnihaJizdManager:
         await self._async_try_finalize_segment(segment)
 
     async def _async_complete_odometer(self, segment: dict[str, Any]) -> None:
-        """Wait for the primary cloud signal, with timeout only as fallback."""
-        manual_distance = (
-            _as_float(segment.get("distance_km"))
-            if segment.get("manual_distance_override")
-            else None
-        )
-        disconnected_at = _parse_datetime(segment.get("ended_at")) or datetime.now(UTC)
-        start_odometer = _as_float(segment.get("start_odometer_km"))
-        end_odometer, odometer_updated_at, timed_out, completion_source = (
-            await self._async_wait_for_odometer(disconnected_at, start_odometer)
-        )
-        segment["odometer_updated_at"] = _iso_utc(odometer_updated_at)
-        segment["odometer_wait_timed_out"] = timed_out
-        segment["odometer_completion_source"] = completion_source
-        segment["end_odometer_km"] = end_odometer
-        active_started = (
-            _parse_datetime(self._active.get("started_at"))
-            if self._active is not None
-            else None
-        )
-        segment["odometer_shared_update"] = bool(
-            active_started is not None
-            and odometer_updated_at is not None
-            and odometer_updated_at >= active_started
-        )
-
-        raw_distance: float | None = None
-        if start_odometer is None or end_odometer is None:
-            segment["distance_km"] = None
-            segment["validation_error"] = (
-                "missing_start_odometer"
-                if start_odometer is None
-                else "missing_end_odometer"
+        """Wait indefinitely for one trustworthy cloud boundary, oldest trip first."""
+        async with self._odometer_completion_condition:
+            await self._odometer_completion_condition.wait_for(
+                lambda: not self._has_earlier_odometer_wait(segment)
             )
-        elif end_odometer + 0.001 < start_odometer:
-            segment["distance_km"] = None
-            segment["validation_error"] = "odometer_decreased"
-        else:
-            raw_distance = round(max(0.0, end_odometer - start_odometer), 3)
-            segment["distance_km"] = _whole_km(raw_distance)
-            segment["validation_error"] = None
-        segment["distance_km_raw"] = raw_distance
-        if manual_distance is not None:
-            segment["distance_km"] = _whole_km(manual_distance)
-            segment["distance_reconciliation_source"] = "manual_panel"
-        else:
-            if segment.get("odometer_shared_update"):
-                segment["distance_km"] = 0.0
-            segment["distance_reconciliation_source"] = (
-                "awaiting_future_odometer_anchor"
-                if (
-                    segment.get("odometer_shared_update")
-                    or (
-                        timed_out
-                        and (_as_float(segment.get("distance_km")) or 0.0) <= 0.001
-                    )
-                )
-                else (
-                    "unverified_timeout_difference"
-                    if timed_out
-                    else "direct_odometer_difference"
-                )
-            )
+            if segment.get("odometer_ready"):
+                self._odometer_completion_condition.notify_all()
+                return
 
-        segment["odometer_ready"] = True
-        await self._async_apply_previous_final_to_new_active(segment)
-        await self._async_save_runtime()
+            manual_distance = (
+                _as_float(segment.get("distance_km"))
+                if segment.get("manual_distance_override")
+                else None
+            )
+            disconnected_at = (
+                _parse_datetime(segment.get("ended_at")) or datetime.now(UTC)
+            )
+            start_odometer = _as_float(segment.get("start_odometer_km"))
+            end_odometer, odometer_updated_at, _, completion_source = (
+                await self._async_wait_for_odometer(disconnected_at, start_odometer)
+            )
+            segment["odometer_updated_at"] = _iso_utc(odometer_updated_at)
+            segment["odometer_wait_timed_out"] = False
+            segment["odometer_completion_source"] = completion_source
+            segment["end_odometer_km"] = end_odometer
+            # Kept for raw-data compatibility. A delayed cloud update is now a
+            # real boundary and is propagated to the next segment instead.
+            segment["odometer_shared_update"] = False
+
+            raw_distance: float | None = None
+            if start_odometer is None or end_odometer is None:
+                segment["distance_km"] = None
+                segment["validation_error"] = (
+                    "missing_start_odometer"
+                    if start_odometer is None
+                    else "missing_end_odometer"
+                )
+            elif end_odometer + 0.001 < start_odometer:
+                segment["distance_km"] = None
+                segment["validation_error"] = "odometer_decreased"
+            else:
+                raw_distance = round(max(0.0, end_odometer - start_odometer), 3)
+                segment["distance_km"] = _whole_km(raw_distance)
+                segment["validation_error"] = None
+            segment["distance_km_raw"] = raw_distance
+            if manual_distance is not None:
+                segment["distance_km"] = _whole_km(manual_distance)
+                segment["distance_reconciliation_source"] = "manual_panel"
+            else:
+                segment["distance_reconciliation_source"] = (
+                    "direct_odometer_difference"
+                )
+
+            segment["odometer_ready"] = True
+            await self._async_apply_previous_final_to_next_segment(segment)
+            await self._async_save_runtime()
+            self._odometer_completion_condition.notify_all()
         await self._async_try_finalize_segment(segment)
         await self._async_try_finalize_journey_destination(segment.get("journey_id"))
+
+    def _has_earlier_odometer_wait(self, segment: dict[str, Any]) -> bool:
+        """Keep overlapping cloud updates assigned in chronological trip order."""
+        current_key = (
+            str(segment.get("started_at") or ""),
+            str(segment.get("id") or ""),
+        )
+        for candidate in [
+            *self._closing.values(),
+            *self._pending.values(),
+            *self._transient.values(),
+        ]:
+            if candidate is segment or candidate.get("odometer_ready"):
+                continue
+            candidate_key = (
+                str(candidate.get("started_at") or ""),
+                str(candidate.get("id") or ""),
+            )
+            if candidate_key < current_key:
+                return True
+        return False
 
     async def _async_reconcile_previous_day_at_start(
         self,
@@ -1432,6 +1458,19 @@ class KnihaJizdManager:
             else segment.get("private_return_context")
         )
         if await self._async_handle_configured_destination(segment):
+            return
+        short_continuation = self._find_runtime_continuation(
+            segment, _IMPLICIT_TRANSIENT_STOP_MINUTES
+        )
+        if short_continuation is not None:
+            segment["transient_stop"] = {
+                "detected": True,
+                "kind": "very_short_stop",
+                "name": str(segment.get("end_address") or "Krátká mezizastávka"),
+                "detection_source": "very_short_continuation",
+                "max_duration_minutes": _IMPLICIT_TRANSIENT_STOP_MINUTES,
+            }
+            await self._async_hold_transient(segment)
             return
         learned_place = await self.repository.async_find_place(
             _as_float(segment.get("end_latitude")),
@@ -1816,7 +1855,9 @@ class KnihaJizdManager:
         await self._async_queue_pending(segment)
 
     def _find_runtime_continuation(
-        self, transient: dict[str, Any]
+        self,
+        transient: dict[str, Any],
+        max_gap_minutes: float | None = None,
     ) -> dict[str, Any] | None:
         """Find a segment that started while transient analysis was running."""
         candidates: list[dict[str, Any]] = []
@@ -1828,7 +1869,12 @@ class KnihaJizdManager:
         for current in candidates:
             if current.get("id") == transient.get("id"):
                 continue
-            if self._continuation_details(transient, current) is not None:
+            if (
+                self._continuation_details(
+                    transient, current, max_gap_minutes=max_gap_minutes
+                )
+                is not None
+            ):
                 return current
         return None
 
@@ -1864,13 +1910,20 @@ class KnihaJizdManager:
         return None
 
     def _continuation_details(
-        self, transient: dict[str, Any], current: dict[str, Any]
+        self,
+        transient: dict[str, Any],
+        current: dict[str, Any],
+        max_gap_minutes: float | None = None,
     ) -> dict[str, Any] | None:
         """Apply configured limits to a possible journey continuation."""
         return continuation_details(
             transient,
             current,
-            self.transient_stop_minutes,
+            (
+                self.transient_stop_minutes
+                if max_gap_minutes is None
+                else max_gap_minutes
+            ),
             self.transient_radius,
         )
 
@@ -1897,7 +1950,7 @@ class KnihaJizdManager:
     async def _async_wait_for_odometer(
         self, disconnected_at: datetime, start_odometer: float | None
     ) -> tuple[float | None, datetime | None, bool, str]:
-        """Prefer a new timestamp plus counter increase; timeout is fallback."""
+        """Wait until the cloud reports a post-disconnect counter boundary."""
         current_state = self.hass.states.get(self.odometer_entity)
         current_updated_at = _odometer_updated_at(current_state)
         current_value = _odometer_value(current_state)
@@ -1909,16 +1962,6 @@ class KnihaJizdManager:
         )
         if current_signal is not None:
             return current_value, current_updated_at, False, current_signal
-
-        elapsed = max(0.0, (datetime.now(UTC) - disconnected_at).total_seconds())
-        remaining = max(0.0, self.wait_timeout - elapsed)
-        if remaining <= 0:
-            return (
-                current_value,
-                current_updated_at,
-                True,
-                "timeout_latest_value",
-            )
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[State] = loop.create_future()
@@ -1962,8 +2005,7 @@ class KnihaJizdManager:
             ):
                 future.set_result(current_state)
 
-            async with asyncio.timeout(remaining):
-                final_state = await future
+            final_state = await future
             return (
                 _odometer_value(final_state),
                 _odometer_updated_at(final_state),
@@ -1978,48 +2020,57 @@ class KnihaJizdManager:
                     or "post_disconnect_update"
                 ),
             )
-        except TimeoutError:
-            latest_state = self.hass.states.get(self.odometer_entity)
-            return (
-                _odometer_value(latest_state),
-                _odometer_updated_at(latest_state),
-                True,
-                "timeout_latest_value",
-            )
         finally:
             unsubscribe()
 
-    async def _async_apply_previous_final_to_new_active(
+    async def _async_apply_previous_final_to_next_segment(
         self, finished_segment: dict[str, Any]
     ) -> None:
-        """Correct a new trip start if it captured the previous stale cloud value."""
+        """Use a delayed final counter as the boundary of the next runtime trip."""
         async with self._transition_lock:
-            active = self._active
-            if active is None:
-                return
-            active_started = _parse_datetime(active.get("started_at"))
             finished_at = _parse_datetime(finished_segment.get("ended_at"))
-            active_odo_at = _parse_datetime(active.get("start_odometer_updated_at"))
-            final_odo_at = _parse_datetime(finished_segment.get("odometer_updated_at"))
             final_odometer = _as_float(finished_segment.get("end_odometer_km"))
-            if (
-                active_started is not None
-                and finished_at is not None
-                and active_started >= finished_at
-                and final_odometer is not None
-                and not finished_segment.get("odometer_wait_timed_out")
-                and not finished_segment.get("odometer_shared_update")
-                and (
-                    active_odo_at is None
-                    or final_odo_at is None
-                    or active_odo_at <= final_odo_at
-                )
-            ):
-                active["start_odometer_km"] = final_odometer
-                active["start_odometer_updated_at"] = _iso_utc(final_odo_at)
-                active["start_odometer_source"] = "previous_segment_final"
-                active["validation_error"] = None
-                await self._async_save_runtime()
+            final_odo_at = _parse_datetime(finished_segment.get("odometer_updated_at"))
+            if finished_at is None or final_odometer is None:
+                return
+
+            candidates = [
+                *([self._active] if self._active is not None else []),
+                *self._closing.values(),
+                *self._pending.values(),
+                *self._transient.values(),
+            ]
+            following = []
+            for candidate in candidates:
+                if (
+                    candidate is finished_segment
+                    or candidate.get("persisted")
+                    or candidate.get("odometer_ready")
+                ):
+                    continue
+                started_at = _parse_datetime(candidate.get("started_at"))
+                if started_at is not None and started_at >= finished_at:
+                    following.append((started_at, candidate))
+            if not following:
+                return
+
+            _, next_segment = min(
+                following,
+                key=lambda item: (item[0], str(item[1].get("id") or "")),
+            )
+            corrected_start = propagated_start_odometer(
+                finished_at,
+                final_odometer,
+                _parse_datetime(next_segment.get("started_at")),
+                _as_float(next_segment.get("start_odometer_km")),
+            )
+            if corrected_start is None:
+                return
+
+            next_segment["start_odometer_km"] = corrected_start
+            next_segment["start_odometer_updated_at"] = _iso_utc(final_odo_at)
+            next_segment["start_odometer_source"] = "previous_segment_final"
+            next_segment["validation_error"] = None
 
     async def _async_send_classification_notification(
         self, segment: dict[str, Any], validation_message: str | None = None

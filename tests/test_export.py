@@ -75,6 +75,74 @@ class ExportExcelTest(unittest.TestCase):
         self.assertEqual(rows[0]["Zákazník"], "")
         self.assertEqual(rows[0]["Soukromé km"], 13)
 
+    def test_transient_stop_is_hidden_from_route_but_keeps_its_kilometres(self) -> None:
+        """A petrol stop must not appear in Přes or as a separate customer."""
+        rows = EXPORT_MODULE._build_summary_rows(
+            [
+                {
+                    "date": "2026-08-25",
+                    "started_at": "2026-08-25T08:00:00+00:00",
+                    "start_address": "Kroměříž",
+                    "end_address": "Benzina D1",
+                    "purpose": "Nemocnice",
+                    "trip_type": "business",
+                    "distance_km": 40,
+                    "journey_id": "journey",
+                    "journey_role": "transient_stop",
+                },
+                {
+                    "date": "2026-08-25",
+                    "started_at": "2026-08-25T08:15:00+00:00",
+                    "start_address": "Benzina D1",
+                    "end_address": "Nemocnice Brno",
+                    "purpose": "Nemocnice",
+                    "trip_type": "business",
+                    "distance_km": 30,
+                    "journey_id": "journey",
+                    "journey_role": "destination",
+                },
+            ]
+        )
+
+        self.assertEqual(rows[0]["Start/Odkud"], "Kroměříž")
+        self.assertEqual(rows[0]["Přes"], "")
+        self.assertEqual(rows[0]["Cíl/Kam"], "Nemocnice Brno")
+        self.assertEqual(rows[0]["Zákazník"], "Nemocnice")
+        self.assertEqual(rows[0]["Služební km"], 70)
+
+    def test_untagged_three_minute_stop_is_also_hidden(self) -> None:
+        """Historical quick stops stay out of Přes even without journey metadata."""
+        rows = EXPORT_MODULE._build_summary_rows(
+            [
+                {
+                    "date": "2026-08-25",
+                    "started_at": "2026-08-25T07:44:23+00:00",
+                    "ended_at": "2026-08-25T08:10:02+00:00",
+                    "start_address": "Výstavní 378/18",
+                    "end_address": "Masná 458/106",
+                    "purpose": "",
+                    "trip_type": "business",
+                    "distance_km": 12,
+                },
+                {
+                    "date": "2026-08-25",
+                    "started_at": "2026-08-25T08:10:50+00:00",
+                    "ended_at": "2026-08-25T08:29:18+00:00",
+                    "start_address": "Masná 458/106",
+                    "end_address": "Jihlavská 24",
+                    "purpose": "Fakultní nemocnice",
+                    "trip_type": "business",
+                    "distance_km": 6,
+                },
+            ]
+        )
+
+        self.assertEqual(rows[0]["Start/Odkud"], "Výstavní 378/18")
+        self.assertEqual(rows[0]["Přes"], "")
+        self.assertEqual(rows[0]["Cíl/Kam"], "Jihlavská 24")
+        self.assertEqual(rows[0]["Zákazník"], "Fakultní nemocnice")
+        self.assertEqual(rows[0]["Služební km"], 18)
+
     def test_month_filter_excludes_other_periods(self) -> None:
         """Keep both workbook sheets inside the requested calendar month."""
         test_output = ROOT / "test-output"

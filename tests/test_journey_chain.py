@@ -178,6 +178,19 @@ class JourneyChainTest(unittest.TestCase):
 
         self.assertEqual(visible, [])
 
+    def test_business_trip_can_be_saved_without_customer(self) -> None:
+        """Switching a private suggestion to business must clear its sentinel."""
+        self.assertEqual(
+            CHAIN_MODULE.normalize_trip_purpose("Soukromá", "business"), ""
+        )
+        self.assertEqual(
+            CHAIN_MODULE.normalize_trip_purpose("", "private"), "Soukromá"
+        )
+        self.assertEqual(
+            CHAIN_MODULE.normalize_trip_purpose("Nemocnice", "business"),
+            "Nemocnice",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
