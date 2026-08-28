@@ -10,11 +10,13 @@ def odometer_update_signal(
     start_odometer_km: float | None,
     updated_at: datetime | None,
     odometer_km: float | None,
+    accepted_until: datetime | None = None,
 ) -> str | None:
     """Describe a usable post-disconnect odometer update, if available."""
     if (
         updated_at is None
         or updated_at <= disconnected_at
+        or (accepted_until is not None and updated_at > accepted_until)
         or odometer_km is None
     ):
         return None

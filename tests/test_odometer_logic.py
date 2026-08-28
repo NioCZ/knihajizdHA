@@ -64,6 +64,31 @@ class OdometerLogicTest(unittest.TestCase):
 
         self.assertEqual(signal, "post_disconnect_update")
 
+    def test_rejects_update_after_the_next_trip_started(self) -> None:
+        """A combined late counter must not be assigned to the previous leg."""
+        disconnected = datetime(2026, 8, 21, 10, tzinfo=UTC)
+        next_started = disconnected + timedelta(minutes=20)
+
+        self.assertIsNone(
+            MODULE.odometer_update_signal(
+                disconnected,
+                1000.0,
+                next_started + timedelta(seconds=30),
+                1259.0,
+                next_started,
+            )
+        )
+        self.assertEqual(
+            MODULE.odometer_update_signal(
+                disconnected,
+                1000.0,
+                next_started - timedelta(seconds=30),
+                1066.0,
+                next_started,
+            ),
+            "post_disconnect_update_and_increase",
+        )
+
     def test_delayed_previous_boundary_corrects_the_next_trip_start(self) -> None:
         """Do not count the previous leg again when the cloud updated after reconnect."""
         first_ended = datetime(2026, 8, 25, 8, 10, tzinfo=UTC)

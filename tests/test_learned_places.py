@@ -1033,6 +1033,135 @@ class LearnedPlacesTest(unittest.TestCase):
         )
         self.assertTrue(check["consistent"])
 
+    def test_late_anchor_is_split_across_three_gps_fallback_legs(self) -> None:
+        """Never assign a multi-trip cloud update wholly to the oldest waiter."""
+        segments = [
+            {
+                "id": "first",
+                "started_at": "2026-08-21T08:00:00+00:00",
+                "start_odometer_km": 1000.0,
+                "end_odometer_km": None,
+                "distance_km": 60,
+                "odometer_wait_timed_out": False,
+                "odometer_completion_source": "gps_fallback_next_trip_started",
+                "start_latitude": 49.0,
+                "start_longitude": 14.0,
+                "end_latitude": 49.54,
+                "end_longitude": 14.0,
+            },
+            {
+                "id": "second",
+                "started_at": "2026-08-21T10:00:00+00:00",
+                "start_odometer_km": 1000.0,
+                "end_odometer_km": None,
+                "distance_km": 120,
+                "odometer_wait_timed_out": False,
+                "odometer_completion_source": "gps_fallback_next_trip_started",
+                "start_latitude": 49.54,
+                "start_longitude": 14.0,
+                "end_latitude": 50.62,
+                "end_longitude": 14.0,
+            },
+            {
+                "id": "third",
+                "started_at": "2026-08-21T13:00:00+00:00",
+                "start_odometer_km": 1000.0,
+                "end_odometer_km": 1259.0,
+                "distance_km": 259,
+                "odometer_wait_timed_out": False,
+                "odometer_completion_source": (
+                    "post_disconnect_update_and_increase"
+                ),
+                "start_latitude": 50.62,
+                "start_longitude": 14.0,
+                "end_latitude": 51.33,
+                "end_longitude": 14.0,
+            },
+        ]
+
+        changed, check = STORAGE_MODULE.reconcile_odometer_day(segments)
+
+        distances = [segment["distance_km"] for segment in segments]
+        self.assertGreater(changed, 0)
+        self.assertEqual(sum(distances), 259)
+        self.assertTrue(all(isinstance(distance, int) for distance in distances))
+        self.assertTrue(all(0 < distance < 259 for distance in distances))
+        self.assertTrue(check["consistent"])
+        self.assertTrue(
+            all(
+                segment["distance_reconciliation_source"]
+                == "odometer_anchor_reconciled_gps_weighted_whole_km"
+                for segment in segments
+            )
+        )
+
+    def test_legacy_anchor_after_next_start_is_rejected_and_repaired(self) -> None:
+        """Repair a value already assigned to the wrong trip by an older release."""
+        segments = [
+            {
+                "id": "wrong-oldest",
+                "started_at": "2026-08-21T08:10:00+00:00",
+                "start_odometer_km": 1000.0,
+                "end_odometer_km": 1259.0,
+                "odometer_updated_at": "2026-08-21T10:05:00+00:00",
+                "distance_km": 259,
+                "odometer_wait_timed_out": False,
+                "odometer_completion_source": (
+                    "post_disconnect_update_and_increase"
+                ),
+                "start_latitude": 49.30,
+                "start_longitude": 17.39,
+                "end_latitude": 49.20,
+                "end_longitude": 16.61,
+            },
+            {
+                "id": "following",
+                "started_at": "2026-08-21T09:44:00+00:00",
+                "start_odometer_km": 1000.0,
+                "end_odometer_km": None,
+                "distance_km": 18,
+                "odometer_wait_timed_out": False,
+                "odometer_completion_source": "gps_fallback_next_trip_started",
+                "start_latitude": 49.20,
+                "start_longitude": 16.61,
+                "end_latitude": 49.10,
+                "end_longitude": 16.45,
+            },
+        ]
+
+        changed, first_check = STORAGE_MODULE.reconcile_odometer_day(segments)
+
+        self.assertGreater(changed, 0)
+        self.assertTrue(
+            segments[0]["odometer_anchor_ignored_due_to_later_trip_start"]
+        )
+        self.assertNotEqual(segments[0]["distance_km"], 259)
+        self.assertEqual(
+            segments[0]["distance_reconciliation_source"],
+            "gps_fallback_late_anchor_rejected",
+        )
+        self.assertEqual(first_check["unresolved_segments"], 2)
+
+        segments[1].update(
+            end_odometer_km=1277.0,
+            odometer_updated_at="2026-08-21T11:00:00+00:00",
+            odometer_completion_source="post_disconnect_update_and_increase",
+        )
+        _, final_check = STORAGE_MODULE.reconcile_odometer_day(segments)
+
+        self.assertEqual(sum(segment["distance_km"] for segment in segments), 277)
+        self.assertTrue(final_check["consistent"])
+        self.assertTrue(
+            all(
+                segment["distance_reconciliation_source"]
+                == "odometer_anchor_reconciled_gps_weighted_whole_km"
+                for segment in segments
+            )
+        )
+        unchanged, repeated_check = STORAGE_MODULE.reconcile_odometer_day(segments)
+        self.assertEqual(unchanged, 0)
+        self.assertTrue(repeated_check["consistent"])
+
     def test_next_start_anchor_backfills_previous_timeout(self) -> None:
         """A fresh counter at the next departure exactly closes one zero leg."""
         segments = [

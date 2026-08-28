@@ -179,16 +179,19 @@ Rozpracovaný řetězec je uložen v HA Store a přežije restart Home Assistant
 
 Aktivní jízda, čekající ukončení i nezodpovězená notifikace jsou uloženy v interním
 HA Store. Restart Home Assistantu proto rozpracovanou jízdu nezahodí. Pokud začne
-další jízda dříve, než cloud doplní předchozí tachometr, její počáteční stav se po
-doručení důvěryhodné předchozí finální hodnoty opraví na tuto hodnotu. Čekající
-segmenty se zpracovávají od nejstaršího; opožděná hodnota se zároveň stane
-počáteční hranicí bezprostředně následujícího segmentu, takže se stejné kilometry
-nezapočítají znovu.
+další jízda dříve, než cloud doplní předchozí tachometr, začátek nové jízdy vytvoří
+pevnou časovou hranici. Předchozí úsek se dočasně uzavře podle GPS vzdálenosti a
+už nesmí spotřebovat pozdější společnou aktualizaci tachometru. Jakmile cloud
+dodá další důvěryhodný stav, celkový přírůstek se zpětně rozdělí mezi všechny
+dotčené úseky. Nejde o časový timeout: čekání končí až skutečným začátkem další
+jízdy. Denní kontrola stejným pravidlem rozpozná i chybnou pozdní hranici
+uloženou starší verzí a nahradí ji GPS odhadem, dokud není k dispozici další
+společný stav tachometru.
 
 ### Zpětná kontrola kilometrů
 
-Cloud může jednu aktualizaci tachometru doručit až po zahájení dalšího úseku.
-Taková hodnota se už nepřiřadí celá prvnímu nebo druhému úseku. Segmenty mezi
+Cloud může jednu aktualizaci tachometru doručit až po zahájení několika dalších
+úseků. Taková hodnota se už nepřiřadí celá nejstarší čekající jízdě. Segmenty mezi
 posledním a následujícím důvěryhodným stavem odometru se zpětně vyhodnotí jako
 skupina. Celkový přírůstek se rozdělí podle poměru jejich GPS vzdáleností a součet
 musí odpovídat rozdílu obou stavů tachometru. Čerstvý stav při příštím odjezdu

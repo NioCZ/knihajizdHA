@@ -627,6 +627,22 @@ def _whole_km(value: float) -> int:
     return int(floor(max(0.0, value) + 0.5))
 
 
+def _optional_datetime(value: Any) -> datetime | None:
+    """Parse a stored timestamp and normalize it to UTC."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _raw_trusted_odometer_end(segment: dict[str, Any]) -> float | None:
     """Return only a trustworthy raw post-disconnect odometer value."""
     source = str(segment.get("odometer_completion_source") or "")
@@ -644,7 +660,9 @@ def _trusted_odometer_end(segment: dict[str, Any]) -> float | None:
     boundary = _optional_float(segment.get("odometer_reconciliation_boundary_km"))
     if boundary is not None:
         return boundary
-    if segment.get("odometer_anchor_ignored_due_to_daily_conflict"):
+    if segment.get("odometer_anchor_ignored_due_to_daily_conflict") or segment.get(
+        "odometer_anchor_ignored_due_to_later_trip_start"
+    ):
         return None
     return _raw_trusted_odometer_end(segment)
 
@@ -663,6 +681,46 @@ def _segment_distance_weight(segment: dict[str, Any]) -> float:
         segment.get("distance_km_raw", segment.get("distance_km"))
     )
     return max(0.1, raw_distance or 0.0)
+
+
+def _reject_anchors_crossing_later_starts(
+    ordered: list[dict[str, Any]],
+) -> int:
+    """Replace legacy late anchors with GPS until a later boundary arrives."""
+    changed = 0
+    for segment, following in zip(ordered, ordered[1:]):
+        updated_at = _optional_datetime(segment.get("odometer_updated_at"))
+        next_started_at = _optional_datetime(following.get("started_at"))
+        if (
+            _raw_trusted_odometer_end(segment) is None
+            or updated_at is None
+            or next_started_at is None
+            or updated_at <= next_started_at
+        ):
+            continue
+        already_rejected = bool(
+            segment.get("odometer_anchor_ignored_due_to_later_trip_start")
+        )
+        changed += _set_if_changed(
+            segment,
+            "odometer_anchor_ignored_due_to_later_trip_start",
+            True,
+        )
+        if already_rejected or segment.get("manual_distance_override"):
+            continue
+        if "distance_km_raw" not in segment:
+            changed += _set_if_changed(
+                segment, "distance_km_raw", segment.get("distance_km")
+            )
+        hint = round(_segment_distance_weight(segment), 3)
+        changed += _set_if_changed(segment, "distance_hint_km", hint)
+        changed += _set_integer_if_changed(segment, "distance_km", _whole_km(hint))
+        changed += _set_if_changed(
+            segment,
+            "distance_reconciliation_source",
+            "gps_fallback_late_anchor_rejected",
+        )
+    return changed
 
 
 def _set_if_changed(segment: dict[str, Any], key: str, value: Any) -> int:
@@ -843,7 +901,7 @@ def reconcile_odometer_day(
 ) -> tuple[int, dict[str, Any]]:
     """Backfill legs and make their whole-km sum match the final day counter."""
     ordered = sorted(segments, key=lambda item: str(item.get("started_at") or ""))
-    changed = 0
+    changed = _reject_anchors_crossing_later_starts(ordered)
     first_start = next(
         (
             value

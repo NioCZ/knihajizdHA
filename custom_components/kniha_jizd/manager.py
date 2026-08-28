@@ -180,6 +180,7 @@ class KnihaJizdManager:
         self._journey_lock = asyncio.Lock()
         self._finalization_lock = asyncio.Lock()
         self._odometer_completion_condition = asyncio.Condition()
+        self._odometer_rollover_events: dict[str, asyncio.Event] = {}
         self._runtime_lock = asyncio.Lock()
         self._stopping = False
         self._runtime_store: Store[dict[str, Any]] = Store(
@@ -205,6 +206,19 @@ class KnihaJizdManager:
             *self._transient.values(),
         ]:
             self._restore_processing_flags(segment)
+        runtime_segments = [
+            *([self._active] if self._active is not None else []),
+            *self._closing.values(),
+            *self._pending.values(),
+            *self._transient.values(),
+        ]
+        for segment in sorted(
+            runtime_segments,
+            key=lambda item: str(item.get("started_at") or ""),
+        ):
+            started_at = _parse_datetime(segment.get("started_at"))
+            if started_at is not None:
+                self._mark_previous_odometer_rollovers(started_at)
         await self._async_refresh_statistics()
 
         self._unsubscribers.append(
@@ -322,6 +336,7 @@ class KnihaJizdManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._odometer_rollover_events.clear()
         self._listeners.clear()
 
     @callback
@@ -1003,6 +1018,7 @@ class KnihaJizdManager:
             location = self._align_start_with_previous_destination(
                 location, started_at
             )
+            self._mark_previous_odometer_rollovers(started_at)
             local_started = dt_util.as_local(started_at)
             self._active = {
                 "id": uuid4().hex,
@@ -1017,6 +1033,7 @@ class KnihaJizdManager:
                 "odometer_wait_timed_out": None,
                 "odometer_ready": False,
                 "odometer_completion_source": None,
+                "odometer_rollover_at": None,
                 "start_odometer_km": start_odometer,
                 "end_odometer_km": None,
                 "distance_km": None,
@@ -1125,7 +1142,7 @@ class KnihaJizdManager:
         await self._async_try_finalize_segment(segment)
 
     async def _async_complete_odometer(self, segment: dict[str, Any]) -> None:
-        """Wait indefinitely for one trustworthy cloud boundary, oldest trip first."""
+        """Wait for a trustworthy boundary without crossing into the next trip."""
         async with self._odometer_completion_condition:
             await self._odometer_completion_condition.wait_for(
                 lambda: not self._has_earlier_odometer_wait(segment)
@@ -1144,7 +1161,9 @@ class KnihaJizdManager:
             )
             start_odometer = _as_float(segment.get("start_odometer_km"))
             end_odometer, odometer_updated_at, _, completion_source = (
-                await self._async_wait_for_odometer(disconnected_at, start_odometer)
+                await self._async_wait_for_odometer(
+                    segment, disconnected_at, start_odometer
+                )
             )
             segment["odometer_updated_at"] = _iso_utc(odometer_updated_at)
             segment["odometer_wait_timed_out"] = False
@@ -1155,7 +1174,17 @@ class KnihaJizdManager:
             segment["odometer_shared_update"] = False
 
             raw_distance: float | None = None
-            if start_odometer is None or end_odometer is None:
+            gps_fallback = completion_source == "gps_fallback_next_trip_started"
+            if gps_fallback:
+                raw_distance = _segment_gps_distance_km(segment)
+                segment["distance_hint_km"] = raw_distance
+                segment["distance_km"] = (
+                    _whole_km(raw_distance) if raw_distance is not None else None
+                )
+                segment["validation_error"] = (
+                    None if raw_distance is not None else "missing_gps_distance"
+                )
+            elif start_odometer is None or end_odometer is None:
                 segment["distance_km"] = None
                 segment["validation_error"] = (
                     "missing_start_odometer"
@@ -1175,7 +1204,9 @@ class KnihaJizdManager:
                 segment["distance_reconciliation_source"] = "manual_panel"
             else:
                 segment["distance_reconciliation_source"] = (
-                    "direct_odometer_difference"
+                    "gps_fallback_next_trip_started"
+                    if gps_fallback
+                    else "direct_odometer_difference"
                 )
 
             segment["odometer_ready"] = True
@@ -1205,6 +1236,33 @@ class KnihaJizdManager:
             if candidate_key < current_key:
                 return True
         return False
+
+    def _mark_previous_odometer_rollovers(self, started_at: datetime) -> None:
+        """Stop older waiters from consuming a counter update from this trip."""
+        for candidate in [
+            *self._closing.values(),
+            *self._pending.values(),
+            *self._transient.values(),
+        ]:
+            if candidate.get("odometer_ready"):
+                continue
+            candidate_started_at = _parse_datetime(candidate.get("started_at"))
+            candidate_ended_at = _parse_datetime(candidate.get("ended_at"))
+            if (
+                candidate_started_at is None
+                or candidate_ended_at is None
+                or candidate_started_at >= started_at
+                or candidate_ended_at > started_at
+            ):
+                continue
+            rollover_at = _parse_datetime(candidate.get("odometer_rollover_at"))
+            if rollover_at is None or started_at < rollover_at:
+                candidate["odometer_rollover_at"] = _iso_utc(started_at)
+            event = self._odometer_rollover_events.get(
+                str(candidate.get("id") or "")
+            )
+            if event is not None:
+                event.set()
 
     async def _async_reconcile_previous_day_at_start(
         self,
@@ -1948,35 +2006,41 @@ class KnihaJizdManager:
         return deepcopy(matching[0]["return_context"])
 
     async def _async_wait_for_odometer(
-        self, disconnected_at: datetime, start_odometer: float | None
+        self,
+        segment: dict[str, Any],
+        disconnected_at: datetime,
+        start_odometer: float | None,
     ) -> tuple[float | None, datetime | None, bool, str]:
-        """Wait until the cloud reports a post-disconnect counter boundary."""
+        """Wait for a counter boundary, but never take one from a later trip."""
+        segment_id = str(segment.get("id") or "")
+
+        def _signal_for(state: State | None) -> str | None:
+            return odometer_update_signal(
+                disconnected_at,
+                start_odometer,
+                _odometer_updated_at(state),
+                _odometer_value(state),
+                _parse_datetime(segment.get("odometer_rollover_at")),
+            )
+
         current_state = self.hass.states.get(self.odometer_entity)
         current_updated_at = _odometer_updated_at(current_state)
         current_value = _odometer_value(current_state)
-        current_signal = odometer_update_signal(
-            disconnected_at,
-            start_odometer,
-            current_updated_at,
-            current_value,
-        )
+        current_signal = _signal_for(current_state)
         if current_signal is not None:
             return current_value, current_updated_at, False, current_signal
+        if _parse_datetime(segment.get("odometer_rollover_at")) is not None:
+            return None, None, False, "gps_fallback_next_trip_started"
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[State] = loop.create_future()
+        rollover_event = asyncio.Event()
+        self._odometer_rollover_events[segment_id] = rollover_event
 
         @callback
         def _odometer_changed(event: Event) -> None:
             new_state: State | None = event.data.get("new_state")
-            updated_at = _odometer_updated_at(new_state)
-            value = _odometer_value(new_state)
-            signal = odometer_update_signal(
-                disconnected_at,
-                start_odometer,
-                updated_at,
-                value,
-            )
+            signal = _signal_for(new_state)
             if (
                 new_state is not None
                 and signal is not None
@@ -1987,41 +2051,46 @@ class KnihaJizdManager:
         unsubscribe = async_track_state_change_event(
             self.hass, [self.odometer_entity], _odometer_changed
         )
+        rollover_task: asyncio.Task[bool] | None = None
         try:
             # Close the race between the first check and listener registration.
             current_state = self.hass.states.get(self.odometer_entity)
             current_updated_at = _odometer_updated_at(current_state)
             current_value = _odometer_value(current_state)
-            current_signal = odometer_update_signal(
-                disconnected_at,
-                start_odometer,
-                current_updated_at,
-                current_value,
-            )
+            current_signal = _signal_for(current_state)
             if (
                 current_state is not None
                 and current_signal is not None
                 and not future.done()
             ):
                 future.set_result(current_state)
+            if _parse_datetime(segment.get("odometer_rollover_at")) is not None:
+                rollover_event.set()
 
-            final_state = await future
-            return (
-                _odometer_value(final_state),
-                _odometer_updated_at(final_state),
-                False,
-                str(
-                    odometer_update_signal(
-                        disconnected_at,
-                        start_odometer,
-                        _odometer_updated_at(final_state),
-                        _odometer_value(final_state),
-                    )
-                    or "post_disconnect_update"
-                ),
+            rollover_task = asyncio.create_task(rollover_event.wait())
+            await asyncio.wait(
+                {future, rollover_task},
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if future.done() and not future.cancelled():
+                final_state = future.result()
+                final_signal = _signal_for(final_state)
+                if final_signal is not None:
+                    return (
+                        _odometer_value(final_state),
+                        _odometer_updated_at(final_state),
+                        False,
+                        final_signal,
+                    )
+            return None, None, False, "gps_fallback_next_trip_started"
         finally:
             unsubscribe()
+            if not future.done():
+                future.cancel()
+            if rollover_task is not None and not rollover_task.done():
+                rollover_task.cancel()
+            if self._odometer_rollover_events.get(segment_id) is rollover_event:
+                self._odometer_rollover_events.pop(segment_id, None)
 
     async def _async_apply_previous_final_to_next_segment(
         self, finished_segment: dict[str, Any]
@@ -2749,6 +2818,21 @@ def _as_float(value: Any) -> float | None:
 def _whole_km(value: float) -> int:
     """Round a non-negative kilometre value to a whole kilometre."""
     return int(floor(max(0.0, value) + 0.5))
+
+
+def _segment_gps_distance_km(segment: dict[str, Any]) -> float | None:
+    """Return a provisional direct GPS distance for an unresolved segment."""
+    distance_m = coordinate_distance_m(
+        segment.get("start_latitude"),
+        segment.get("start_longitude"),
+        segment.get("end_latitude"),
+        segment.get("end_longitude"),
+    )
+    return (
+        round(max(0.0, distance_m) / 1000, 3)
+        if distance_m is not None
+        else None
+    )
 
 
 def _as_text(value: Any) -> str | None:
