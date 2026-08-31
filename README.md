@@ -154,9 +154,12 @@ Segmenty se spojí do jednoho `journey_id`, pouze když:
   použije se tato užší hodnota,
 - známý konečný a nový počáteční stav tachometru se neliší o více než 1 km.
 
-Velmi krátké stání do 3 minut se při odjezdu ze stejného místa považuje za
-mezizastávku i bez spolehlivé mapové kategorie. Tím se například rychlé zastavení
-na benzince nebo krátké vysazení nepropíše jako samostatný bod denní trasy.
+Velmi krátké stání do 10 minut se při odjezdu ze stejného místa považuje za
+mezizastávku i bez spolehlivé mapové kategorie. Návaznost se ověřuje GPS a při
+chybějících souřadnicích shodou adresy. Tím se například rychlé zastavení na
+benzince, předání věcí nebo krátké vysazení nepropíše jako samostatný bod denní
+trasy. Potvrzený klient nebo pojmenovaný samostatný účel zůstane viditelný i při
+kratší návštěvě. Kilometry skrytého úseku se vždy zachovají v denním součtu.
 
 Skutečný cíl následně zařadí celý řetězec. Například `firma → benzinka → klient`
 převezme zákazníka i služební typ z klienta; `domov → obchod → domov` převezme

@@ -88,7 +88,7 @@ from .storage import (
 from .trip_context import infer_trip_context
 
 _LOGGER = logging.getLogger(__name__)
-_IMPLICIT_TRANSIENT_STOP_MINUTES = 3.0
+_IMPLICIT_TRANSIENT_STOP_MINUTES = 10.0
 
 _ACTION_PATTERN = re.compile(
     rf"^{ACTION_PREFIX}_({ACTION_CONFIRM}|{ACTION_NEW}|{ACTION_PRIVATE}|"

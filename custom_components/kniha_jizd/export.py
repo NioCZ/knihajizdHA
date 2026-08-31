@@ -19,7 +19,8 @@ SUMMARY_COLUMNS = [
     "Služební km",
     "Soukromé km",
 ]
-_IMPLICIT_TRANSIENT_STOP_SECONDS = 3 * 60
+_IMPLICIT_TRANSIENT_STOP_SECONDS = 10 * 60
+_IMPLICIT_TRANSIENT_CONTINUATION_RADIUS_M = 250
 
 
 def export_excel(
@@ -276,7 +277,7 @@ def _whole_km(value: float) -> int:
 def _is_very_short_stop(
     segment: dict[str, Any], next_segment: dict[str, Any]
 ) -> bool:
-    """Hide an untagged stop when the next leg leaves the same place immediately."""
+    """Hide an untagged quick stop without swallowing a real client visit."""
     ended_at = _parse_iso_datetime(segment.get("ended_at"))
     next_started_at = _parse_iso_datetime(next_segment.get("started_at"))
     if ended_at is None or next_started_at is None:
@@ -284,9 +285,38 @@ def _is_very_short_stop(
     gap_seconds = (next_started_at - ended_at).total_seconds()
     if gap_seconds < 0 or gap_seconds > _IMPLICIT_TRANSIENT_STOP_SECONDS:
         return False
+    if _is_meaningful_business_destination(segment):
+        return False
+
+    distance_m = _coordinate_distance_m(
+        segment.get("end_latitude"),
+        segment.get("end_longitude"),
+        next_segment.get("start_latitude"),
+        next_segment.get("start_longitude"),
+    )
+    if distance_m is not None:
+        return distance_m <= _IMPLICIT_TRANSIENT_CONTINUATION_RADIUS_M
+
     end_address = str(segment.get("end_address") or "").strip().casefold()
     next_start_address = str(next_segment.get("start_address") or "").strip().casefold()
     return bool(end_address and end_address == next_start_address)
+
+
+def _is_meaningful_business_destination(segment: dict[str, Any]) -> bool:
+    """Keep a short stop when the data contains affirmative client evidence."""
+    journey_role = str(segment.get("journey_role") or "").strip().casefold()
+    classification_source = str(
+        segment.get("classification_source") or ""
+    ).strip().casefold()
+    if (
+        journey_role in {"return", "transient_stop"}
+        or segment.get("return_of_segment_id")
+        or classification_source.endswith("notification_return")
+    ):
+        return False
+    if str(segment.get("matched_place_role") or "").casefold() == "client":
+        return True
+    return bool(str(segment.get("purpose") or "").strip())
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:

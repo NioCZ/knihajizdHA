@@ -143,6 +143,138 @@ class ExportExcelTest(unittest.TestCase):
         self.assertEqual(rows[0]["Zákazník"], "Fakultní nemocnice")
         self.assertEqual(rows[0]["Služební km"], 18)
 
+    def test_today_fuel_and_quick_handoff_stops_are_hidden(self) -> None:
+        """Hide the observed Mořice and Novovysočanská stops but keep all km."""
+        rows = EXPORT_MODULE._build_summary_rows(
+            [
+                {
+                    "date": "2026-08-31",
+                    "started_at": "2026-08-31T05:04:33+00:00",
+                    "ended_at": "2026-08-31T05:22:06+00:00",
+                    "start_address": "Vrchlického 699, Kroměříž",
+                    "end_address": "Mořice 192, Mořice",
+                    "end_latitude": 49.31964,
+                    "end_longitude": 17.19965,
+                    "purpose": "",
+                    "trip_type": "business",
+                    "classification_source": "manual_panel",
+                    "journey_role": "destination",
+                    "distance_km": 17,
+                },
+                {
+                    "date": "2026-08-31",
+                    "started_at": "2026-08-31T05:25:37+00:00",
+                    "ended_at": "2026-08-31T08:02:59+00:00",
+                    "start_address": "Mořice 194, Mořice",
+                    "start_latitude": 49.31965,
+                    "start_longitude": 17.19966,
+                    "end_address": "Vídeňská 817/7, Praha 4-Krč",
+                    "end_latitude": 50.02552,
+                    "end_longitude": 14.46027,
+                    "purpose": "Thomayerova nemocnice",
+                    "trip_type": "business",
+                    "classification_source": "learned_place",
+                    "journey_role": "destination",
+                    "matched_place_role": "client",
+                    "distance_km": 244,
+                },
+                {
+                    "date": "2026-08-31",
+                    "started_at": "2026-08-31T14:19:40+00:00",
+                    "ended_at": "2026-08-31T15:11:28+00:00",
+                    "start_address": "Vídeňská 817/7, Praha 4-Krč",
+                    "end_address": "Novovysočanská 976/33, Praha 9",
+                    "end_latitude": 50.10087,
+                    "end_longitude": 14.49290,
+                    "purpose": "Thomayerova nemocnice",
+                    "trip_type": "business",
+                    "classification_source": "notification_return",
+                    "journey_role": "return",
+                    "return_of_segment_id": "thomayer",
+                    "distance_km": 14,
+                },
+                {
+                    "date": "2026-08-31",
+                    "started_at": "2026-08-31T15:16:40+00:00",
+                    "ended_at": "2026-08-31T15:28:24+00:00",
+                    "start_address": "Novovysočanská 555/24, Praha 9",
+                    "start_latitude": 50.10082,
+                    "start_longitude": 14.49275,
+                    "end_address": "Na Jetelce 69, Praha 9",
+                    "purpose": "Altium",
+                    "trip_type": "business",
+                    "classification_source": "configured_company",
+                    "journey_role": "destination",
+                    "distance_km": 3,
+                },
+                {
+                    "date": "2026-08-31",
+                    "started_at": "2026-08-31T16:01:18+00:00",
+                    "ended_at": "2026-08-31T16:25:54+00:00",
+                    "start_address": "Na Jetelce 69, Praha 9",
+                    "end_address": "U Slavie 1540/2a, Praha 10-Vršovice",
+                    "purpose": "",
+                    "trip_type": "business",
+                    "classification_source": "manual_panel",
+                    "journey_role": "destination",
+                    "distance_km": 8,
+                },
+            ]
+        )
+
+        self.assertEqual(rows[0]["Start/Odkud"], "Vrchlického 699, Kroměříž")
+        self.assertEqual(
+            rows[0]["Přes"],
+            "Vídeňská 817/7, Praha 4-Krč → Na Jetelce 69, Praha 9",
+        )
+        self.assertEqual(
+            rows[0]["Cíl/Kam"], "U Slavie 1540/2a, Praha 10-Vršovice"
+        )
+        self.assertEqual(rows[0]["Zákazník"], "Thomayerova nemocnice, Altium")
+        self.assertEqual(rows[0]["Služební km"], 286)
+        self.assertNotIn("Mořice", rows[0]["Přes"])
+        self.assertNotIn("Novovysočanská", rows[0]["Přes"])
+
+    def test_short_confirmed_client_visit_remains_visible(self) -> None:
+        """Do not hide a genuine client merely because the visit was brief."""
+        rows = EXPORT_MODULE._build_summary_rows(
+            [
+                {
+                    "date": "2026-08-31",
+                    "started_at": "2026-08-31T08:00:00+00:00",
+                    "ended_at": "2026-08-31T08:30:00+00:00",
+                    "start_address": "Firma",
+                    "end_address": "Laboratoř",
+                    "end_latitude": 50.0,
+                    "end_longitude": 14.0,
+                    "purpose": "Potvrzený klient",
+                    "trip_type": "business",
+                    "classification_source": "learned_place",
+                    "journey_role": "destination",
+                    "matched_place_role": "client",
+                    "distance_km": 20,
+                },
+                {
+                    "date": "2026-08-31",
+                    "started_at": "2026-08-31T08:36:00+00:00",
+                    "ended_at": "2026-08-31T09:00:00+00:00",
+                    "start_address": "Vedlejší vchod laboratoře",
+                    "start_latitude": 50.0001,
+                    "start_longitude": 14.0001,
+                    "end_address": "Firma",
+                    "purpose": "",
+                    "trip_type": "business",
+                    "classification_source": "manual_panel",
+                    "journey_role": "return",
+                    "distance_km": 20,
+                },
+            ]
+        )
+
+        self.assertEqual(rows[0]["Přes"], "Laboratoř")
+        self.assertEqual(rows[0]["Zákazník"], "Potvrzený klient")
+        self.assertEqual(rows[0]["Služební km"], 40)
+
     def test_summary_uses_exact_configured_home_and_company_addresses(self) -> None:
         """Nearby mobile fixes are canonicalized only in the daily summary."""
         segments = [
