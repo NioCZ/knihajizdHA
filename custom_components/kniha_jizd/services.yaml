@@ -62,3 +62,43 @@ update_trip:
           max: 5000
           step: 1
           unit_of_measurement: km
+resolve_trip:
+  name: Odpovědět na dotaz k jízdě
+  description: Zařadí čekající jízdu stejnou logikou jako akce z telefonu.
+  fields:
+    segment_id:
+      name: ID segmentu
+      required: true
+      selector:
+        text:
+    action:
+      name: Rozhodnutí
+      required: true
+      selector:
+        select:
+          options:
+            - label: Potvrdit navrženého klienta
+              value: confirm
+            - label: Jiný klient nebo účel
+              value: new
+            - label: Služební bez klienta
+              value: business
+            - label: Soukromá
+              value: private
+            - label: Služební návrat
+              value: return
+    value:
+      name: Klient nebo účel
+      description: Povinné jen pro rozhodnutí Jiný klient nebo účel.
+      required: false
+      selector:
+        text:
+    candidate_index:
+      name: Číslo návrhu
+      description: Volitelná volba jednoho z mapových návrhů 1 až 3.
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 3
+          step: 1

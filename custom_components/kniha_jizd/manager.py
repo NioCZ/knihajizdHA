@@ -30,6 +30,7 @@ from homeassistant.util import dt as dt_util
 from .address_rules import configured_place_match, coordinate_distance_m, shorten_address
 from .const import (
     ACTION_CONFIRM,
+    ACTION_BUSINESS,
     ACTION_NEW,
     ACTION_PREFIX,
     ACTION_PRIVATE,
@@ -76,7 +77,9 @@ from .journey_chain import (
     detect_transient_stop,
     map_routes_without_transient_stops,
     normalize_trip_purpose,
+    parking_boundary_details,
 )
+from .location_logic import location_is_fresh, select_coordinate_candidate
 from .nearby_search import NearbyInstitutionSearcher
 from .odometer_logic import odometer_update_signal, propagated_start_odometer
 from .storage import (
@@ -86,12 +89,17 @@ from .storage import (
     suppress_configured_place_duplicates,
 )
 from .trip_context import infer_trip_context
+from .workflow_logic import (
+    PHONE_NOTIFICATION_GRACE_MINUTES,
+    mobile_notification_policy,
+    panel_question,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _IMPLICIT_TRANSIENT_STOP_MINUTES = 10.0
 
 _ACTION_PATTERN = re.compile(
-    rf"^{ACTION_PREFIX}_({ACTION_CONFIRM}|{ACTION_NEW}|{ACTION_PRIVATE}|"
+    rf"^{ACTION_PREFIX}_({ACTION_CONFIRM}|{ACTION_NEW}|{ACTION_BUSINESS}|{ACTION_PRIVATE}|"
     rf"{ACTION_RETURN})_([0-9a-f]+)$"
 )
 
@@ -272,7 +280,9 @@ class KnihaJizdManager:
                     (
                         self._async_retry_pending_suggestions(segment)
                         if retry_missing_search
-                        else self._async_send_classification_notification(segment)
+                        else self._async_schedule_classification_notification(
+                            segment
+                        )
                     ),
                     f"{DOMAIN}_restore_pending_search_{segment.get('id', 'unknown')}",
                 )
@@ -321,6 +331,8 @@ class KnihaJizdManager:
         segment.setdefault("end_location_ready", True)
         segment.setdefault("start_address_raw", segment.get("start_address"))
         segment.setdefault("end_address_raw", segment.get("end_address"))
+        # Task flags are process-local and must not survive a reload.
+        segment.pop("notification_task_scheduled", None)
 
     async def async_shutdown(self) -> None:
         """Unsubscribe and cancel in-flight work, keeping state for reload."""
@@ -391,6 +403,12 @@ class KnihaJizdManager:
         latitude, longitude, gps_source = _location_coordinates(
             gps_state, address_state
         )
+        location_details = _location_coordinate_details(gps_state, address_state)
+        location_updated_at = (
+            location_details.get("updated_at")
+            if location_details is not None
+            else None
+        )
         odometer, odometer_source = _odometer_details(odometer_state)
         trigger_ok = (
             trigger_state is not None and trigger_state.state in {"on", "off"}
@@ -406,7 +424,9 @@ class KnihaJizdManager:
         )
         return {
             "kniha_jizd_kind": "status",
-            "ready": trigger_ok and gps_ok and odometer_ok and notify_ok,
+            # Notifications are an optional convenience. The panel remains the
+            # authoritative workflow when the mobile service is unavailable.
+            "ready": trigger_ok and gps_ok and odometer_ok,
             "status": self.status,
             "active_segment_id": (
                 self._active.get("id") if self._active is not None else None
@@ -450,6 +470,23 @@ class KnihaJizdManager:
             "latitude": latitude,
             "longitude": longitude,
             "gps_coordinate_source": gps_source,
+            "gps_updated_at": _iso_utc(location_updated_at),
+            "gps_age_seconds": (
+                max(
+                    0.0,
+                    round(
+                        (datetime.now(UTC) - location_updated_at).total_seconds(),
+                        1,
+                    ),
+                )
+                if location_updated_at is not None
+                else None
+            ),
+            "gps_accuracy_m": (
+                location_details.get("accuracy_m")
+                if location_details is not None
+                else None
+            ),
             "gps_state": gps_state.state if gps_state else None,
             "address_entity": self.address_entity,
             "address": address,
@@ -464,6 +501,57 @@ class KnihaJizdManager:
             "notify_ok": notify_ok,
             "last_notification_action": deepcopy(self._last_notification_action),
             "last_error": self._last_error,
+        }
+
+    @property
+    def public_diagnostics(self) -> dict[str, Any]:
+        """Expose health without addresses, coordinates or trip records."""
+        diagnostics = self.diagnostics
+        allowed = (
+            "kniha_jizd_kind",
+            "ready",
+            "status",
+            "closing_count",
+            "pending_count",
+            "review_count",
+            "today_review_count",
+            "transient_count",
+            "trigger_ok",
+            "gps_ok",
+            "address_ok",
+            "odometer_ok",
+            "notify_ok",
+            "last_error",
+        )
+        return {key: diagnostics.get(key) for key in allowed}
+
+    @property
+    def panel_overview(self) -> dict[str, Any]:
+        """Return one coherent admin snapshot for the sidebar panel."""
+        diagnostics = self.diagnostics
+        export_status = {
+            key: deepcopy(value)
+            for key, value in self.export_status.items()
+            if key != "path"
+        }
+        return {
+            "generated_at": _iso_utc(datetime.now(UTC)),
+            "status": self.status,
+            "ready": bool(diagnostics["ready"]),
+            "diagnostics": diagnostics,
+            "statistics": {
+                key: deepcopy(self._statistics.get(key))
+                for key in (
+                    "segments_total",
+                    "business_km_total",
+                    "private_km_total",
+                    "today_segments",
+                    "today_business_km",
+                    "today_private_km",
+                )
+            },
+            "last_trip": deepcopy(self._statistics.get("last_segment")),
+            "export": export_status,
         }
 
     async def _async_get_visible_place_markers(
@@ -801,6 +889,26 @@ class KnihaJizdManager:
         distance_km: Any = None,
     ) -> dict[str, Any]:
         """Correct a persisted or unfinished trip from the sidebar panel."""
+        async with self._resolution_lock:
+            return await self._async_update_trip_locked(
+                segment_id,
+                purpose,
+                trip_type,
+                start_address,
+                end_address,
+                distance_km,
+            )
+
+    async def _async_update_trip_locked(
+        self,
+        segment_id: str,
+        purpose: str,
+        trip_type: str,
+        start_address: Any = None,
+        end_address: Any = None,
+        distance_km: Any = None,
+    ) -> dict[str, Any]:
+        """Apply a panel correction while other classification choices are locked."""
         if trip_type not in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}:
             raise ValueError("trip_type must be business or private")
         selected_purpose = normalize_trip_purpose(purpose, trip_type)
@@ -816,6 +924,12 @@ class KnihaJizdManager:
                 if destination is not None:
                     runtime = destination
             runtime_id = str(runtime["id"])
+            # This synchronous marker makes every still-running automatic
+            # branch yield to the user's explicit choice after its next await.
+            runtime["manual_resolution_requested_at"] = _iso_utc(
+                datetime.now(UTC)
+            )
+            runtime["classification_prepared"] = True
             if (
                 start_address is not None
                 and str(start_address).strip()
@@ -845,6 +959,13 @@ class KnihaJizdManager:
                 runtime["distance_km"] = _whole_km(manual_distance)
                 runtime["manual_distance_override"] = True
                 runtime["distance_reconciliation_source"] = "manual_panel"
+                runtime["odometer_ready"] = True
+                runtime["odometer_wait_timed_out"] = False
+                runtime["odometer_completion_source"] = "manual_panel"
+                runtime["validation_error"] = None
+                rollover_event = self._odometer_rollover_events.get(runtime_id)
+                if rollover_event is not None:
+                    rollover_event.set()
             if runtime.get("journey_role") == "transient_stop":
                 self._transient.pop(runtime_id, None)
                 runtime["journey_role"] = "destination"
@@ -989,7 +1110,7 @@ class KnihaJizdManager:
             if not segment.get("classification_ready") and not segment.get(
                 "notification_sent_at"
             ):
-                await self._async_send_classification_notification(segment)
+                await self._async_schedule_classification_notification(segment)
 
     def _create_task(self, coro: Coroutine[Any, Any, Any], name: str) -> None:
         """Create a tracked Home Assistant task."""
@@ -1045,6 +1166,10 @@ class KnihaJizdManager:
                 "end_address_raw": None,
                 "start_latitude": location["latitude"],
                 "start_longitude": location["longitude"],
+                "start_location_source": location.get("coordinate_source"),
+                "start_location_coordinate_updated_at": location.get(
+                    "coordinate_updated_at"
+                ),
                 "end_latitude": None,
                 "end_longitude": None,
                 "purpose": None,
@@ -1108,7 +1233,10 @@ class KnihaJizdManager:
             segment["end_location_initial_address_raw"] = location["address_raw"]
             segment["end_location_initial_latitude"] = location["latitude"]
             segment["end_location_initial_longitude"] = location["longitude"]
-            segment["end_location_captured_at"] = _iso_utc(disconnected_at)
+            segment["end_location_coordinate_updated_at"] = location.get(
+                "coordinate_updated_at"
+            )
+            segment["end_location_captured_at"] = _iso_utc(datetime.now(UTC))
             segment["end_location_source"] = "android_auto_disconnect"
             segment["end_location_ready"] = self.location_settle_seconds <= 0
             self._closing[segment["id"]] = segment
@@ -1165,6 +1293,11 @@ class KnihaJizdManager:
                     segment, disconnected_at, start_odometer
                 )
             )
+            if segment.get("odometer_ready") and segment.get(
+                "manual_distance_override"
+            ):
+                self._odometer_completion_condition.notify_all()
+                return
             segment["odometer_updated_at"] = _iso_utc(odometer_updated_at)
             segment["odometer_wait_timed_out"] = False
             segment["odometer_completion_source"] = completion_source
@@ -1284,7 +1417,18 @@ class KnihaJizdManager:
         ):
             return
         previous_date = str(previous.get("date") or "")
-        if not previous_date:
+        current = self._active
+        if (
+            not previous_date
+            or not isinstance(current, dict)
+            or parking_boundary_details(
+                previous,
+                current,
+                self.return_context_hours * 60,
+                self.transient_radius,
+            )
+            is None
+        ):
             return
         await self.repository.async_reconcile_day(previous_date, start_odometer)
         await self._async_refresh_statistics()
@@ -1313,6 +1457,9 @@ class KnihaJizdManager:
                 "longitude": segment.get("end_location_initial_longitude")
                 if segment.get("end_location_initial_longitude") is not None
                 else segment.get("end_longitude"),
+                "coordinate_updated_at": segment.get(
+                    "end_location_coordinate_updated_at"
+                ),
             }
             self._set_segment_end_location(
                 segment, initial_location, "restart_initial_location_fallback"
@@ -1327,7 +1474,29 @@ class KnihaJizdManager:
         if segment.get("end_location_ready"):
             return
         location = self._capture_location()
-        self._set_segment_end_location(segment, location, "settled_phone_location")
+        coordinate_updated_at = _parse_datetime(
+            location.get("coordinate_updated_at")
+        )
+        if location_is_fresh(coordinate_updated_at, ended_at):
+            self._set_segment_end_location(
+                segment, location, "settled_phone_location"
+            )
+        else:
+            initial_location = {
+                "address": segment.get("end_location_initial_address")
+                or segment.get("end_address"),
+                "address_raw": segment.get("end_location_initial_address_raw")
+                or segment.get("end_address_raw")
+                or segment.get("end_address"),
+                "latitude": segment.get("end_location_initial_latitude"),
+                "longitude": segment.get("end_location_initial_longitude"),
+                "coordinate_updated_at": segment.get(
+                    "end_location_coordinate_updated_at"
+                ),
+            }
+            self._set_segment_end_location(
+                segment, initial_location, "stale_settled_location_rejected"
+            )
         await self._async_apply_previous_destination_to_new_active(segment)
         await self._async_save_runtime()
 
@@ -1358,10 +1527,14 @@ class KnihaJizdManager:
         source: str,
     ) -> None:
         """Apply one final endpoint consistently to a segment."""
-        segment["end_address"] = location.get("address")
-        segment["end_address_raw"] = location.get("address_raw")
+        if not segment.get("end_address_manual"):
+            segment["end_address"] = location.get("address")
+            segment["end_address_raw"] = location.get("address_raw")
         segment["end_latitude"] = location.get("latitude")
         segment["end_longitude"] = location.get("longitude")
+        segment["end_location_coordinate_updated_at"] = location.get(
+            "coordinate_updated_at"
+        )
         segment["end_location_ready"] = True
         segment["end_location_source"] = source
         segment["end_location_captured_at"] = _iso_utc(datetime.now(UTC))
@@ -1463,7 +1636,11 @@ class KnihaJizdManager:
         self, segment: dict[str, Any]
     ) -> None:
         """Settle and resolve the destination independently of the odometer."""
+        if segment.get("manual_resolution_requested_at"):
+            return
         await self._async_settle_end_location(segment)
+        if segment.get("manual_resolution_requested_at"):
+            return
         if _address_is_coordinate_fallback(segment.get("start_address")):
             learned_start = await self.repository.async_find_place(
                 _as_float(segment.get("start_latitude")),
@@ -1491,6 +1668,9 @@ class KnihaJizdManager:
                         or start_map_result["display_name"]
                     )
 
+        if segment.get("manual_resolution_requested_at"):
+            return
+
         trip_context = infer_trip_context(
             segment,
             self._statistics.get("last_segment"),
@@ -1517,19 +1697,6 @@ class KnihaJizdManager:
         )
         if await self._async_handle_configured_destination(segment):
             return
-        short_continuation = self._find_runtime_continuation(
-            segment, _IMPLICIT_TRANSIENT_STOP_MINUTES
-        )
-        if short_continuation is not None:
-            segment["transient_stop"] = {
-                "detected": True,
-                "kind": "very_short_stop",
-                "name": str(segment.get("end_address") or "Krátká mezizastávka"),
-                "detection_source": "very_short_continuation",
-                "max_duration_minutes": _IMPLICIT_TRANSIENT_STOP_MINUTES,
-            }
-            await self._async_hold_transient(segment)
-            return
         learned_place = await self.repository.async_find_place(
             _as_float(segment.get("end_latitude")),
             _as_float(segment.get("end_longitude")),
@@ -1538,6 +1705,8 @@ class KnihaJizdManager:
             self.private_radius,
             self.transient_radius,
         )
+        if segment.get("manual_resolution_requested_at"):
+            return
         if learned_place is not None:
             segment["map_estimate"] = learned_place.get("map_name") or learned_place.get(
                 "label"
@@ -1632,7 +1801,26 @@ class KnihaJizdManager:
             )
             return
 
+        # Known/configured places must win independently of network timing. Only
+        # an otherwise unknown destination can become an implicit quick stop.
+        short_continuation = self._find_runtime_continuation(
+            segment, _IMPLICIT_TRANSIENT_STOP_MINUTES
+        )
+        if short_continuation is not None:
+            segment["transient_stop"] = {
+                "detected": True,
+                "kind": "very_short_stop",
+                "name": str(segment.get("end_address") or "Krátká mezizastávka"),
+                "detection_source": "very_short_continuation",
+                "max_duration_minutes": _IMPLICIT_TRANSIENT_STOP_MINUTES,
+            }
+            await self._async_hold_transient(segment)
+            return
+
         candidates, map_result = await self._async_discover_destination(segment)
+
+        if segment.get("manual_resolution_requested_at"):
+            return
 
         if await self._async_handle_configured_destination(segment):
             return
@@ -1662,7 +1850,7 @@ class KnihaJizdManager:
         if str(segment.get("id")) in self._pending and not segment.get(
             "classification_ready"
         ):
-            await self._async_send_classification_notification(segment)
+            await self._async_schedule_classification_notification(segment)
 
     async def _async_discover_destination(
         self, segment: dict[str, Any]
@@ -1715,6 +1903,8 @@ class KnihaJizdManager:
         self, segment: dict[str, Any]
     ) -> bool:
         """Apply the configured home/company rules to a completed destination."""
+        if segment.get("manual_resolution_requested_at"):
+            return True
         addresses = (segment.get("end_address"), segment.get("map_address"))
         home_match = configured_place_match(
             segment.get("end_latitude"),
@@ -1786,6 +1976,8 @@ class KnihaJizdManager:
 
     async def _async_queue_pending(self, segment: dict[str, Any]) -> None:
         """Move a completed segment to the notification decision queue."""
+        if segment.get("manual_resolution_requested_at"):
+            return
         segment_id = str(segment["id"])
         segment["classification_prepared"] = True
         self._closing.pop(segment_id, None)
@@ -1793,7 +1985,7 @@ class KnihaJizdManager:
         segment.setdefault("pending_since", _iso_utc(datetime.now(UTC)))
         self._pending[segment_id] = segment
         await self._async_save_runtime()
-        await self._async_send_classification_notification(segment)
+        await self._async_schedule_classification_notification(segment)
         self._schedule_pending_review(segment)
 
     def _schedule_pending_review(self, segment: dict[str, Any]) -> None:
@@ -1851,6 +2043,8 @@ class KnihaJizdManager:
 
     async def _async_hold_transient(self, segment: dict[str, Any]) -> None:
         """Hold a likely intermediate stop until the whole journey is known."""
+        if segment.get("manual_resolution_requested_at"):
+            return
         segment_id = str(segment["id"])
         segment["journey_id"] = segment.get("journey_id") or uuid4().hex
         segment["journey_role"] = "transient_stop"
@@ -1942,9 +2136,14 @@ class KnihaJizdManager:
         preferred: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Attach a new segment to the latest compatible intermediate stop."""
-        candidates = [preferred] if preferred is not None else list(
-            self._transient.values()
-        )
+        candidates = [preferred] if preferred is not None else [
+            *self._transient.values(),
+            *(
+                item
+                for item in self._pending.values()
+                if self._pending_can_be_implicit_transient(item)
+            ),
+        ]
         candidates = [
             item
             for item in candidates
@@ -1954,9 +2153,38 @@ class KnihaJizdManager:
             key=lambda item: str(item.get("ended_at") or ""), reverse=True
         )
         for transient in candidates:
-            details = self._continuation_details(transient, current)
+            transient_id = str(transient.get("id") or "")
+            was_pending = self._pending.get(transient_id) is transient
+            details = self._continuation_details(
+                transient,
+                current,
+                max_gap_minutes=(
+                    _IMPLICIT_TRANSIENT_STOP_MINUTES if was_pending else None
+                ),
+            )
             if details is None:
                 continue
+            if was_pending:
+                self._pending.pop(transient_id, None)
+                transient["journey_role"] = "transient_stop"
+                transient["transient_stop"] = {
+                    "detected": True,
+                    "kind": "very_short_stop",
+                    "name": str(
+                        transient.get("end_address") or "Krátká mezizastávka"
+                    ),
+                    "detection_source": "pending_reconsidered_on_continuation",
+                    "max_duration_minutes": _IMPLICIT_TRANSIENT_STOP_MINUTES,
+                }
+                transient["notification_superseded_by_continuation"] = True
+                transient.pop("notification_suppressed_reason", None)
+                transient["notification_task_scheduled"] = False
+                self._transient[transient_id] = transient
+                if transient.get("notification_sent_at"):
+                    self._create_task(
+                        self._async_clear_classification_notification(transient_id),
+                        f"{DOMAIN}_clear_short_stop_notification_{transient_id}",
+                    )
             current["journey_id"] = transient.get("journey_id") or uuid4().hex
             current["transient_continuation"] = details
             current["return_context"] = (
@@ -1966,6 +2194,17 @@ class KnihaJizdManager:
             transient["continuation"] = details
             return transient
         return None
+
+    @staticmethod
+    def _pending_can_be_implicit_transient(segment: dict[str, Any]) -> bool:
+        """Limit retroactive quick-stop promotion to genuinely unknown places."""
+        return bool(
+            not segment.get("classification_ready")
+            and not segment.get("persisted")
+            and not segment.get("configured_place")
+            and not segment.get("known_place_exception")
+            and not segment.get("matched_place_id")
+        )
 
     def _continuation_details(
         self,
@@ -2141,10 +2380,84 @@ class KnihaJizdManager:
             next_segment["start_odometer_source"] = "previous_segment_final"
             next_segment["validation_error"] = None
 
+    async def _async_schedule_classification_notification(
+        self, segment: dict[str, Any]
+    ) -> None:
+        """Expose the question now, but delay nonessential phone interruption."""
+        segment_id = str(segment.get("id") or "")
+        if (
+            not segment_id
+            or segment.get("classification_ready")
+            or segment.get("notification_sent_at")
+            or segment.get("notification_task_scheduled")
+            or self._pending.get(segment_id) is not segment
+        ):
+            return
+
+        immediate = bool(
+            segment.get("known_place_exception")
+            or segment.get("configured_place")
+        )
+        ended_at = _parse_datetime(segment.get("ended_at")) or datetime.now(UTC)
+        due_at = (
+            datetime.now(UTC)
+            if immediate
+            else ended_at
+            + timedelta(minutes=PHONE_NOTIFICATION_GRACE_MINUTES)
+        )
+        segment["notification_due_at"] = _iso_utc(due_at)
+        segment["notification_task_scheduled"] = True
+        await self._async_save_runtime()
+        self._create_task(
+            self._async_deliver_scheduled_notification(segment_id),
+            f"{DOMAIN}_classification_notification_{segment_id}",
+        )
+
+    async def _async_deliver_scheduled_notification(self, segment_id: str) -> None:
+        """Send one useful unresolved question after the short-stop grace period."""
+        segment = self._pending.get(segment_id)
+        if segment is None:
+            return
+        try:
+            due_at = _parse_datetime(segment.get("notification_due_at"))
+            if due_at is not None:
+                while True:
+                    remaining = (due_at - datetime.now(UTC)).total_seconds()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(remaining, 60.0))
+                    if self._pending.get(segment_id) is not segment or segment.get(
+                        "classification_ready"
+                    ):
+                        return
+
+            if self._pending.get(segment_id) is not segment or segment.get(
+                "classification_ready"
+            ):
+                return
+            allowed, reason = mobile_notification_policy(segment)
+            segment["notification_reason"] = reason
+            if not allowed:
+                segment["notification_suppressed_reason"] = reason
+                await self._async_save_runtime()
+                return
+            segment.pop("notification_suppressed_reason", None)
+            await self._async_send_classification_notification(segment)
+        finally:
+            segment["notification_task_scheduled"] = False
+
     async def _async_send_classification_notification(
         self, segment: dict[str, Any], validation_message: str | None = None
     ) -> None:
         """Ask the phone to classify an unknown destination."""
+        if (
+            segment.get("classification_ready")
+            or (
+                validation_message is None
+                and segment.get("notification_sent_at")
+            )
+        ):
+            return
         segment_id = str(segment["id"])
         estimate = str(segment.get("map_estimate") or "Neznámý cíl")
         candidates = _map_candidates(segment)
@@ -2204,7 +2517,11 @@ class KnihaJizdManager:
             message += " Tachometr se doplní automaticky na pozadí."
         service = self.notify_service
         if not self.hass.services.has_service("notify", service):
-            _LOGGER.error(
+            segment["notification_error"] = (
+                f"notify.{service} is not registered"
+            )
+            await self._async_save_runtime()
+            _LOGGER.warning(
                 "Notification service notify.%s does not exist; segment %s remains pending",
                 service,
                 segment_id,
@@ -2240,7 +2557,7 @@ class KnihaJizdManager:
                     "title": "Osobní KM",
                 },
             ]
-        else:
+        elif candidates:
             actions = [
                 {
                     "action": _action_id(ACTION_CONFIRM, segment_id),
@@ -2258,19 +2575,48 @@ class KnihaJizdManager:
                     "title": "Osobní KM",
                 },
             ]
-        await self.hass.services.async_call(
-            "notify",
-            service,
-            {
-                "title": "Kniha jízd",
-                "message": message,
-                "data": {
-                    "tag": f"kniha_jizd_{segment_id}",
-                    "actions": actions,
+        else:
+            actions = [
+                {
+                    "action": _action_id(ACTION_BUSINESS, segment_id),
+                    "title": "Služební bez klienta",
                 },
-            },
-            blocking=True,
-        )
+                {
+                    "action": _action_id(ACTION_NEW, segment_id),
+                    "title": "Zadat klienta",
+                    "behavior": "textInput",
+                    "textInputButtonTitle": "Uložit",
+                    "textInputPlaceholder": "Klient nebo účel",
+                },
+                {
+                    "action": _action_id(ACTION_PRIVATE, segment_id),
+                    "title": "Osobní KM",
+                },
+            ]
+        try:
+            await self.hass.services.async_call(
+                "notify",
+                service,
+                {
+                    "title": "Kniha jízd",
+                    "message": message,
+                    "data": {
+                        "tag": f"kniha_jizd_{segment_id}",
+                        "actions": actions,
+                    },
+                },
+                blocking=True,
+            )
+        except Exception as err:  # noqa: BLE001 - the panel remains authoritative
+            segment["notification_error"] = f"{type(err).__name__}: {err}"
+            await self._async_save_runtime()
+            _LOGGER.warning(
+                "Could not notify phone about pending segment %s: %s",
+                segment_id,
+                err,
+            )
+            return
+        segment.pop("notification_error", None)
         segment["notification_sent_at"] = _iso_utc(datetime.now(UTC))
         segment["notification_tag"] = f"kniha_jizd_{segment_id}"
         await self._async_save_runtime()
@@ -2295,87 +2641,135 @@ class KnihaJizdManager:
                 "Could not clear trip notification for segment %s", segment_id
             )
 
-    async def _async_process_notification_action(
-        self, event_data: dict[str, Any]
-    ) -> None:
-        """Classify and persist a pending segment from a mobile app action."""
-        match = _ACTION_PATTERN.match(str(event_data.get("action", "")))
-        if match is None:
-            return
-        action, segment_id = match.groups()
-
+    async def async_resolve_trip(
+        self,
+        segment_id: str,
+        action: str,
+        value: str = "",
+        candidate_index: int | None = None,
+        channel: str = "panel",
+    ) -> dict[str, Any]:
+        """Resolve one pending question identically from the panel or phone."""
+        normalized_action = str(action or "").strip().upper()
+        if normalized_action not in {
+            ACTION_CONFIRM,
+            ACTION_NEW,
+            ACTION_BUSINESS,
+            ACTION_PRIVATE,
+            ACTION_RETURN,
+        }:
+            raise ValueError("unsupported trip resolution action")
+        if candidate_index is not None and (
+            isinstance(candidate_index, bool)
+            or candidate_index < 1
+            or candidate_index > 3
+        ):
+            raise ValueError("candidate_index must be an integer from 1 to 3")
         async with self._resolution_lock:
-            original = self._pending.get(segment_id)
-            if original is None:
-                await self._async_clear_classification_notification(segment_id)
-                return
-            segment = original
-            reply_text = str(
-                event_data.get("reply_text") or event_data.get("replyText") or ""
-            ).strip()
-            candidates = _map_candidates(segment)
-            selected_candidate: dict[str, Any] | None = None
-            learned_label: str | None = None
-            place_role: str | None = None
-            learn_place = True
-            return_context = segment.get("return_context")
-            transient_stop = segment.get("transient_stop")
-            expired_transient = (
-                isinstance(transient_stop, dict)
-                and bool(transient_stop.get("expired"))
+            return await self._async_resolve_trip_locked(
+                segment_id,
+                normalized_action,
+                str(value or "").strip(),
+                candidate_index,
+                channel,
             )
 
-            if action == ACTION_RETURN:
-                await self._async_finalize_return(
-                    segment,
-                    source="notification_return",
-                    learn_place=not expired_transient,
-                )
-                self._last_notification_action = {
-                    "segment_id": segment_id,
-                    "action": action,
-                    "processed_at": _iso_utc(datetime.now(UTC)),
-                }
-                await self._async_clear_classification_notification(segment_id)
-                return
+    async def _async_resolve_trip_locked(
+        self,
+        segment_id: str,
+        action: str,
+        value: str,
+        candidate_index: int | None,
+        channel: str,
+    ) -> dict[str, Any]:
+        """Apply one validated pending decision while holding the resolution lock."""
+        segment = self._pending.get(segment_id)
+        if segment is None:
+            await self._async_clear_classification_notification(segment_id)
+            return {"updated": 0, "state": "already_resolved"}
+
+        candidates = _map_candidates(segment)
+        selected_candidate: dict[str, Any] | None = None
+        learned_label: str | None = None
+        place_role: str | None = None
+        learn_place = True
+        return_context = segment.get("return_context")
+        transient_stop = segment.get("transient_stop")
+        expired_transient = bool(
+            isinstance(transient_stop, dict) and transient_stop.get("expired")
+        )
+
+        if action == ACTION_RETURN:
+            if not isinstance(return_context, dict) or not (
+                return_context.get("previous_segment_id")
+                or return_context.get("previous_purpose")
+            ):
+                raise ValueError("this trip has no confirmed business return context")
+            await self._async_finalize_return(
+                segment,
+                source=(
+                    "notification_return"
+                    if channel == "notification"
+                    else "manual_panel_return"
+                ),
+                learn_place=False,
+            )
+        else:
             if action == ACTION_CONFIRM:
-                purpose = str(segment.get("map_estimate") or "Neznámý zákazník")
-                trip_type = TRIP_TYPE_BUSINESS
-                place_role = PLACE_ROLE_CLIENT
-                learned_label = purpose
-                if candidates:
-                    selected_candidate = candidates[0]
-            elif action == ACTION_NEW:
-                if not reply_text:
-                    if isinstance(return_context, dict):
-                        purpose = str(
-                            segment.get("map_estimate") or "Neznámý zákazník"
-                        )
-                        if candidates:
-                            selected_candidate = candidates[0]
-                    else:
-                        await self._async_send_classification_notification(
-                            original,
-                            "Název zákazníka nebyl vyplněn. Zkuste to prosím znovu.",
-                        )
-                        return
-                elif reply_text.isdigit():
-                    candidate_number = int(reply_text)
-                    if not 1 <= candidate_number <= min(3, len(candidates)):
-                        await self._async_send_classification_notification(
-                            original,
-                            "Toto číslo návrhu není dostupné. Zkuste to prosím znovu.",
-                        )
-                        return
-                    selected_candidate = candidates[candidate_number - 1]
+                if segment.get("known_place_exception"):
+                    purpose = str(
+                        segment.get("map_estimate")
+                        or segment.get("return_destination_label")
+                        or ""
+                    )
+                    trip_type = TRIP_TYPE_BUSINESS
+                    learn_place = False
+                elif candidate_index is not None:
+                    if candidate_index > len(candidates):
+                        raise ValueError("selected map candidate is not available")
+                    selected_candidate = candidates[candidate_index - 1]
                     purpose = str(selected_candidate["name"])
+                    trip_type = TRIP_TYPE_BUSINESS
+                    learned_label = purpose
+                    place_role = PLACE_ROLE_CLIENT
+                    learn_place = True
                 else:
-                    purpose = reply_text
+                    # The phone's generic confirm action intentionally accepts
+                    # the first displayed proposal. Panel buttons always send
+                    # their explicit candidate index.
+                    selected_candidate = candidates[0] if candidates else None
+                    purpose = str(
+                        (selected_candidate or {}).get("name")
+                        or segment.get("map_estimate")
+                        or ""
+                    )
+                    trip_type = TRIP_TYPE_BUSINESS
+                    learned_label = purpose or None
+                    place_role = PLACE_ROLE_CLIENT if purpose else None
+                    learn_place = bool(purpose)
+            elif action == ACTION_NEW:
+                selected_value = value
+                if candidate_index is None and selected_value.isdigit():
+                    candidate_index = int(selected_value)
+                    selected_value = ""
+                if candidate_index is not None:
+                    if not 1 <= candidate_index <= min(3, len(candidates)):
+                        raise ValueError("selected map candidate is not available")
+                    selected_candidate = candidates[candidate_index - 1]
+                    purpose = str(selected_candidate["name"])
+                elif selected_value:
+                    purpose = selected_value
+                else:
+                    raise ValueError("enter a customer or purpose")
                 trip_type = TRIP_TYPE_BUSINESS
-                place_role = PLACE_ROLE_CLIENT
                 learned_label = purpose
+                place_role = PLACE_ROLE_CLIENT
                 if isinstance(return_context, dict):
                     segment["journey_role"] = "destination"
+            elif action == ACTION_BUSINESS:
+                purpose = ""
+                trip_type = TRIP_TYPE_BUSINESS
+                learn_place = False
             elif action == ACTION_PRIVATE:
                 purpose = "Soukromá"
                 trip_type = TRIP_TYPE_PRIVATE
@@ -2388,6 +2782,8 @@ class KnihaJizdManager:
                     or segment.get("end_address")
                     or "Soukromé místo"
                 )
+            else:  # guarded by async_resolve_trip
+                raise ValueError("unsupported trip resolution action")
 
             if selected_candidate is not None:
                 segment["map_estimate"] = purpose
@@ -2399,20 +2795,55 @@ class KnihaJizdManager:
                 trip_type=trip_type,
                 source=(
                     "notification_map_candidate"
-                    if selected_candidate is not None
+                    if channel == "notification" and selected_candidate is not None
                     else "notification"
+                    if channel == "notification"
+                    else "manual_panel_map_candidate"
+                    if selected_candidate is not None
+                    else "manual_panel"
                 ),
                 learn_place=learn_place,
                 learned_label=learned_label,
                 place_role=place_role,
             )
-            self._last_notification_action = {
-                "segment_id": segment_id,
-                "action": action,
-                "processed_at": _iso_utc(datetime.now(UTC)),
-            }
-            await self._async_clear_classification_notification(segment_id)
-            self._notify_listeners()
+
+        self._last_notification_action = {
+            "segment_id": segment_id,
+            "action": action,
+            "channel": channel,
+            "processed_at": _iso_utc(datetime.now(UTC)),
+        }
+        await self._async_clear_classification_notification(segment_id)
+        self._notify_listeners()
+        return {
+            "updated": 1,
+            "state": "saved" if segment.get("persisted") else "waiting_odometer",
+        }
+
+    async def _async_process_notification_action(
+        self, event_data: dict[str, Any]
+    ) -> None:
+        """Classify and persist a pending segment from a mobile app action."""
+        match = _ACTION_PATTERN.match(str(event_data.get("action", "")))
+        if match is None:
+            return
+        action, segment_id = match.groups()
+        reply_text = str(
+            event_data.get("reply_text") or event_data.get("replyText") or ""
+        ).strip()
+        try:
+            await self.async_resolve_trip(
+                segment_id,
+                action,
+                reply_text,
+                channel="notification",
+            )
+        except ValueError as err:
+            segment = self._pending.get(segment_id)
+            if segment is not None:
+                await self._async_send_classification_notification(
+                    segment, f"{err}. Zkuste to prosím znovu."
+                )
 
     async def _async_finalize_return(
         self,
@@ -2454,6 +2885,10 @@ class KnihaJizdManager:
         place_role: str | None = None,
     ) -> None:
         """Store a classification immediately and persist once km are ready."""
+        if segment.get("manual_resolution_requested_at") and not source.startswith(
+            "manual_panel"
+        ):
+            return
         if segment.get("configured_place") in {"home", "company"}:
             # Home/company already have an authoritative configured zone. The
             # trip may be private or business without creating another map place.
@@ -2699,9 +3134,27 @@ class KnihaJizdManager:
         """Capture GPS attributes and the full geocoded address."""
         gps_state = self.hass.states.get(self.gps_entity)
         address_state = self.hass.states.get(self.address_entity)
-        latitude, longitude, _ = _location_coordinates(gps_state, address_state)
+        details = _location_coordinate_details(gps_state, address_state)
+        latitude = details.get("latitude") if details is not None else None
+        longitude = details.get("longitude") if details is not None else None
         address_raw: str | None = None
-        if address_state is not None and address_state.state.casefold() not in UNAVAILABLE_STATES:
+        coordinate_updated_at = (
+            details.get("updated_at") if details is not None else None
+        )
+        address_updated_at = (
+            _state_updated_at(address_state) if address_state is not None else None
+        )
+        address_matches_fix = bool(
+            coordinate_updated_at is None
+            or address_updated_at is None
+            or address_updated_at
+            >= coordinate_updated_at - timedelta(minutes=5)
+        )
+        if (
+            address_matches_fix
+            and address_state is not None
+            and address_state.state.casefold() not in UNAVAILABLE_STATES
+        ):
             address_raw = address_state.state.strip()
         address = shorten_address(address_raw)
         if not address and latitude is not None and longitude is not None:
@@ -2712,6 +3165,12 @@ class KnihaJizdManager:
             "longitude": longitude,
             "address": address,
             "address_raw": address_raw,
+            "coordinate_source": (
+                details.get("source_detail") if details is not None else None
+            ),
+            "coordinate_updated_at": _iso_utc(coordinate_updated_at),
+            "address_updated_at": _iso_utc(address_updated_at),
+            "accuracy_m": details.get("accuracy_m") if details is not None else None,
         }
 
     async def _async_save_runtime(self) -> None:
@@ -2744,15 +3203,53 @@ def _action_id(action: str, segment_id: str) -> str:
 def _location_coordinates(
     gps_state: State | None, address_state: State | None
 ) -> tuple[float | None, float | None, str | None]:
-    """Read GPS first and use Companion geocoded Location as a fallback."""
+    """Return coordinates from the freshest trustworthy phone source."""
+    selected = _location_coordinate_details(gps_state, address_state)
+    if selected is None:
+        return None, None, None
+    return (
+        selected["latitude"],
+        selected["longitude"],
+        str(selected["source_detail"]),
+    )
+
+
+def _location_coordinate_details(
+    gps_state: State | None, address_state: State | None
+) -> dict[str, Any] | None:
+    """Build and rank valid coordinate candidates with their update times."""
+    candidates: list[dict[str, Any]] = []
     for source, state in (("gps_entity", gps_state), ("address_entity", address_state)):
         if state is None or state.state.casefold() in UNAVAILABLE_STATES:
             continue
         coordinates = coordinates_from_state(state.state, state.attributes)
         if coordinates is not None:
             latitude, longitude, representation = coordinates
-            return latitude, longitude, f"{source}:{representation}"
-    return None, None, None
+            accuracy = _as_float(
+                state.attributes.get("gps_accuracy")
+                if state.attributes.get("gps_accuracy") is not None
+                else state.attributes.get("accuracy")
+            )
+            candidates.append(
+                {
+                    "source": source,
+                    "source_detail": f"{source}:{representation}",
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "updated_at": _state_updated_at(state),
+                    "accuracy_m": accuracy,
+                }
+            )
+    return select_coordinate_candidate(candidates)
+
+
+def _state_updated_at(state: State) -> datetime:
+    """Read an integration timestamp before falling back to HA metadata."""
+    return (
+        _parse_datetime(state.attributes.get("last_updated"))
+        or _parse_datetime(state.attributes.get("timestamp"))
+        or _ensure_utc(state.last_updated)
+    )
 
 
 def _odometer_details(state: State | None) -> tuple[float | None, str | None]:
@@ -2857,7 +3354,8 @@ def _map_candidates(segment: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         candidate
         for candidate in candidates
-        if isinstance(candidate, dict) and candidate.get("name")
+        if isinstance(candidate, dict)
+        and str(candidate.get("name") or "").strip()
     ]
 
 
@@ -2892,10 +3390,14 @@ def _panel_trip_row(segment: dict[str, Any], status: str) -> dict[str, Any]:
         "needs_review": bool(segment.get("needs_review")),
         "review_reason": segment.get("review_reason"),
         "decision": decision,
+        "question": panel_question(segment, status),
         "odometer_ready": bool(segment.get("odometer_ready") or status == "saved"),
         "odometer_completion_source": segment.get("odometer_completion_source"),
         "status": status,
-        "editable": segment.get("ended_at") is not None,
+        "editable": bool(
+            segment.get("ended_at") is not None
+            and status not in {"driving", "processing_destination"}
+        ),
     }
 
 
@@ -2906,6 +3408,8 @@ def _classification_decision(segment: dict[str, Any]) -> dict[str, Any]:
     base_source = source.split(":", 1)[1] if inherited else source
     labels = {
         "manual_panel": "Ruční oprava v panelu",
+        "manual_panel_return": "Služební návrat potvrzený v panelu",
+        "manual_panel_map_candidate": "Mapový návrh potvrzený v panelu",
         "notification": "Potvrzení z telefonu",
         "notification_map_candidate": "Mapový návrh potvrzený z telefonu",
         "configured_company": "Nakonfigurovaná firemní zóna",
@@ -2928,15 +3432,6 @@ def _classification_decision(segment: dict[str, Any]) -> dict[str, Any]:
     radius = segment.get("matched_place_radius_m")
     match_method = segment.get("matched_place_method")
     selected_candidate = segment.get("selected_map_candidate")
-    if not isinstance(selected_candidate, dict):
-        candidates = segment.get("map_candidates")
-        selected_candidate = (
-            candidates[0]
-            if isinstance(candidates, list)
-            and candidates
-            and isinstance(candidates[0], dict)
-            else None
-        )
     if isinstance(selected_candidate, dict) and distance is None:
         distance = selected_candidate.get("distance_m")
         radius = segment.get("candidate_search_radius_m")
@@ -2997,6 +3492,14 @@ def _classification_decision(segment: dict[str, Any]) -> dict[str, Any]:
             segment.get("candidate_search_cache_hit")
         ),
         "candidate_search_error": segment.get("candidate_search_error"),
+        "suggested_candidates": [
+            {
+                "name": candidate.get("name"),
+                "distance_m": candidate.get("distance_m"),
+                "score": candidate.get("score"),
+            }
+            for candidate in _map_candidates(segment)[:3]
+        ],
     }
 
 

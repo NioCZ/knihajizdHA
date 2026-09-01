@@ -34,7 +34,7 @@ class KnihaJizdReadyBinarySensor(KnihaJizdEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return True when trigger, GPS, odometer and notify service work."""
+        """Return True when the three inputs required for logging work."""
         return bool(self.manager.diagnostics["ready"])
 
     @property

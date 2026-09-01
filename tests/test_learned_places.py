@@ -555,6 +555,55 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertEqual(converted["trip_type"], "private")
             self.assertIsNone(converted.get("radius_m"))
 
+    def test_automatic_short_stop_never_overwrites_known_client(self) -> None:
+        """A timing-dependent transient inference must preserve a learned client."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository._learn_place_sync(
+                {
+                    "id": "hospital",
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "address": "Pavilon A",
+                    "label": "Thomayerova nemocnice",
+                    "map_name": "Fakultní Thomayerova nemocnice",
+                    "trip_type": "business",
+                    "place_role": "client",
+                    "radius_m": 450,
+                }
+            )
+            repository._learn_place_sync(
+                {
+                    "id": "automatic-stop",
+                    "latitude": 50.00005,
+                    "longitude": 14.0,
+                    "address": "Pavilon A",
+                    "label": "Krátká zastávka",
+                    "map_name": "Parkoviště u benzinky",
+                    "trip_type": "contextual",
+                    "place_role": "transient",
+                    "radius_m": 200,
+                    "transient_capable": True,
+                }
+            )
+
+            place = json.loads(
+                repository.places_path.read_text(encoding="utf-8")
+            )["places"][0]
+
+            self.assertEqual(place["label"], "Thomayerova nemocnice")
+            self.assertEqual(place["map_name"], "Fakultní Thomayerova nemocnice")
+            self.assertEqual(place["trip_type"], "business")
+            self.assertEqual(place["trip_types"], ["business"])
+            self.assertEqual(place["place_role"], "client")
+            self.assertEqual(place["radius_m"], 450)
+            self.assertTrue(place["transient_capable"])
+
     def test_place_management_updates_merges_and_deletes_records(self) -> None:
         """Expose all requested place-management operations over stable IDs."""
         test_output = ROOT / "test-output"

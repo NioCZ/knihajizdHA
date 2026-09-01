@@ -56,7 +56,11 @@ class KnihaJizdHistoryView(HomeAssistantView):
         manager = self._loaded_manager()
         if manager is None:
             raise web.HTTPServiceUnavailable(text="Kniha jízd is not loaded")
-        return self.json(await manager.async_get_history_data(month, selected_date))
+        response = self.json(
+            await manager.async_get_history_data(month, selected_date)
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     def _loaded_manager(self) -> KnihaJizdManager | None:
         """Find the single loaded runtime manager."""

@@ -98,6 +98,30 @@ def continuation_details(
     max_distance_meters: float,
 ) -> dict[str, Any] | None:
     """Verify that a segment really continues after one short parked stop."""
+    details = parking_boundary_details(
+        previous, current, max_gap_minutes, max_distance_meters
+    )
+    if details is None:
+        return None
+
+    previous_odometer = _number(previous.get("end_odometer_km"))
+    current_odometer = _number(current.get("start_odometer_km"))
+    odometer_continuity: bool | None = None
+    if previous_odometer is not None and current_odometer is not None:
+        odometer_continuity = abs(previous_odometer - current_odometer) <= 1.0
+        if not odometer_continuity:
+            return None
+
+    return {**details, "odometer_continuity": odometer_continuity}
+
+
+def parking_boundary_details(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    max_gap_minutes: float,
+    max_distance_meters: float,
+) -> dict[str, Any] | None:
+    """Verify time and place continuity without assuming an odometer boundary."""
     ended_at = _parse_datetime(previous.get("ended_at"))
     started_at = _parse_datetime(current.get("started_at"))
     if ended_at is None or started_at is None:
@@ -126,19 +150,10 @@ def continuation_details(
             return None
         match_method = "address"
 
-    previous_odometer = _number(previous.get("end_odometer_km"))
-    current_odometer = _number(current.get("start_odometer_km"))
-    odometer_continuity: bool | None = None
-    if previous_odometer is not None and current_odometer is not None:
-        odometer_continuity = abs(previous_odometer - current_odometer) <= 1.0
-        if not odometer_continuity:
-            return None
-
     return {
         "gap_minutes": round(gap_seconds / 60, 1),
         "match_method": match_method,
         "distance_m": round(distance, 1) if distance is not None else None,
-        "odometer_continuity": odometer_continuity,
     }
 
 

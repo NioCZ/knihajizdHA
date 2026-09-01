@@ -92,3 +92,80 @@ assert.deepEqual(mapRequests[0], {
 assert.equal(mapRequests[1].method, "GET");
 assert.equal(mapRequests[1].path, "kniha_jizd/map");
 assert.equal(panel._mapMessage, "Označený bod byl odstraněn.");
+
+const staleDraft = {
+  start: "Start",
+  end: "Ruční cíl",
+  distance: "12",
+  purpose: "Klient",
+  type: "business",
+  confirmedAt: Date.now() - 60_000,
+};
+panel._tripDrafts.set("trip-1", staleDraft);
+const staleHtml = panel._tripTable([
+  {
+    id: "trip-1",
+    started_at: "2026-08-25T08:00:00+00:00",
+    start_address: "Start",
+    end_address: "Starý serverový cíl",
+    distance_km: 10,
+    purpose: "",
+    trip_type: "business",
+    editable: true,
+    status: "saved",
+    odometer_ready: true,
+  },
+]);
+
+assert.equal(panel._tripDrafts.get("trip-1"), staleDraft);
+assert.match(staleHtml, /Ruční cíl/);
+assert.match(staleHtml, /Uloženo/);
+
+panel._tripTable([
+  {
+    id: "trip-1",
+    started_at: "2026-08-25T08:00:00+00:00",
+    start_address: "Start",
+    end_address: "Ruční cíl",
+    distance_km: 12,
+    purpose: "Klient",
+    trip_type: "business",
+    editable: true,
+    status: "saved",
+    odometer_ready: true,
+  },
+]);
+assert.equal(panel._tripDrafts.has("trip-1"), false);
+
+const resolutionCalls = [];
+panel._hass = {
+  async callService(domain, service, payload) {
+    resolutionCalls.push({ domain, service, payload });
+  },
+  async callApi(method, path) {
+    assert.equal(method, "GET");
+    assert.equal(path, "kniha_jizd/overview");
+    return { diagnostics: { today_trips: [] }, statistics: {} };
+  },
+};
+const questionCard = {
+  dataset: { segmentId: "pending-1" },
+  querySelector() {
+    return { value: "" };
+  },
+};
+await panel._resolveTrip({
+  dataset: { action: "business" },
+  closest(selector) {
+    assert.equal(selector, ".question-card");
+    return questionCard;
+  },
+});
+
+assert.deepEqual(resolutionCalls, [
+  {
+    domain: "kniha_jizd",
+    service: "resolve_trip",
+    payload: { segment_id: "pending-1", action: "business" },
+  },
+]);

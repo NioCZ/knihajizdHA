@@ -25,7 +25,9 @@ class KnihaJizdPlacesView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         """Return editable learned-place records."""
         manager = self._manager(request)
-        return self.json(await manager.async_get_places_data())
+        response = self.json(await manager.async_get_places_data())
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     async def post(self, request: web.Request) -> web.Response:
         """Apply one validated place-management action."""
@@ -42,7 +44,9 @@ class KnihaJizdPlacesView(HomeAssistantView):
             result = await manager.async_manage_place(payload)
         except ValueError as err:
             return web.json_response({"error": str(err)}, status=400)
-        return self.json(result)
+        response = self.json(result)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     def _manager(self, request: web.Request) -> KnihaJizdManager:
         """Require administrator access and return the loaded manager."""

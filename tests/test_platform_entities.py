@@ -54,6 +54,7 @@ class _Manager:
         "pending_count": 2,
         "transient_count": 3,
     }
+    public_diagnostics = diagnostics
     statistics = {
         "today_business_km": 12.5,
         "today_private_km": 3.0,
@@ -142,6 +143,7 @@ class PlatformEntityTest(unittest.TestCase):
         last_trip = SENSOR_MODULE.KnihaJizdLastTripSensor(manager, entry)
 
         self.assertEqual(status.native_value, "idle")
+        self.assertEqual(status.extra_state_attributes, manager.public_diagnostics)
         self.assertEqual(business.native_value, 12.5)
         self.assertEqual(pending.native_value, 6)
         self.assertEqual(last_trip.native_value, 4.5)
@@ -157,6 +159,7 @@ class PlatformEntityTest(unittest.TestCase):
         self.assertTrue(ready.is_on)
         self.assertEqual(button._kind, "export_button")
         self.assertEqual(export.native_value, "ready")
+        self.assertNotIn("download_url", export.extra_state_attributes)
 
     def test_panel_exists_falls_back_on_older_home_assistant(self) -> None:
         """Use frontend_panels when the newer helper is unavailable."""

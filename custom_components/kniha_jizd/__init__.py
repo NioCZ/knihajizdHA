@@ -17,14 +17,17 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    ATTR_MONTH,
+    ATTR_ACTION,
+    ATTR_CANDIDATE_INDEX,
     ATTR_DISTANCE_KM,
     ATTR_END_ADDRESS,
+    ATTR_MONTH,
     ATTR_PATH,
     ATTR_PURPOSE,
     ATTR_SEGMENT_ID,
     ATTR_START_ADDRESS,
     ATTR_TRIP_TYPE,
+    ATTR_VALUE,
     CONF_COMPANY_ADDRESS,
     CONF_COMPANY_LATITUDE,
     CONF_COMPANY_LABEL,
@@ -71,6 +74,7 @@ from .const import (
     DEFAULT_TRANSIENT_RADIUS,
     DOMAIN,
     SERVICE_EXPORT_EXCEL,
+    SERVICE_RESOLVE_TRIP,
     SERVICE_UPDATE_TRIP,
 )
 from .export import export_excel
@@ -98,6 +102,20 @@ UPDATE_TRIP_SERVICE_SCHEMA = vol.Schema(
         vol.Optional(ATTR_DISTANCE_KM): vol.All(vol.Coerce(float), vol.Range(min=0)),
     }
 )
+RESOLVE_TRIP_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_SEGMENT_ID): str,
+        vol.Required(ATTR_ACTION): vol.All(
+            str,
+            lambda value: value.strip().lower(),
+            vol.In(["confirm", "new", "business", "private", "return"]),
+        ),
+        vol.Optional(ATTR_VALUE, default=""): str,
+        vol.Optional(ATTR_CANDIDATE_INDEX): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=3)
+        ),
+    }
+)
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 
 
@@ -109,11 +127,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     from .download import KnihaJizdDownloadView
     from .history_api import KnihaJizdHistoryView
     from .map_api import KnihaJizdMapView
+    from .overview_api import KnihaJizdOverviewView
     from .places_api import KnihaJizdPlacesView
 
     hass.http.register_view(KnihaJizdDownloadView(hass))
     hass.http.register_view(KnihaJizdHistoryView(hass))
     hass.http.register_view(KnihaJizdMapView(hass))
+    hass.http.register_view(KnihaJizdOverviewView(hass))
     hass.http.register_view(KnihaJizdPlacesView(hass))
 
     async def _async_export_service(call: ServiceCall) -> dict[str, Any]:
@@ -188,6 +208,27 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_UPDATE_TRIP,
         _async_update_trip_service,
         schema=UPDATE_TRIP_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_resolve_trip_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_resolve_trip(
+                str(call.data[ATTR_SEGMENT_ID]),
+                str(call.data[ATTR_ACTION]),
+                str(call.data[ATTR_VALUE]),
+                call.data.get(ATTR_CANDIDATE_INDEX),
+                channel="panel",
+            )
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESOLVE_TRIP,
+        _async_resolve_trip_service,
+        schema=RESOLVE_TRIP_SERVICE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     return True

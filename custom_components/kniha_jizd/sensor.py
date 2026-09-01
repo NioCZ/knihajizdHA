@@ -65,7 +65,7 @@ class KnihaJizdStatusSensor(KnihaJizdEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return health checks and workflow counters."""
-        return self.manager.diagnostics
+        return self.manager.public_diagnostics
 
 
 class KnihaJizdStatisticSensor(KnihaJizdEntity, SensorEntity):
@@ -151,7 +151,7 @@ class KnihaJizdLastTripSensor(KnihaJizdEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return useful last-trip fields without bulky map candidates."""
+        """Return a privacy-safe last-trip summary."""
         segment = self.manager.statistics.get("last_segment")
         if not isinstance(segment, dict):
             return self._kind_attributes()
@@ -160,9 +160,6 @@ class KnihaJizdLastTripSensor(KnihaJizdEntity, SensorEntity):
             "date",
             "started_at",
             "ended_at",
-            "start_address",
-            "end_address",
-            "purpose",
             "trip_type",
             "journey_role",
             "journey_id",
@@ -200,5 +197,10 @@ class KnihaJizdExportSensor(KnihaJizdEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return path, timestamp, link and any failure."""
-        return {**self._kind_attributes(), **self.manager.export_status}
+        """Return export state without leaking a download token or local path."""
+        status = self.manager.export_status
+        safe_keys = ("state", "month", "filename", "generated_at", "expires_at", "error")
+        return {
+            **self._kind_attributes(),
+            **{key: status.get(key) for key in safe_keys},
+        }

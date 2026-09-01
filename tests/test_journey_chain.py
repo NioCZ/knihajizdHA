@@ -96,6 +96,33 @@ class JourneyChainTest(unittest.TestCase):
                     )
                 )
 
+    def test_daily_boundary_requires_same_parking_place_but_not_final_odometer(self) -> None:
+        """Allow next-start reconciliation only at the previous trip endpoint."""
+        previous = {
+            "ended_at": "2026-08-31T20:00:00+00:00",
+            "end_latitude": 50.0,
+            "end_longitude": 14.0,
+            "end_odometer_km": None,
+        }
+        same_place = {
+            "started_at": "2026-09-01T06:00:00+00:00",
+            "start_latitude": 50.0002,
+            "start_longitude": 14.0,
+            "start_odometer_km": 1200,
+        }
+        elsewhere = {**same_place, "start_latitude": 50.02}
+
+        details = CHAIN_MODULE.parking_boundary_details(
+            previous, same_place, 18 * 60, 200
+        )
+
+        self.assertIsNotNone(details)
+        self.assertIsNone(
+            CHAIN_MODULE.parking_boundary_details(
+                previous, elsewhere, 18 * 60, 200
+            )
+        )
+
     def test_destination_classifies_the_whole_journey(self) -> None:
         """Assign fuel and shop legs to the final customer's business trip."""
         stops = [

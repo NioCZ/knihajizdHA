@@ -2,7 +2,8 @@
 
 Vlastní integrace sleduje jednotlivé úseky jízdy podle připojení Android Auto,
 počká na opožděnou cloudovou aktualizaci tachometru, rozpozná známý cíl a umí
-vytvořit dvoulistý Excel report.
+vytvořit dvoulistý Excel report. Nejasné jízdy lze vyřešit přímo v panelu;
+telefon dostává jen otázky, u kterých má rychlá odpověď skutečný význam.
 
 ## Instalace
 
@@ -43,13 +44,14 @@ integraci bezpečně reloaduje.
 Po nastavení vznikne zařízení **Kniha jízd** s průběžně aktualizovanými entitami:
 
 - `sensor.kniha_jizd_stav` – `idle`, `driving`, `waiting_odometer`,
-  `waiting_classification` nebo `error`; v atributech jsou kontroly všech vstupů,
+  `waiting_classification` nebo `error`; veřejné atributy obsahují jen provozní
+  stav a kontroly vstupů, ne adresy, souřadnice ani seznam jízd,
 - `binary_sensor.kniha_jizd_pripravena` – zapnuto, když funguje Android Auto,
-  GPS, tachometr a notifikační služba,
+  GPS a tachometr; notifikační služba je volitelný komunikační kanál,
 - senzory dnešních služebních/soukromých km a počtu dnešních jízd,
 - počet čekajících, celkový počet jízd a celkové služební/soukromé kilometry,
-- poslední jízda včetně zákazníka, trasy, času a validačního výsledku,
-- stav posledního Excel exportu a jeho dočasný odkaz ke stažení,
+- souhrnný stav poslední jízdy bez adres a zákazníka,
+- stav posledního Excel exportu bez lokální cesty a stahovacího tokenu,
 - `button.kniha_jizd_vygenerovat_excel` pro export z dashboardu či automatizace.
 
 Přesné `entity_id` může Home Assistant doplnit příponou, pokud už stejné ID
@@ -57,9 +59,10 @@ existuje. Všechny entity jsou seskupené pod jedním zařízením.
 
 Integrace zároveň registruje administrační stránku **Kniha jízd** v levém panelu
 Home Assistantu. Ukazuje aktuální průběh, zdraví jednotlivých vstupů, dnešní
-součty, poslední jízdu, editovatelnou tabulku dnešních jízd, výběr měsíce a
-tlačítko **Vygenerovat a stáhnout Excel**. Stránka je dostupná pouze
-administrátorům.
+součty, poslední jízdu, otázky vyžadující rozhodnutí, editovatelnou tabulku
+dnešních jízd, výběr měsíce a tlačítko **Vygenerovat a stáhnout Excel**. Citlivý
+detail a jednorázový odkaz k exportu načítá přes neveřejné administrační API s
+hlavičkou `no-store`; stránka je dostupná pouze administrátorům.
 
 Kontrola GPS přijímá standardní atributy `latitude`/`longitude` vybrané GPS
 entity. Pokud je novější model `device_tracker` neposkytuje, automaticky použije
@@ -73,8 +76,12 @@ umí kromě čistého číselného stavu přečíst také hodnotu s jednotkou ne
 - Přechod Android Auto `off → on` uloží čas, stav tachometru a výchozí polohu.
 - Přechod `on → off` okamžitě zachytí záložní cílovou polohu, požádá Companion
   aplikaci o aktualizaci GPS a výchozích 60 sekund čeká na její ustálení. Potom
-  spustí mapové rozpoznání a actionable notification. Tachometr se po celou dobu
+  spustí mapové rozpoznání a případnou otázku zpřístupní v panelu. Telefonní
+  upozornění odešle jen podle níže popsaných pravidel. Tachometr se po celou dobu
   zpracovává souběžně.
+- Z více zdrojů polohy se použije nejčerstvější platná GPS. Starší textová adresa
+  nesmí přepsat novější souřadnice a poloha získaná po ukončení musí časově patřit
+  k právě uzavírané jízdě.
 - Primární signál finálního tachometru vyžaduje čas `last_updated` (nebo HA
   metadata `State.last_updated`) **po** odpojení a současně vyšší stav počitadla
   než na začátku segmentu. U chybějícího počátečního stavu stačí nový čas a
@@ -85,12 +92,15 @@ umí kromě čistého číselného stavu přečíst také hodnotu s jednotkou ne
   se jako náhradní výsledek nepoužije.
 - Potvrzené služební místo ve výchozím okruhu 500 m se zařadí automaticky.
   Soukromé místo používá výchozí okruh 250 m. U neznámého cíle se
-  v okruhu 3 000 m vyhledají a obodují odborné instituce a odešle se notifikace.
+  v okruhu 3 000 m vyhledají a obodují odborné instituce. Výsledek se zobrazí v
+  panelu; telefon se ozve jen při dostatečně užitečném návrhu.
 
-Na notifikaci lze odpovědět ještě před dokončením tachometru. Klasifikace se uloží
-do HA Store a segment se automaticky zapíše, jakmile získá finální kilometry. Po
-úspěšné volbě integrace odešle pro stejný `tag` příkaz `clear_notification`, takže
-původní otázka z telefonu zmizí.
+V panelu i v notifikaci lze odpovědět ještě před dokončením tachometru. Obě cesty
+používají stejnou validovanou akci, takže dvojité kliknutí ani souběžná odpověď
+nemohou segment zařadit dvakrát. Klasifikace se uloží do HA Store a segment se
+automaticky zapíše, jakmile získá finální kilometry. Po úspěšné volbě integrace
+odešle pro stejný `tag` příkaz `clear_notification`, takže případná původní otázka
+z telefonu zmizí.
 
 Pokud další jízda začne během čekání na polohu, její start se použije jako přesný
 cíl předchozího úseku. Také později se blízký start srovná s předchozím cílem,
@@ -129,8 +139,9 @@ služební i soukromá. Místo toho kontroluje návaznost na poslední uložený
 - pokud jsou známé oba stavy tachometru, jejich rozdíl nesmí být větší než 1 km;
   větší rozdíl znamená, že mezi segmenty pravděpodobně proběhla jiná cesta.
 
-Při první takové jízdě nabídne notifikace **Služební návrat**, **Jiný klient** a
-**Osobní KM**. Potvrzený domov, firma či hotel se uloží s rolí `return`. Příští
+Při první takové jízdě nabídne panel a případně telefon **Služební návrat**,
+**Jiný klient** a **Osobní KM**. Potvrzený domov, firma či hotel se uloží s rolí
+`return`. Příští
 návrat na stejné místo se zapíše automaticky jako služební jen při platné
 návaznosti na klienta; bez návaznosti se integrace znovu zeptá. Služební návrat
 si ponechá zákazníka předchozího segmentu a v raw datech má `journey_role: return`
@@ -172,7 +183,8 @@ skutečná návštěva zákazníka, který ještě není dobře zakreslený v Op
 Výjimkou je parkoviště pojmenované jako odpočívadlo či servisní místo. Potvrzená
 tranzitní místa se učí jen s malým poloměrem 200 m.
 Pokud po předpokládané mezizastávce v časovém limitu žádná jízda nezačne,
-integrace pošle běžnou otázku a segment lze zařadit samostatně.
+otázka zůstane v panelu a segment lze zařadit samostatně. Samotná krátká zastávka
+telefonní upozornění nevyvolá.
 
 V raw datech jsou pro audit dostupná pole `journey_id`,
 `journey_role: transient_stop`, `transient_stop`, `continuation` a
@@ -180,7 +192,7 @@ V raw datech jsou pro audit dostupná pole `journey_id`,
 `journey_distance_km` obsahují počet segmentů a celkovou délku analyzované cesty.
 Rozpracovaný řetězec je uložen v HA Store a přežije restart Home Assistantu.
 
-Aktivní jízda, čekající ukončení i nezodpovězená notifikace jsou uloženy v interním
+Aktivní jízda, čekající ukončení i nezodpovězená otázka jsou uloženy v interním
 HA Store. Restart Home Assistantu proto rozpracovanou jízdu nezahodí. Pokud začne
 další jízda dříve, než cloud doplní předchozí tachometr, začátek nové jízdy vytvoří
 pevnou časovou hranici. Předchozí úsek se dočasně uzavře podle GPS vzdálenosti a
@@ -221,7 +233,13 @@ zůstává v `distance_km_raw`.
 
 - **Potvrdit klienta** – použije nejpravděpodobnější mapový návrh.
 - **Navrhnout nového** – přijme vlastní název nebo číslo návrhu `1`, `2` či `3`.
+- **Služební bez klienta** – uloží služební jízdu bez vymyšleného zákazníka.
 - **Osobní KM** – označí segment jako soukromý.
+
+Stejné volby jsou kdykoli dostupné v sekci **Potřebuje vaši odpověď** v panelu.
+Telefon čeká deset minut, aby mezitím mohla navázat další jízda, a upozorní jen na
+čerstvou otázku s důvěryhodným mapovým návrhem, návratem nebo známou smíšenou
+zónou. Neznámý cíl bez dobrého návrhu a krátká zastávka zůstávají pouze v panelu.
 
 U rozpoznané návazné jízdy se první dvě volby nahradí tlačítky **Služební návrat**
 a **Jiný klient**. Návrat je uložen jen jako vztah mezi jízdami (`journey_role` a
@@ -242,6 +260,8 @@ jízdy; druhý bod na mapě nevznikne.
 ### Denní tabulka a dodatečné opravy
 
 Panel **Kniha jízd** zobrazuje všechny dnešní uložené i rozpracované segmenty.
+Nad tabulkou jsou samostatné jednoduché karty všech jízd, které potřebují
+rozhodnutí; lze je dokončit i tehdy, když telefon žádnou notifikaci nedostal.
 U každého ukazuje adresy, kilometry, zákazníka, typ a stav zpracování. Pole
 **Odkud**, **Kam**, **km**, **Zákazník / účel** a **Typ** lze upravit tlačítkem
 **Uložit**. Zákazník je u služební cesty volitelný; prázdná hodnota se v
@@ -268,6 +288,18 @@ data:
   trip_type: business
 ```
 
+Čekající otázku lze stejným způsobem vyřešit i bez panelu:
+
+```yaml
+action: kniha_jizd.resolve_trip
+data:
+  segment_id: "ID_Z_TABULKY_NEBO_RAW_DAT"
+  action: business
+```
+
+Hodnota `action` může být `confirm`, `new`, `business`, `private` nebo `return`.
+Pro `new` se přidá `value`, případně `candidate_index` od 1 do 3.
+
 ### Mapa míst a zón
 
 Záložka **Mapa míst** v administračním panelu načítá přes přihlášené HA API:
@@ -289,10 +321,11 @@ dlaždice OpenStreetMap. Po výběru naučeného bodu lze přímo v jeho detailu
 zůstanou zachované. Konfigurovaný domov a firmu mapa odstranit nedovolí, protože
 se upravují v nastavení integrace.
 
-Krátká zastávka nevyvolá okamžitou notifikaci. Integrace čeká nastavený počet
-minut na pokračování: pokud další jízda začne, zastávka zdědí klasifikaci celé
-cesty. Pokud nepokračuje, přijde běžná otázka a potvrzený obchod či jiné místo se
-uloží jako standardní soukromý nebo služební cíl. Každé známé soukromé místo po
+Krátká zastávka nevyvolá telefonní notifikaci. Otázka je vidět v panelu a
+integrace čeká nastavený počet minut na pokračování: pokud další jízda začne,
+zastávka zdědí klasifikaci celé cesty. Pokud nepokračuje, zůstane běžná otázka v
+panelu a potvrzený obchod či jiné místo se uloží jako standardní soukromý nebo
+služební cíl. Každé známé soukromé místo po
 služebním cíli nejdřív počká na možné pokračování: při odjezdu v limitu zdědí
 služební cestu, bez pokračování se samo uloží jako soukromý cíl. Známé služební
 místo má naopak přednost a zaznamená se jako skutečný cíl i při krátké návštěvě.
@@ -350,12 +383,13 @@ Každý dokončený pokus ukládá také čas, použité souřadnice, počet vý
 počet pokusů, použití cache a případnou chybu do raw dat. Overpass dotaz se při
 dočasné chybě opakuje až třikrát; úspěšné i prázdné výsledky se šest hodin cacheují
 a při výpadku lze použít i starší cache. Pokud mobilní notifikační služba při
-dojezdu ještě není zaregistrovaná,
-čekající otázka se automaticky odešle po jejím zpřístupnění.
+dojezdu ještě není zaregistrovaná, panel zůstává funkční. Po jejím zpřístupnění
+se odešlou jen stále aktuální otázky, které splňují pravidla pro telefon.
 
-Do notifikace se vloží až tři nejlepší výsledky se vzdáleností. Tlačítko potvrzení
-vybere první; v textovém vstupu lze napsat číslo druhého/třetího výsledku nebo úplně
-vlastní název. Kompletní skóre, důvody a kandidáti zůstávají v raw datech pro audit.
+U vhodné telefonní otázky se vloží až tři nejlepší výsledky se vzdáleností.
+Tlačítko potvrzení vybere první; v textovém vstupu lze napsat číslo
+druhého/třetího výsledku nebo úplně vlastní název. V panelu lze konkrétní návrh
+vybrat přímo. Kompletní skóre, důvody a kandidáti zůstávají v raw datech pro audit.
 
 Každý záznam v `learned_places.json` představuje právě jeden fyzický bod. Stejný
 název může mít více samostatných bodů (například různé pobočky), ale každý má své
@@ -400,6 +434,8 @@ měsíc podle časové zóny Home Assistantu. Filtr se vztahuje na souhrnný i r
 
 Po exportu vznikne náhodný odkaz platný 15 minut. Díky tomu report s adresami
 nemusí ležet ve veřejně dostupném `/config/www`. Nový export starý odkaz zneplatní.
+Odkaz se neposílá do běžných stavových entit; načte jej pouze přihlášený
+administrátor v panelu.
 
 - **Kniha jízd**: jeden řádek na den vybraného měsíce, trasa `Start/Odkud → Přes → Cíl/Kam`,
   unikátní zákazníci a součty služebních/soukromých kilometrů. Soukromé segmenty

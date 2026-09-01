@@ -336,8 +336,9 @@ class KnihaJizdMap extends HTMLElement {
   }
 
   _startDrag(event) {
-    if (event.button !== 0 || event.target.closest?.("button, a")) return;
+    if (!this._center || event.button !== 0 || event.target.closest?.("button, a")) return;
     const canvas = this.shadowRoot.querySelector(".map-canvas");
+    if (!canvas) return;
     const center = this._project(this._center.latitude, this._center.longitude);
     this._drag = { x: event.clientX, y: event.clientY, center };
     canvas.classList.add("dragging");
@@ -357,6 +358,7 @@ class KnihaJizdMap extends HTMLElement {
     if (!this._drag) return;
     this._drag = null;
     const canvas = this.shadowRoot.querySelector(".map-canvas");
+    if (!canvas) return;
     canvas.classList.remove("dragging");
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
   }

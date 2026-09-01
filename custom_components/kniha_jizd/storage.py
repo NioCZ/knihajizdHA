@@ -1828,6 +1828,11 @@ class KnihaJizdRepository:
             learned = places[replacement_index].copy()
             existing_trip_types = place_trip_types(learned)
             previous_place_role = learned.get("place_role")
+            protect_known_destination = bool(
+                trip_type == TRIP_TYPE_CONTEXTUAL
+                and place_role == PLACE_ROLE_TRANSIENT
+                and previous_place_role not in {None, PLACE_ROLE_TRANSIENT}
+            )
             anchors = _place_anchors(learned)[-_MAX_ANCHORS_PER_PLACE:]
             new_latitude = _optional_float(new_anchor.get("latitude"))
             new_longitude = _optional_float(new_anchor.get("longitude"))
@@ -1869,13 +1874,25 @@ class KnihaJizdRepository:
             learned.update(
                 {
                     "id": learned.get("id") or place_id or uuid4().hex,
-                    "label": place.get("label"),
-                    "trip_type": trip_type,
+                    "label": (
+                        learned.get("label")
+                        if protect_known_destination
+                        else place.get("label")
+                    ),
+                    "trip_type": (
+                        learned.get("trip_type")
+                        if protect_known_destination
+                        else trip_type
+                    ),
                     "place_role": (
-                        place.get("place_role") or learned.get("place_role")
+                        learned.get("place_role")
+                        if protect_known_destination
+                        else place.get("place_role") or learned.get("place_role")
                     ),
                     "radius_m": (
-                        place.get("radius_m")
+                        learned.get("radius_m")
+                        if protect_known_destination
+                        else place.get("radius_m")
                         if "radius_m" in place
                         else (
                             None
@@ -1884,7 +1901,11 @@ class KnihaJizdRepository:
                             else learned.get("radius_m")
                         )
                     ),
-                    "map_name": place.get("map_name") or learned.get("map_name"),
+                    "map_name": (
+                        learned.get("map_name")
+                        if protect_known_destination
+                        else place.get("map_name") or learned.get("map_name")
+                    ),
                     "updated_at": place.get("updated_at"),
                     "transient_capable": bool(
                         learned.get("transient_capable")
@@ -1895,15 +1916,20 @@ class KnihaJizdRepository:
                     "anchors": anchors[-_MAX_ANCHORS_PER_PLACE:],
                 }
             )
-            combined_trip_types = [
-                selected
-                for selected in (TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE)
-                if selected in {*existing_trip_types, *place_trip_types(place)}
-            ]
-            if trip_type == TRIP_TYPE_CONTEXTUAL and place_role in {
-                PLACE_ROLE_RETURN,
-                PLACE_ROLE_TRANSIENT,
-            }:
+            combined_trip_types = (
+                existing_trip_types
+                if protect_known_destination
+                else [
+                    selected
+                    for selected in (TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE)
+                    if selected in {*existing_trip_types, *place_trip_types(place)}
+                ]
+            )
+            if (
+                not protect_known_destination
+                and trip_type == TRIP_TYPE_CONTEXTUAL
+                and place_role in {PLACE_ROLE_RETURN, PLACE_ROLE_TRANSIENT}
+            ):
                 combined_trip_types = []
             learned["trip_types"] = combined_trip_types
             if len(combined_trip_types) > 1:

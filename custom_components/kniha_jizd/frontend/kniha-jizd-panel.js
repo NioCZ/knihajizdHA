@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.12.5";
+import "./kniha-jizd-map.js?v=1.13.0";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -8,6 +8,9 @@ class KnihaJizdPanel extends HTMLElement {
     this._exporting = false;
     this._message = "";
     this._savingTrip = null;
+    this._resolvingTrip = null;
+    this._questionValues = new Map();
+    this._resolvedQuestions = new Set();
     this._scrollPositions = new Map();
     this._activeTab = "overview";
     this._mapData = null;
@@ -34,10 +37,39 @@ class KnihaJizdPanel extends HTMLElement {
     this._tripDrafts = new Map();
     this._placeDrafts = new Map();
     this._openDecisions = new Set();
+    this._overviewData = null;
+    this._overviewLoading = false;
+    this._overviewError = "";
+    this._overviewRequestId = 0;
+    this._overviewLoadedAt = 0;
+    this._overviewRefreshTimer = null;
+    this._renderPending = false;
+    this.shadowRoot.addEventListener?.("focusout", () => {
+      if (!this._renderPending) return;
+      setTimeout(() => {
+        const active = this.shadowRoot?.activeElement;
+        if (!active?.matches?.("input, select, textarea")) {
+          this._renderPending = false;
+          this._render();
+        }
+      }, 0);
+    });
   }
 
   set hass(value) {
     this._hass = value;
+    if (
+      this._activeTab === "overview"
+      &&
+      !this._overviewLoading
+      && !this._overviewRefreshTimer
+      && Date.now() - this._overviewLoadedAt > 1000
+    ) {
+      this._overviewRefreshTimer = setTimeout(() => {
+        this._overviewRefreshTimer = null;
+        this._loadOverviewData();
+      }, this._overviewData ? 250 : 0);
+    }
     if (this._activeTab === "map" && this.shadowRoot?.querySelector("kniha-jizd-map")) {
       if (
         !this._mapLoading
@@ -52,7 +84,10 @@ class KnihaJizdPanel extends HTMLElement {
       return;
     }
     const activeElement = this.shadowRoot?.activeElement;
-    if (activeElement?.matches?.("input, select, textarea")) return;
+    if (activeElement?.matches?.("input, select, textarea")) {
+      this._renderPending = true;
+      return;
+    }
     this._render();
   }
 
@@ -66,11 +101,47 @@ class KnihaJizdPanel extends HTMLElement {
 
   connectedCallback() {
     this._render();
+    if (this._hass && !this._overviewData) this._loadOverviewData();
   }
 
   disconnectedCallback() {
     if (this._mapRefreshTimer) clearTimeout(this._mapRefreshTimer);
     this._mapRefreshTimer = null;
+    if (this._overviewRefreshTimer) clearTimeout(this._overviewRefreshTimer);
+    this._overviewRefreshTimer = null;
+  }
+
+  async _loadOverviewData() {
+    if (!this._hass || this._overviewLoading) return;
+    const requestId = ++this._overviewRequestId;
+    this._overviewLoading = true;
+    this._overviewError = "";
+    try {
+      const data = await this._hass.callApi("GET", "kniha_jizd/overview");
+      if (requestId !== this._overviewRequestId) return;
+      this._overviewData = data;
+      this._overviewLoadedAt = Date.now();
+      const questions = new Set(
+        (data?.diagnostics?.today_trips || [])
+          .filter((trip) => trip?.question)
+          .map((trip) => String(trip.id)),
+      );
+      this._resolvedQuestions = new Set(
+        [...this._resolvedQuestions].filter((segmentId) => questions.has(segmentId)),
+      );
+    } catch (error) {
+      if (requestId !== this._overviewRequestId) return;
+      this._overviewError = error.message || String(error);
+    } finally {
+      if (requestId === this._overviewRequestId) {
+        this._overviewLoading = false;
+        this._overviewLoadedAt = Date.now();
+        if (this._activeTab !== "overview") return;
+        const active = this.shadowRoot?.activeElement;
+        if (active?.matches?.("input, select, textarea")) this._renderPending = true;
+        else this._render();
+      }
+    }
   }
 
   _entity(kind) {
@@ -206,6 +277,11 @@ class KnihaJizdPanel extends HTMLElement {
       if (details.open) this._openDecisions.add(decisionId);
       else this._openDecisions.delete(decisionId);
     });
+    this.shadowRoot.querySelectorAll(".question-card[data-segment-id]").forEach((card) => {
+      const segmentId = String(card.dataset.segmentId || "");
+      const value = card.querySelector(".question-value")?.value ?? "";
+      if (segmentId && value) this._questionValues.set(segmentId, value);
+    });
   }
 
   async _saveTrip(button) {
@@ -246,12 +322,9 @@ class KnihaJizdPanel extends HTMLElement {
       if (confirmedDraft) {
         confirmedDraft.confirmedAt = Date.now();
         this._tripDrafts.set(segmentId, confirmedDraft);
-        const confirmedAt = confirmedDraft.confirmedAt;
-        setTimeout(() => {
-          if (this._tripDrafts.get(segmentId)?.confirmedAt === confirmedAt) this._render();
-        }, 2100);
       }
       this._message = "Jízda byla upravena. Pokud tachometr ještě čeká, dokončí se automaticky.";
+      await this._loadOverviewData();
     } catch (error) {
       this._message = `Úprava se nezdařila: ${error.message || error}`;
     } finally {
@@ -281,14 +354,12 @@ class KnihaJizdPanel extends HTMLElement {
       if (draft && this._sameValues(draft, serverValues)) {
         this._tripDrafts.delete(segmentId);
         draft = null;
-      } else if (draft?.confirmedAt && Date.now() - draft.confirmedAt > 2000) {
-        this._tripDrafts.delete(segmentId);
-        draft = null;
       }
       const values = draft || serverValues;
       const privateSelected = values.type === "private";
       const reviewSelected = values.type === "unclassified";
       const disabled = !trip.editable || this._savingTrip === trip.id;
+      const dirty = Boolean(draft && !draft.confirmedAt);
       return `<tr data-segment-id="${this._text(trip.id)}">
         <td>${this._time(trip.started_at)}</td>
         <td><input class="trip-start" type="text" value="${this._text(values.start, "")}" data-original-value="${this._text(serverValues.start, "")}" placeholder="Místo odjezdu" ${disabled ? "disabled" : ""}></td>
@@ -302,12 +373,91 @@ class KnihaJizdPanel extends HTMLElement {
         </select></td>
         <td>${this._decisionDetails(trip)}</td>
         <td>${trip.needs_review ? '<strong class="review-label">K revizi</strong> · ' : ""}${this._statusLabel(trip.status)}${trip.odometer_ready ? "" : " · čeká km"}<small>${this._text(trip.distance_reconciliation_source)}</small></td>
-        <td><button class="save-trip" ${disabled ? "disabled" : ""}>Uložit</button></td>
+        <td><button class="save-trip" ${disabled || !dirty ? "disabled" : ""}>${this._savingTrip === trip.id ? "Ukládám…" : draft?.confirmedAt ? "Uloženo" : "Uložit"}</button></td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
   }
 
-  _decisionDetails(trip) {
+  _questionCards(rows) {
+    const questions = (Array.isArray(rows) ? rows : []).filter(
+      (trip) => trip?.question && !this._resolvedQuestions.has(String(trip.id)),
+    );
+    if (!questions.length) return "";
+    return `<section class="questions" aria-labelledby="questions-title">
+      <div class="section-heading"><div><h2 id="questions-title">Potřebuje vaši odpověď</h2><div class="muted">Vyřešte jen nejasné jízdy; telefon není potřeba.</div></div><span class="count-badge">${questions.length}</span></div>
+      <div class="question-grid">${questions.map((trip) => this._questionCard(trip)).join("")}</div>
+    </section>`;
+  }
+
+  _questionCard(trip) {
+    const question = trip.question || {};
+    const segmentId = String(trip.id || "");
+    const resolving = this._resolvingTrip === segmentId;
+    const requiresValue = (question.actions || []).some((action) => action.requires_value);
+    const phoneLabel = {
+      sent: "Dotaz byl poslán i do telefonu",
+      panel_only: "Jen v panelu – telefon nebyl rušen",
+      waiting: "Telefon počká, zda jízda nebude pokračovat",
+      not_scheduled: "Dotaz je dostupný v panelu",
+    }[question.phone_state] || "Dotaz je dostupný v panelu";
+    const value = this._questionValues.get(segmentId) || "";
+    return `<article class="question-card" data-segment-id="${this._text(segmentId)}">
+      <div class="question-meta"><span>${this._time(trip.started_at)}</span><span>${this._text(phoneLabel)}</span></div>
+      <h3>${this._text(question.title, "Zařaďte jízdu")}</h3>
+      <p>${this._text(question.prompt)}</p>
+      <div class="question-route"><span>${this._text(trip.start_address)}</span><span aria-hidden="true">→</span><span>${this._text(trip.end_address)}</span></div>
+      ${requiresValue ? `<label class="question-input"><span>Jiný klient nebo účel</span><input class="question-value" type="text" value="${this._text(value, "")}" placeholder="Napište název nebo účel" ${resolving ? "disabled" : ""}></label>` : ""}
+      <div class="question-actions">${(question.actions || []).map((action) => `<button class="resolve-trip ${action.id === "private" ? "secondary" : ""}" data-action="${this._text(action.id)}" ${action.candidate_index ? `data-candidate-index="${this._text(action.candidate_index)}"` : ""} ${action.requires_value ? 'data-requires-value="true"' : ""} ${resolving ? "disabled" : ""}>${this._text(action.label)}</button>`).join("")}</div>
+      <details class="question-details decision" data-decision-id="question:${this._text(segmentId)}" ${this._openDecisions.has(`question:${segmentId}`) ? "open" : ""}><summary>Podrobnosti návrhu</summary>${this._decisionDetails(trip, false)}</details>
+    </article>`;
+  }
+
+  async _resolveTrip(button) {
+    if (!this._hass || this._resolvingTrip) return;
+    const card = button.closest(".question-card");
+    const segmentId = String(card?.dataset?.segmentId || "");
+    const action = String(button.dataset.action || "");
+    const requiresValue = button.dataset.requiresValue === "true";
+    const value = card?.querySelector(".question-value")?.value?.trim() || "";
+    const candidateIndex = Number(button.dataset.candidateIndex);
+    if (!segmentId || !action) return;
+    if (requiresValue && !value) {
+      this._message = "Nejdřív napište klienta nebo účel jízdy.";
+      this._render();
+      [...this.shadowRoot.querySelectorAll(".question-card")]
+        .find((item) => item.dataset.segmentId === segmentId)
+        ?.querySelector(".question-value")
+        ?.focus();
+      return;
+    }
+
+    this._resolvingTrip = segmentId;
+    this._message = "Ukládám rozhodnutí…";
+    this._render();
+    try {
+      await this._hass.callService("kniha_jizd", "resolve_trip", {
+        segment_id: segmentId,
+        action,
+        ...(value ? { value } : {}),
+        ...(Number.isInteger(candidateIndex) && candidateIndex > 0
+          ? { candidate_index: candidateIndex }
+          : {}),
+      });
+      this._resolvedQuestions.add(segmentId);
+      this._questionValues.delete(segmentId);
+      this._message = "Rozhodnutí bylo uloženo.";
+      this._overviewLoadedAt = 0;
+      await this._loadOverviewData();
+      if (this._activeTab === "history") await this._loadHistoryData();
+    } catch (error) {
+      this._message = `Rozhodnutí se nepodařilo uložit: ${error.message || error}`;
+    } finally {
+      this._resolvingTrip = null;
+      this._render();
+    }
+  }
+
+  _decisionDetails(trip, wrap = true) {
     const decision = trip?.decision || {};
     const distance = decision.distance_m === undefined || decision.distance_m === null
       ? "—"
@@ -325,8 +475,7 @@ class KnihaJizdPanel extends HTMLElement {
       skipped: "bez souřadnic",
     }[decision.candidate_search_status] || decision.candidate_search_status;
     const decisionId = String(trip?.id || "");
-    return `<details class="decision" data-decision-id="${this._text(decisionId)}" ${this._openDecisions.has(decisionId) ? "open" : ""}><summary>${this._text(decision.source_label, "Proč takto?")}</summary>
-      <div>${this._text(decision.explanation)}</div>
+    const content = `<div>${this._text(decision.explanation)}</div>
       <small>Zdroj: ${this._text(decision.source)} · jistota: ${this._text(decision.confidence)}</small>
       ${decision.matched_place_id || decision.distance_m !== null && decision.distance_m !== undefined
         ? `<small>Místo: ${this._text(decision.matched_place_label)} · vzdálenost ${distance} / poloměr ${radius} · ${this._text(decision.match_method)}</small>`
@@ -336,8 +485,10 @@ class KnihaJizdPanel extends HTMLElement {
         : ""}
       ${searchStatus
         ? `<small>Hledání institucí: ${this._text(searchStatus)} · pokusy ${this._text(decision.candidate_search_attempts, "0")}${decision.candidate_search_cache_hit ? " · cache" : ""}${decision.candidate_search_error ? ` · ${this._text(decision.candidate_search_error)}` : ""}</small>`
-        : ""}
-    </details>`;
+        : ""}`;
+    if (!wrap) return content;
+    return `<details class="decision" data-decision-id="${this._text(decisionId)}" ${this._openDecisions.has(decisionId) ? "open" : ""}><summary>${this._text(decision.source_label, "Proč takto?")}</summary>
+      ${content}</details>`;
   }
 
   _historyDateLabel(value) {
@@ -478,18 +629,19 @@ class KnihaJizdPanel extends HTMLElement {
         "export_excel",
         { month: this._month },
       );
-      let exportEntity = null;
+      let exportData = null;
       for (let attempt = 0; attempt < 20; attempt += 1) {
-        exportEntity = this._entity("export");
-        if (exportEntity?.attributes?.download_url) break;
+        await this._loadOverviewData();
+        exportData = this._overviewData?.export;
+        if (exportData?.download_url) break;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      const url = exportEntity?.attributes?.download_url;
+      const url = exportData?.download_url;
       if (!url) throw new Error("Odkaz ke stažení nebyl vytvořen");
       this._message = "Excel je hotový. Stahování začíná…";
       const link = document.createElement("a");
       link.href = url;
-      link.download = exportEntity?.attributes?.filename || `kniha_jizd_${this._month}.xlsx`;
+      link.download = exportData?.filename || `kniha_jizd_${this._month}.xlsx`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -505,6 +657,9 @@ class KnihaJizdPanel extends HTMLElement {
     if (!new Set(["overview", "history", "map", "places"]).has(tab)) return;
     this._activeTab = tab;
     this._render();
+    if (tab === "overview" && Date.now() - this._overviewLoadedAt > 1000) {
+      await this._loadOverviewData();
+    }
     if (tab === "map" && !this._mapData) await this._loadMapData();
     if (tab === "history" && !this._historyData) await this._loadHistoryData();
     if (tab === "places" && !this._placesData) await this._loadPlacesData();
@@ -588,10 +743,16 @@ class KnihaJizdPanel extends HTMLElement {
       this._placesData = result.data || this._placesData;
       this._placeDrafts.delete(placeId);
       this._selectedPlaces.delete(placeId);
-      this._mapData = await this._hass.callApi("GET", "kniha_jizd/map");
-      if (requestId !== this._mapRequestId) return;
-      this._mapLoadedAt = Date.now();
       this._mapMessage = "Označený bod byl odstraněn.";
+      try {
+        this._mapData = await this._hass.callApi("GET", "kniha_jizd/map");
+        if (requestId !== this._mapRequestId) return;
+        this._mapLoadedAt = Date.now();
+      } catch (refreshError) {
+        if (requestId !== this._mapRequestId) return;
+        this._mapData = null;
+        this._mapMessage = `Bod byl odstraněn, ale mapu se nepodařilo obnovit: ${refreshError.message || refreshError}`;
+      }
     } catch (error) {
       if (requestId !== this._mapRequestId) return;
       this._mapError = error.message || String(error);
@@ -780,18 +941,34 @@ class KnihaJizdPanel extends HTMLElement {
     const totalPrivate = this._entity("private_km_total");
     const lastTrip = this._entity("last_trip");
     const exportEntity = this._entity("export");
-    const attrs = status?.attributes || {};
+    const overview = this._overviewData || {};
+    const statistics = overview.statistics || {};
+    const attrs = overview.diagnostics || status?.attributes || {};
+    const statusValue = overview.status || status?.state;
+    const readyValue = overview.ready ?? ready?.state === "on";
+    const businessValue = statistics.today_business_km ?? business?.state;
+    const privateValue = statistics.today_private_km ?? privateKm?.state;
+    const todayTripsValue = statistics.today_segments ?? todayTrips?.state;
+    const pendingValue = (
+      Number(attrs.closing_count || 0)
+      + Number(attrs.pending_count || 0)
+      + Number(attrs.transient_count || 0)
+    );
+    const totalTripsValue = statistics.segments_total ?? totalTrips?.state;
+    const totalBusinessValue = statistics.business_km_total ?? totalBusiness?.state;
+    const totalPrivateValue = statistics.private_km_total ?? totalPrivate?.state;
     const odometerCheck = attrs.odometer_day_check || {};
     const todayTripRows = attrs.today_trips || [];
     const historyRows = this._historyData?.rows || [];
     const selectedDay = (this._historyData?.days || []).find(
       (day) => day.date === this._historyDate,
     ) || {};
-    const last = lastTrip?.attributes || {};
-    const rawDownloadUrl = exportEntity?.attributes?.download_url;
-    const expiresAt = Date.parse(exportEntity?.attributes?.expires_at || "");
+    const last = overview.last_trip || lastTrip?.attributes || {};
+    const exportData = overview.export || exportEntity?.attributes || {};
+    const rawDownloadUrl = exportData.download_url;
+    const expiresAt = Date.parse(exportData.expires_at || "");
     const downloadUrl = rawDownloadUrl && expiresAt > Date.now() ? rawDownloadUrl : null;
-    const downloadFilename = exportEntity?.attributes?.filename || "kniha_jizd.xlsx";
+    const downloadFilename = exportData.filename || "kniha_jizd.xlsx";
     const gpsDetail = attrs.gps_ok
       ? `${attrs.gps_entity}: ${attrs.latitude}, ${attrs.longitude} · ${attrs.gps_coordinate_source}`
       : `${attrs.gps_entity}: stav ${attrs.gps_state ?? "—"} · souřadnice nenalezeny ani v ${attrs.address_entity}`;
@@ -810,6 +987,7 @@ class KnihaJizdPanel extends HTMLElement {
         .pill.ready { color:var(--success-color, #2e7d32); } .pill.error { color:var(--error-color, #c62828); }
         .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:16px; margin-bottom:16px; }
         .card { min-width:0; max-width:100%; background:var(--card-background-color); border-radius:14px; padding:18px; box-shadow:var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.12)); }
+        .card.attention .metric { color:var(--warning-color,#ef6c00); }
         .metric { font-size:28px; font-weight:700; margin-top:8px; } .muted, small { color:var(--secondary-text-color); }
         small { display:block; margin-top:3px; overflow-wrap:anywhere; }
         .check { display:flex; gap:10px; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--divider-color); }
@@ -826,8 +1004,36 @@ class KnihaJizdPanel extends HTMLElement {
         .trip-distance { min-width:85px !important; width:95px !important; }
         button, a.button { border:0; border-radius:10px; padding:12px 18px; font:inherit; font-weight:600; cursor:pointer; text-decoration:none; }
         button { color:var(--text-primary-color,#fff); background:var(--primary-color); }
+        button.secondary { color:var(--primary-text-color); background:var(--secondary-background-color); border:1px solid var(--divider-color); }
         button:disabled { opacity:.6; cursor:wait; } a.button { color:var(--primary-color); background:var(--secondary-background-color); }
         .message { margin-top:12px; color:var(--secondary-text-color); }
+        .global-message { margin:-10px 0 18px; padding:11px 14px; border-radius:10px; color:var(--primary-text-color); background:color-mix(in srgb,var(--primary-color) 9%,var(--card-background-color)); }
+        button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, a:focus-visible { outline:3px solid var(--primary-color); outline-offset:2px; }
+        .advanced { align-self:start; }
+        .advanced > summary { cursor:pointer; font-size:16px; font-weight:700; }
+        .advanced-body { margin-top:14px; }
+        .last-trip-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+        .last-trip-heading h2 { margin:3px 0 0; }
+        .last-trip-heading > strong { font-size:24px; white-space:nowrap; }
+        .last-trip-route { display:flex; align-items:center; gap:8px; margin:11px 0 8px; padding:9px 10px; border-radius:9px; background:var(--secondary-background-color); font-size:13px; }
+        .last-trip-route span:not([aria-hidden]) { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .inline-error { margin:0 0 16px; padding:12px 14px; border-radius:10px; color:var(--error-color,#c62828); background:color-mix(in srgb,var(--error-color,#c62828) 10%,transparent); }
+        .questions { margin-bottom:18px; }
+        .section-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px; }
+        .section-heading h2 { margin:0 0 3px; }
+        .count-badge { display:grid; place-items:center; min-width:30px; height:30px; padding:0 9px; border-radius:999px; color:var(--text-primary-color,#fff); background:var(--warning-color,#ef6c00); font-weight:800; }
+        .question-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr)); gap:12px; }
+        .question-card { min-width:0; padding:17px; border:1px solid color-mix(in srgb,var(--warning-color,#ef6c00) 42%,var(--divider-color)); border-radius:14px; background:var(--card-background-color); box-shadow:var(--ha-card-box-shadow,0 2px 8px rgba(0,0,0,.1)); }
+        .question-card h3 { margin:7px 0 7px; font-size:17px; }
+        .question-card p { margin:0 0 10px; }
+        .question-meta, .question-route { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--secondary-text-color); font-size:12px; }
+        .question-route { justify-content:flex-start; margin:10px 0; padding:9px 10px; border-radius:9px; background:var(--secondary-background-color); font-size:13px; }
+        .question-route span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .question-input { display:grid; gap:5px; margin:11px 0; color:var(--secondary-text-color); font-size:12px; }
+        .question-actions { display:flex; gap:7px; flex-wrap:wrap; margin-top:12px; }
+        .question-actions button { flex:1 1 135px; min-height:42px; padding:9px 11px; }
+        .question-details { margin-top:11px; color:var(--secondary-text-color); font-size:12px; }
+        .question-details summary { cursor:pointer; color:var(--primary-color); font-weight:600; }
         .table-wrap, .calendar-scroll { position:relative; display:block; width:100%; max-width:100%; min-width:0; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; scrollbar-gutter:stable; padding-bottom:8px; }
         table { width:max-content; min-width:1180px; border-collapse:collapse; margin-top:12px; }
         th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--divider-color); padding:9px 8px; min-width:75px; }
@@ -889,15 +1095,22 @@ class KnihaJizdPanel extends HTMLElement {
         .radius-summary { display:flex; gap:10px 16px; flex-wrap:wrap; margin:8px 0 16px; color:var(--secondary-text-color); }
         @media (max-width:600px) {
           main { padding:16px; } dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:8px; }
+          header { margin-bottom:18px; } h1 { font-size:24px; }
+          .grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+          .card { padding:14px; } .metric { font-size:23px; }
+          .question-grid { grid-template-columns:1fr; }
+          .last-trip-card { grid-column:1 / -1; }
+          .question-actions button { flex-basis:100%; }
           .calendar-weekdays, .calendar-grid { gap:3px; }
           .calendar-day { min-height:75px; padding:5px; border-radius:7px; }
           .calendar-value { padding:2px 3px; font-size:9px; }
           .table-wrap { margin:0 -4px; width:calc(100% + 8px); }
         }
+        @media (max-width:390px) { .grid { grid-template-columns:1fr; } }
       </style>
       <main>
         <header><div><h1>Kniha jízd</h1><div class="muted">Průběžný stav integrace a export reportů</div></div>
-          <span class="pill ${ready?.state === "on" ? "ready" : "error"}">${ready?.state === "on" ? this._statusLabel(status?.state) : "Vstupy nejsou připravené"}</span>
+          <span class="pill ${readyValue ? "ready" : "error"}">${readyValue ? this._statusLabel(statusValue) : "Vstupy nejsou připravené"}</span>
         </header>
         <nav class="tabs" aria-label="Části panelu">
           <button class="tab ${this._activeTab === "overview" ? "active" : ""}" data-tab="overview">Přehled</button>
@@ -905,27 +1118,24 @@ class KnihaJizdPanel extends HTMLElement {
           <button class="tab ${this._activeTab === "map" ? "active" : ""}" data-tab="map">Mapa míst</button>
           <button class="tab ${this._activeTab === "places" ? "active" : ""}" data-tab="places">Správa míst</button>
         </nav>
+        ${this._message ? `<div class="global-message" role="status" aria-live="polite">${this._text(this._message)}</div>` : ""}
         <div ${this._activeTab === "overview" ? "" : "hidden"}>
         <section class="grid">
-          <article class="card"><div class="muted">Dnes služební</div><div class="metric">${this._number(business?.state)} km</div></article>
-          <article class="card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateKm?.state)} km</div></article>
-          <article class="card"><div class="muted">Dnešní jízdy</div><div class="metric">${this._text(todayTrips?.state, "0")}</div></article>
-          <article class="card"><div class="muted">Čekající jízdy</div><div class="metric">${this._text(pending?.state, "0")}</div></article>
-          <article class="card"><div class="muted">Jízdy k revizi</div><div class="metric">${this._text(attrs.review_count, "0")}</div><small>Dnes ${this._text(attrs.today_review_count, "0")}</small></article>
-          <article class="card"><div class="muted">Celkem záznamů</div><div class="metric">${this._text(totalTrips?.state, "0")}</div></article>
-          <article class="card"><div class="muted">Celkem služební</div><div class="metric">${this._number(totalBusiness?.state)} km</div></article>
-          <article class="card"><div class="muted">Celkem soukromé</div><div class="metric">${this._number(totalPrivate?.state)} km</div></article>
+          <article class="card"><div class="muted">Dnes služební</div><div class="metric">${this._number(businessValue)} km</div></article>
+          <article class="card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateValue)} km</div></article>
+          <article class="card"><div class="muted">Dnešní jízdy</div><div class="metric">${this._text(todayTripsValue, "0")}</div></article>
+          <article class="card attention"><div class="muted">Vyžaduje pozornost</div><div class="metric">${this._text(pendingValue + Number(attrs.today_review_count || 0), "0")}</div><small>${pendingValue} čeká · ${this._text(attrs.today_review_count, "0")} k revizi</small></article>
         </section>
         <section class="grid">
-          <article class="card"><h2>Kontrola vstupů</h2>
+          <details class="card advanced"><summary>Kontrola vstupů</summary><div class="advanced-body">
             ${this._check("Android Auto", attrs.trigger_ok, `${attrs.trigger_entity}: ${attrs.trigger_state}`)}
             ${this._check("GPS telefonu", attrs.gps_ok, gpsDetail)}
             ${this._check("Geokódovaná adresa", attrs.address_ok, attrs.address_entity)}
             ${this._check("Tachometr", attrs.odometer_ok, odometerDetail)}
             ${this._check("Notifikace", attrs.notify_ok, attrs.notify_service)}
-          </article>
-          <article class="card"><h2>Aktuální zpracování</h2><dl>
-            <dt>Stav</dt><dd>${this._statusLabel(status?.state)}</dd>
+          </div></details>
+          <details class="card advanced"><summary>Automatika a diagnostika</summary><div class="advanced-body"><dl>
+            <dt>Stav</dt><dd>${this._statusLabel(statusValue)}</dd>
             <dt>Aktivní segment</dt><dd>${this._text(attrs.active_segment_id)}</dd>
             <dt>Čeká tachometr</dt><dd>${this._text(attrs.closing_count, "0")}</dd>
             <dt>Čeká zařazení</dt><dd>${this._text(attrs.pending_count, "0")}</dd>
@@ -938,19 +1148,17 @@ class KnihaJizdPanel extends HTMLElement {
             <dt>Domov</dt><dd>${this._text(attrs.home_address)} · ${this._text(attrs.home_latitude)}, ${this._text(attrs.home_longitude)}</dd>
             <dt>Firma</dt><dd>${this._text(attrs.company_address)} · ${this._text(attrs.company_latitude)}, ${this._text(attrs.company_longitude)} → ${this._text(attrs.company_label)}</dd>
             <dt>Poloměry</dt><dd>domov ${this._number(attrs.home_radius_m)} m · firma ${this._number(attrs.company_radius_m)} m · klient ${this._number(attrs.client_radius_m)} m · soukromé ${this._number(attrs.private_radius_m)} m · zastávka ${this._number(attrs.transient_radius_m)} m</dd>
-            <dt>Poslední volba z telefonu</dt><dd>${attrs.last_notification_action ? `${this._text(attrs.last_notification_action.action)} · ${this._text(attrs.last_notification_action.processed_at)}` : "—"}</dd>
+            <dt>Celkem</dt><dd>${this._text(totalTripsValue, "0")} záznamů · ${this._number(totalBusinessValue)} služebních km · ${this._number(totalPrivateValue)} soukromých km</dd>
+            <dt>Poslední rozhodnutí</dt><dd>${attrs.last_notification_action ? `${this._text(attrs.last_notification_action.action)} · ${attrs.last_notification_action.channel === "panel" ? "panel" : "telefon"} · ${this._text(attrs.last_notification_action.processed_at)}` : "—"}</dd>
             <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
-          </dl></article>
-          <article class="card"><h2>Poslední jízda</h2><dl>
-            <dt>Vzdálenost</dt><dd>${this._number(lastTrip?.state)} km</dd>
-            <dt>Celá cesta</dt><dd>${this._number(last.journey_distance_km)} km / ${this._text(last.journey_segment_count, "1")} segmentů</dd>
-            <dt>Zákazník</dt><dd>${this._text(last.purpose)}</dd>
-            <dt>Typ</dt><dd>${last.journey_role === "return" ? "Služební návrat" : last.trip_type === "private" ? "Soukromá" : last.trip_type === "unclassified" ? "Nevyřešená – k revizi" : this._text(last.trip_type)}</dd>
-            <dt>Start</dt><dd>${this._text(last.start_address)}</dd>
-            <dt>Cíl</dt><dd>${this._text(last.end_address)}</dd>
-            <dt>Konec</dt><dd>${this._text(last.ended_at)}</dd>
-          </dl></article>
+          </dl></div></details>
+          <article class="card last-trip-card"><div class="last-trip-heading"><div><div class="muted">Poslední jízda</div><h2>${this._text(last.purpose, last.trip_type === "private" ? "Soukromá" : "Bez klienta")}</h2></div><strong>${this._number(last.distance_km ?? lastTrip?.state)} km</strong></div>
+            <div class="last-trip-route"><span>${this._text(last.start_address)}</span><span aria-hidden="true">→</span><span>${this._text(last.end_address)}</span></div>
+            <small>${last.journey_role === "return" ? "Služební návrat" : last.trip_type === "private" ? "Soukromá" : last.trip_type === "unclassified" ? "Nevyřešená – k revizi" : "Služební"} · celá cesta ${this._number(last.journey_distance_km ?? last.distance_km)} km / ${this._text(last.journey_segment_count, "1")} segmentů · ${this._time(last.ended_at)}</small>
+          </article>
         </section>
+        ${this._overviewError ? `<div class="inline-error" role="alert">Živý přehled se nepodařilo načíst: ${this._text(this._overviewError)}</div>` : ""}
+        ${this._questionCards(todayTripRows)}
         <section class="card daily-trips"><h2>Dnešní jízdy</h2>
           <div class="muted">Uložené i čekající jízdy lze opravit. Zákazník je u služební jízdy volitelný. Segmenty stejné celé cesty se upraví společně.</div>
           ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.", "overview-trips")}
@@ -959,8 +1167,8 @@ class KnihaJizdPanel extends HTMLElement {
           <div class="muted">Oba listy budou obsahovat pouze jízdy z vybraného měsíce.</div>
           <div class="month-control"><label for="month">Měsíc reportu</label><input id="month" type="month" value="${this._text(this._month)}"></div>
           <div class="actions"><button id="export" ${this._exporting ? "disabled" : ""}>${this._exporting ? "Generuji…" : "Vygenerovat a stáhnout Excel"}</button>
-          ${downloadUrl ? `<a class="button" href="${downloadUrl}" download="${this._text(downloadFilename)}">Stáhnout poslední export (${this._text(exportEntity?.attributes?.month)})</a>` : ""}</div>
-          <div class="message">${this._text(this._message, exportEntity?.attributes?.generated_at ? `Poslední export: ${exportEntity.attributes.generated_at}, měsíc ${exportEntity.attributes.month}` : "Dosud nebyl vytvořen export.")}</div>
+          ${downloadUrl ? `<a class="button" href="${downloadUrl}" download="${this._text(downloadFilename)}">Stáhnout poslední export (${this._text(exportData.month)})</a>` : ""}</div>
+          <div class="message">${this._text(exportData.generated_at ? `Poslední export: ${exportData.generated_at}, měsíc ${exportData.month}` : "Dosud nebyl vytvořen export.")}</div>
         </section>
         </div>
         ${this._activeTab === "history" ? `<div class="history-view">
@@ -1043,6 +1251,30 @@ class KnihaJizdPanel extends HTMLElement {
     this.shadowRoot.getElementById("export")?.addEventListener("click", () => this._exportExcel());
     this.shadowRoot.querySelectorAll(".save-trip").forEach((button) => {
       button.addEventListener("click", () => this._saveTrip(button));
+    });
+    this.shadowRoot.querySelectorAll(".trip-start, .trip-end, .trip-distance, .trip-purpose, .trip-type").forEach((input) => {
+      const updateDirtyState = () => {
+        this._captureInteractiveState();
+        const row = input.closest("tr[data-segment-id]");
+        const segmentId = String(row?.dataset?.segmentId || "");
+        const draft = this._tripDrafts.get(segmentId);
+        const save = row?.querySelector(".save-trip");
+        if (save) {
+          save.disabled = !draft || Boolean(draft.confirmedAt) || Boolean(this._savingTrip);
+          save.textContent = draft?.confirmedAt ? "Uloženo" : "Uložit";
+        }
+      };
+      input.addEventListener("input", updateDirtyState);
+      input.addEventListener("change", updateDirtyState);
+    });
+    this.shadowRoot.querySelectorAll(".resolve-trip").forEach((button) => {
+      button.addEventListener("click", () => this._resolveTrip(button));
+    });
+    this.shadowRoot.querySelectorAll(".question-value").forEach((input) => {
+      input.addEventListener("input", () => {
+        const segmentId = String(input.closest(".question-card")?.dataset?.segmentId || "");
+        if (segmentId) this._questionValues.set(segmentId, input.value);
+      });
     });
     this.shadowRoot.querySelectorAll(".save-place").forEach((button) => {
       button.addEventListener("click", () => this._savePlace(button));
