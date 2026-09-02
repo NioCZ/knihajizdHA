@@ -117,7 +117,7 @@ class LearnedPlacesTest(unittest.TestCase):
         self.assertEqual(statistics["today_review_count"], 1)
 
     def test_known_place_behavior_matches_journey_rules(self) -> None:
-        """Auto-classify normal places and hold a private shop on business return."""
+        """A saved private place remains private regardless of the previous trip."""
         hospital = {
             "trip_type": "business",
             "trip_types": ["business"],
@@ -147,7 +147,7 @@ class LearnedPlacesTest(unittest.TestCase):
             STORAGE_MODULE.learned_place_behavior(shop, False), "private"
         )
         self.assertEqual(
-            STORAGE_MODULE.learned_place_behavior(shop, True), "transient"
+            STORAGE_MODULE.learned_place_behavior(shop, True), "private"
         )
         self.assertEqual(
             STORAGE_MODULE.learned_place_behavior(exception, False), "confirm"
@@ -470,8 +470,8 @@ class LearnedPlacesTest(unittest.TestCase):
         self.assertEqual(document["places"][0]["place_role"], "mixed")
         self.assertEqual(len(document["places"][0]["anchors"]), 1)
 
-    def test_expired_short_stop_can_become_a_known_private_destination(self) -> None:
-        """Reclassify one transient record without creating a duplicate point."""
+    def test_only_explicit_private_save_creates_a_place(self) -> None:
+        """An inferred waypoint is ignored; a later explicit save creates the place."""
         test_output = ROOT / "test-output"
         test_output.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
@@ -511,8 +511,8 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertTrue(place["transient_capable"])
             self.assertEqual(place["transient_kind"], "shop")
 
-    def test_transient_place_uses_its_small_stored_radius(self) -> None:
-        """Keep a learned fuel stop from swallowing a nearby customer."""
+    def test_transient_place_is_never_used_for_matching(self) -> None:
+        """Legacy waypoint records cannot participate in place recognition."""
         test_output = ROOT / "test-output"
         test_output.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
@@ -536,7 +536,7 @@ class LearnedPlacesTest(unittest.TestCase):
             close = repository._find_place_sync(50.001, 14.0, None, 1000)
             outside = repository._find_place_sync(50.003, 14.0, None, 1000)
 
-            self.assertEqual(close["place_role"], "transient")
+            self.assertIsNone(close)
             self.assertIsNone(outside)
 
             repository._learn_place_sync(
@@ -547,13 +547,15 @@ class LearnedPlacesTest(unittest.TestCase):
                     "address": "Benzinka",
                     "label": "Soukromá",
                     "trip_type": "private",
-                    "place_role": "client",
+                    "place_role": "private",
+                    "radius_m": 250,
                 }
             )
-            converted = repository._find_place_sync(50.003, 14.0, None, 1000)
+            converted = repository._find_place_sync(50.001, 14.0, None, 1000)
 
             self.assertEqual(converted["trip_type"], "private")
-            self.assertIsNone(converted.get("radius_m"))
+            self.assertEqual(converted["place_role"], "private")
+            self.assertEqual(converted.get("radius_m"), 250)
 
     def test_automatic_short_stop_never_overwrites_known_client(self) -> None:
         """A timing-dependent transient inference must preserve a learned client."""
@@ -602,7 +604,7 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertEqual(place["trip_types"], ["business"])
             self.assertEqual(place["place_role"], "client")
             self.assertEqual(place["radius_m"], 450)
-            self.assertTrue(place["transient_capable"])
+            self.assertFalse(place.get("transient_capable", False))
 
     def test_place_management_updates_merges_and_deletes_records(self) -> None:
         """Expose all requested place-management operations over stable IDs."""

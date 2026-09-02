@@ -20,7 +20,7 @@ WORKFLOW_SPEC.loader.exec_module(WORKFLOW)
 class WorkflowLogicTest(unittest.TestCase):
     """Keep interruption policy and panel questions deterministic."""
 
-    def test_expired_short_stop_stays_in_panel_without_phone_interruption(self) -> None:
+    def test_expired_stop_gets_the_same_single_classification_question(self) -> None:
         allowed, reason = WORKFLOW.mobile_notification_policy(
             {
                 "transient_stop": {"expired": True},
@@ -34,10 +34,10 @@ class WorkflowLogicTest(unittest.TestCase):
             }
         )
 
-        self.assertFalse(allowed)
-        self.assertEqual(reason, "short_stop_panel_only")
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "classification_question")
 
-    def test_weak_or_missing_map_guess_does_not_notify_phone(self) -> None:
+    def test_map_confidence_does_not_change_the_type_question(self) -> None:
         missing = WORKFLOW.mobile_notification_policy({})
         weak = WORKFLOW.mobile_notification_policy(
             {
@@ -47,8 +47,8 @@ class WorkflowLogicTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(missing, (False, "no_actionable_map_candidate"))
-        self.assertEqual(weak, (False, "low_confidence_map_candidate"))
+        self.assertEqual(missing, (True, "classification_question"))
+        self.assertEqual(weak, (True, "classification_question"))
 
     def test_confident_nearby_candidate_can_notify_phone(self) -> None:
         allowed, reason = WORKFLOW.mobile_notification_policy(
@@ -65,7 +65,7 @@ class WorkflowLogicTest(unittest.TestCase):
         )
 
         self.assertTrue(allowed)
-        self.assertEqual(reason, "confident_map_candidate")
+        self.assertEqual(reason, "classification_question")
 
     def test_panel_offers_return_and_manual_fallbacks(self) -> None:
         question = WORKFLOW.panel_question(
@@ -87,10 +87,10 @@ class WorkflowLogicTest(unittest.TestCase):
         self.assertEqual(question["phone_state"], "panel_only")
         self.assertEqual(
             [action["id"] for action in question["actions"]],
-            ["return", "business", "new", "private"],
+            ["return", "business", "private"],
         )
 
-    def test_panel_candidate_actions_keep_explicit_candidate_indexes(self) -> None:
+    def test_panel_candidates_are_suggestions_not_decisions(self) -> None:
         question = WORKFLOW.panel_question(
             {
                 "map_estimate": "Brno",
@@ -104,18 +104,14 @@ class WorkflowLogicTest(unittest.TestCase):
 
         assert question is not None
         self.assertEqual(
-            [
-                (action["id"], action.get("candidate_index"))
-                for action in question["actions"]
-            ],
-            [
-                ("confirm", 1),
-                ("confirm", 2),
-                ("business", None),
-                ("new", None),
-                ("private", None),
-            ],
+            [action["id"] for action in question["actions"]],
+            ["business", "private"],
         )
+        self.assertEqual(
+            [candidate["name"] for candidate in question["candidates"]],
+            ["Klient A", "Klient B"],
+        )
+        self.assertTrue(question["purpose_optional"])
 
     def test_resolved_rows_have_no_question(self) -> None:
         self.assertIsNone(

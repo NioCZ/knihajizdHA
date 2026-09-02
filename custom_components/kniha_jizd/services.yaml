@@ -64,7 +64,7 @@ update_trip:
           unit_of_measurement: km
 resolve_trip:
   name: Odpovědět na dotaz k jízdě
-  description: Zařadí čekající jízdu stejnou logikou jako akce z telefonu.
+  description: Zařadí čekající jízdu; uložení cíle jako místa je samostatný krok.
   fields:
     segment_id:
       name: ID segmentu
@@ -77,11 +77,7 @@ resolve_trip:
       selector:
         select:
           options:
-            - label: Potvrdit navrženého klienta
-              value: confirm
-            - label: Jiný klient nebo účel
-              value: new
-            - label: Služební bez klienta
+            - label: Služební
               value: business
             - label: Soukromá
               value: private
@@ -89,7 +85,7 @@ resolve_trip:
               value: return
     value:
       name: Klient nebo účel
-      description: Povinné jen pro rozhodnutí Jiný klient nebo účel.
+      description: Volitelný zákazník nebo účel služební jízdy.
       required: false
       selector:
         text:
@@ -102,3 +98,28 @@ resolve_trip:
           min: 1
           max: 3
           step: 1
+save_trip_place:
+  name: Uložit cíl jako místo
+  description: Samostatně uloží cíl už zařazené jízdy pro automatické rozpoznání, nebo nabídku odmítne.
+  fields:
+    segment_id:
+      name: ID segmentu
+      required: true
+      selector:
+        text:
+    action:
+      name: Rozhodnutí
+      required: true
+      selector:
+        select:
+          options:
+            - label: Uložit místo
+              value: save
+            - label: Jen tentokrát
+              value: skip
+    value:
+      name: Název místa
+      description: Volitelný vlastní název; bez něj se použije zobrazený návrh.
+      required: false
+      selector:
+        text:

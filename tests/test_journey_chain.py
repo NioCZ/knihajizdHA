@@ -19,12 +19,11 @@ SPEC.loader.exec_module(CHAIN_MODULE)
 class JourneyChainTest(unittest.TestCase):
     """Verify conservative stop detection and segment continuity."""
 
-    def test_fuel_rest_area_and_shop_are_transient_candidates(self) -> None:
-        """Recognize the stop types requested by the logbook workflow."""
+    def test_only_strong_service_pois_are_transient_candidates(self) -> None:
+        """Recognize service stops without swallowing shops or meal destinations."""
         examples = (
             ({"category": "amenity", "type": "fuel", "name": "ORLEN"}, "fuel"),
             ({"category": "highway", "type": "rest_area"}, "rest"),
-            ({"category": "shop", "type": "supermarket", "name": "Lidl"}, "shop"),
         )
 
         for result, expected_kind in examples:
@@ -32,6 +31,13 @@ class JourneyChainTest(unittest.TestCase):
                 detected = CHAIN_MODULE.detect_transient_stop(result, [])
                 self.assertIsNotNone(detected)
                 self.assertEqual(detected["kind"], expected_kind)
+
+        for destination in (
+            {"category": "shop", "type": "supermarket", "name": "Lidl"},
+            {"category": "amenity", "type": "restaurant", "name": "Bistro"},
+        ):
+            with self.subTest(destination=destination):
+                self.assertIsNone(CHAIN_MODULE.detect_transient_stop(destination, []))
 
     def test_hospital_parking_remains_a_customer_anchor(self) -> None:
         """Do not swallow a visit merely because the car parks on its campus."""
@@ -122,6 +128,30 @@ class JourneyChainTest(unittest.TestCase):
                 previous, elsewhere, 18 * 60, 200
             )
         )
+
+    def test_inaccurate_gps_requires_matching_address(self) -> None:
+        """Do not merge visits solely from a fix less accurate than the radius."""
+        previous = {
+            "ended_at": "2026-08-21T10:00:00+00:00",
+            "end_latitude": 50.0,
+            "end_longitude": 14.0,
+            "end_accuracy_m": 600,
+            "end_address": "Parkoviště A",
+        }
+        current = {
+            "started_at": "2026-08-21T10:02:00+00:00",
+            "start_latitude": 50.0001,
+            "start_longitude": 14.0,
+            "start_accuracy_m": 500,
+            "start_address": "Jiné parkoviště",
+        }
+
+        self.assertIsNone(
+            CHAIN_MODULE.parking_boundary_details(previous, current, 3, 200)
+        )
+        current["start_address"] = "Parkoviště A"
+        details = CHAIN_MODULE.parking_boundary_details(previous, current, 3, 200)
+        self.assertEqual(details["match_method"], "address_fallback")
 
     def test_destination_classifies_the_whole_journey(self) -> None:
         """Assign fuel and shop legs to the final customer's business trip."""

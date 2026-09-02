@@ -75,6 +75,7 @@ from .const import (
     DOMAIN,
     SERVICE_EXPORT_EXCEL,
     SERVICE_RESOLVE_TRIP,
+    SERVICE_SAVE_TRIP_PLACE,
     SERVICE_UPDATE_TRIP,
 )
 from .export import export_excel
@@ -114,6 +115,17 @@ RESOLVE_TRIP_SERVICE_SCHEMA = vol.Schema(
         vol.Optional(ATTR_CANDIDATE_INDEX): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=3)
         ),
+    }
+)
+SAVE_TRIP_PLACE_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_SEGMENT_ID): str,
+        vol.Required(ATTR_ACTION): vol.All(
+            str,
+            lambda value: value.strip().lower(),
+            vol.In(["save", "skip"]),
+        ),
+        vol.Optional(ATTR_VALUE, default=""): str,
     }
 )
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
@@ -229,6 +241,26 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_RESOLVE_TRIP,
         _async_resolve_trip_service,
         schema=RESOLVE_TRIP_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_save_trip_place_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_resolve_place(
+                str(call.data[ATTR_SEGMENT_ID]),
+                str(call.data[ATTR_ACTION]),
+                str(call.data[ATTR_VALUE]),
+                channel="panel",
+            )
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SAVE_TRIP_PLACE,
+        _async_save_trip_place_service,
+        schema=SAVE_TRIP_PLACE_SERVICE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     return True

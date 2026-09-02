@@ -39,42 +39,9 @@ def map_candidates(segment: dict[str, Any], limit: int = 3) -> list[dict[str, An
 def mobile_notification_policy(
     segment: dict[str, Any],
 ) -> tuple[bool, str]:
-    """Decide whether a pending question is useful enough to interrupt the phone."""
-    stop = segment.get("transient_stop")
-    if isinstance(stop, dict) and stop.get("expired"):
-        return False, "short_stop_panel_only"
-
-    if segment.get("known_place_exception"):
-        return True, "known_mixed_place"
-
-    return_context = segment.get("return_context")
-    if (
-        isinstance(return_context, dict)
-        and return_context.get("suggested")
-        and (
-            return_context.get("previous_segment_id")
-            or return_context.get("previous_purpose")
-        )
-    ):
-        return True, "business_return_context"
-
-    if segment.get("configured_place") == "home":
-        return True, "configured_home_choice"
-
-    candidates = map_candidates(segment, limit=1)
-    if not candidates:
-        return False, "no_actionable_map_candidate"
-    candidate = candidates[0]
-    distance = _number(candidate.get("distance_m"))
-    score = _number(candidate.get("score")) or 0.0
-    confident = bool(
-        candidate.get("contains_parking_point")
-        or candidate.get("keyword_matches")
-        or score >= 25.0
-    )
-    if confident and (distance is None or distance <= 1_000.0):
-        return True, "confident_map_candidate"
-    return False, "low_confidence_map_candidate"
+    """Send exactly one classification question for every unresolved trip."""
+    del segment
+    return True, "classification_question"
 
 
 def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | None:
@@ -89,20 +56,12 @@ def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | Non
     ).strip()
     candidates = map_candidates(segment)
     return_context = segment.get("return_context")
-    stop = segment.get("transient_stop")
     known_exception = bool(segment.get("known_place_exception"))
 
     if known_exception:
         kind = "known_place_exception"
         title = "Potvrďte typ známého místa"
         prompt = f"Místo {estimate} používáte služebně i soukromě."
-    elif isinstance(stop, dict) and stop.get("expired"):
-        kind = "short_stop"
-        title = "Byla krátká zastávka samostatným cílem?"
-        prompt = (
-            f"Zastavení {estimate} vypadalo jako mezizastávka, ale cesta "
-            "zatím nepokračovala."
-        )
     elif isinstance(return_context, dict) and return_context.get("suggested"):
         kind = "return"
         title = "Jak zařadit navazující jízdu?"
@@ -114,8 +73,11 @@ def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | Non
         )
     else:
         kind = "destination"
-        title = "Kam tato jízda patří?"
-        prompt = f"Rozpoznaný cíl: {estimate}."
+        title = "Jaký typ měla tato jízda?"
+        prompt = (
+            f"Rozpoznaný cíl: {estimate}. Nejprve vyberte typ jízdy; "
+            "uložení místa nabídneme samostatně."
+        )
 
     actions: list[dict[str, Any]] = []
     if kind == "return" and isinstance(return_context, dict) and (
@@ -124,21 +86,7 @@ def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | Non
     ):
         actions.append({"id": "return", "label": "Služební návrat"})
 
-    if known_exception:
-        actions.append({"id": "confirm", "label": "Služební"})
-    else:
-        actions.extend(
-            {
-                "id": "confirm",
-                "label": f"Použít {candidate['name']}",
-                "candidate_index": candidate["index"],
-            }
-            for candidate in candidates
-        )
-        actions.append({"id": "business", "label": "Služební bez klienta"})
-        actions.append(
-            {"id": "new", "label": "Jiný klient / účel", "requires_value": True}
-        )
+    actions.append({"id": "business", "label": "Služební"})
     actions.append({"id": "private", "label": "Soukromá"})
 
     if segment.get("notification_sent_at"):
@@ -161,6 +109,8 @@ def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | Non
             else None
         ),
         "candidates": candidates,
+        "purpose_input": True,
+        "purpose_optional": True,
         "actions": actions,
         "phone_state": phone_state,
         "phone_reason": segment.get("notification_reason")

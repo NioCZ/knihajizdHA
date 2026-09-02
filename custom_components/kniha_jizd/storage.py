@@ -89,13 +89,11 @@ def learned_place_behavior(
     place: dict[str, Any], has_business_return_context: bool
 ) -> str:
     """Choose automatic handling for one known physical place."""
+    del has_business_return_context
     role = str(place.get("place_role") or "")
     trip_types = place_trip_types(place)
-    if role == PLACE_ROLE_TRANSIENT or (
-        has_business_return_context
-        and trip_types == [TRIP_TYPE_PRIVATE]
-    ):
-        return "transient"
+    if role == PLACE_ROLE_TRANSIENT:
+        return "ignored"
     if len(trip_types) > 1 or role == PLACE_ROLE_MIXED:
         return "confirm"
     if role == PLACE_ROLE_RETURN:
@@ -576,14 +574,8 @@ def _apply_place_classification(
             trip_types=[TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE],
             place_role=PLACE_ROLE_MIXED,
         )
-    elif classification == "transient":
-        place.update(
-            trip_type=TRIP_TYPE_CONTEXTUAL,
-            trip_types=[],
-            place_role=PLACE_ROLE_TRANSIENT,
-        )
     else:
-        raise ValueError("classification must be business, private, mixed or transient")
+        raise ValueError("classification must be business, private or mixed")
     place["radius_m"] = radius_m
     place["updated_at"] = datetime.now(UTC).isoformat()
 
@@ -597,7 +589,10 @@ def places_for_management(
     """Serialize editable place records without exposing legacy return anchors."""
     result: list[dict[str, Any]] = []
     for raw_place in document.get("places", []):
-        if not isinstance(raw_place, dict) or raw_place.get("place_role") == PLACE_ROLE_RETURN:
+        if not isinstance(raw_place, dict) or raw_place.get("place_role") in {
+            PLACE_ROLE_RETURN,
+            PLACE_ROLE_TRANSIENT,
+        }:
             continue
         place = raw_place.copy()
         classification = _classification_for_place(place)
@@ -1560,6 +1555,7 @@ class KnihaJizdRepository:
         trip_type: str,
         client_radius: float,
         private_radius: float,
+        place_label: str | None = None,
     ) -> dict[str, Any]:
         """Apply a manual historical correction to the destination's learned place."""
         async with self._lock:
@@ -1570,6 +1566,7 @@ class KnihaJizdRepository:
                 trip_type,
                 client_radius,
                 private_radius,
+                place_label,
             )
 
     def _sync_place_from_trip_sync(
@@ -1579,6 +1576,7 @@ class KnihaJizdRepository:
         trip_type: str,
         client_radius: float,
         private_radius: float,
+        place_label: str | None = None,
     ) -> dict[str, Any]:
         raw = self._load_raw_sync()
         segments: list[dict[str, Any]] = raw["segments"]
@@ -1652,7 +1650,7 @@ class KnihaJizdRepository:
 
         classification = "private" if trip_type == TRIP_TYPE_PRIVATE else "business"
         radius = private_radius if classification == "private" else client_radius
-        label = (
+        default_label = (
             str(
                 target.get("map_estimate")
                 or target.get("end_address")
@@ -1661,6 +1659,9 @@ class KnihaJizdRepository:
             if classification == "private"
             else str(purpose or target.get("map_estimate") or "Klient")
         ).strip()
+        label = str(place_label or default_label).strip()
+        if not label:
+            raise ValueError("place label cannot be empty")
         if match is None:
             match = {
                 "id": uuid4().hex,
@@ -1680,8 +1681,7 @@ class KnihaJizdRepository:
             match["label"] = label
         _apply_place_classification(match, classification, radius)
         target["matched_place_id"] = match["id"]
-        target["manual_place_correction"] = True
-        target["classification_explanation"] = "Ruční oprava změnila i výchozí typ místa."
+        target["place_saved_explicitly"] = True
         data["version"] = _LEARNED_PLACES_VERSION
         _write_json_atomic(self.places_path, data)
         raw["version"] = _RAW_DATA_VERSION
@@ -1723,6 +1723,8 @@ class KnihaJizdRepository:
         closest: tuple[float, dict[str, Any], dict[str, Any]] | None = None
         if latitude is not None and longitude is not None:
             for place in places:
+                if place.get("place_role") == PLACE_ROLE_TRANSIENT:
+                    continue
                 place_radius = effective_place_radius(
                     place, radius_meters, private_radius, transient_radius
                 )
@@ -1757,6 +1759,8 @@ class KnihaJizdRepository:
         normalized = _normalize_address(address)
         if normalized:
             for place in places:
+                if place.get("place_role") == PLACE_ROLE_TRANSIENT:
+                    continue
                 for anchor in _place_anchors(place):
                     if _normalize_address(anchor.get("address")) == normalized:
                         result = place.copy()
@@ -1777,8 +1781,8 @@ class KnihaJizdRepository:
 
     def _learn_place_sync(self, place: dict[str, Any]) -> None:
         """Persist one confirmed physical point without grouping by its label."""
-        if place.get("place_role") == PLACE_ROLE_RETURN:
-            # Return is stored on a trip (journey_role), never as a place.
+        if place.get("place_role") in {PLACE_ROLE_RETURN, PLACE_ROLE_TRANSIENT}:
+            # Return/waypoint state belongs to a visit, never to a durable place.
             return
         data = self._load_places_sync()
         migrate_return_places(data)
@@ -1800,9 +1804,14 @@ class KnihaJizdRepository:
 
         replacement_index: int | None = None
         for index, existing in enumerate(places):
-            if _places_overlap(existing, incoming_point):
+            if place_id and str(existing.get("id") or "") == str(place_id):
                 replacement_index = index
                 break
+        if replacement_index is None:
+            for index, existing in enumerate(places):
+                if _places_overlap(existing, incoming_point):
+                    replacement_index = index
+                    break
 
         if replacement_index is None:
             requested_id = str(place_id or "")

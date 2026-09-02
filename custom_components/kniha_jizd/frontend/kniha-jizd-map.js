@@ -107,7 +107,7 @@ class KnihaJizdMap extends HTMLElement {
     return [
       ...(Array.isArray(this._data.configured_places) ? this._data.configured_places : []),
       ...(Array.isArray(this._data.learned_places) ? this._data.learned_places : []),
-    ].filter((item) => Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude)));
+    ].filter((item) => item.place_role !== "transient" && Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude)));
   }
 
   _points() {
@@ -229,11 +229,10 @@ class KnihaJizdMap extends HTMLElement {
         .zone.active { stroke-width:4; fill-opacity:.2; stroke-opacity:1; }
         .zone.client { fill:#1976d2; stroke:#1976d2; } .zone.private { fill:#8e44ad; stroke:#8e44ad; }
         .zone.mixed { fill:#6d4c41; stroke:#6d4c41; }
-        .zone.transient { fill:#ef6c00; stroke:#ef6c00; }
         .zone.home { fill:#2e7d32; stroke:#2e7d32; } .zone.company { fill:#00897b; stroke:#00897b; }
         .marker { position:absolute; transform:translate(-50%,-100%); border:2px solid white; border-radius:999px; width:24px; height:24px; padding:0; box-shadow:0 2px 7px rgba(0,0,0,.4); cursor:pointer; background:#1976d2; color:white; }
         .marker::after { content:""; position:absolute; left:7px; bottom:-6px; width:7px; height:7px; background:inherit; transform:rotate(45deg); border-right:2px solid white; border-bottom:2px solid white; }
-        .marker.private { background:#8e44ad; } .marker.transient { background:#ef6c00; }
+        .marker.private { background:#8e44ad; }
         .marker.mixed { background:#6d4c41; }
         .marker.home { background:#2e7d32; }
         .marker.company { background:#00897b; } .marker.selected { outline:3px solid var(--warning-color,#fbc02d); z-index:4; }
@@ -257,7 +256,7 @@ class KnihaJizdMap extends HTMLElement {
         .legend { display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:13px; }
         .legend span { display:flex; gap:7px; align-items:center; }
         .swatch { width:11px; height:11px; border-radius:50%; background:#1976d2; }
-        .swatch.private { background:#8e44ad; } .swatch.transient { background:#ef6c00; }
+        .swatch.private { background:#8e44ad; }
         .swatch.mixed { background:#6d4c41; }
         .swatch.home { background:#2e7d32; }
         .swatch.company { background:#00897b; } .swatch.car { background:#d32f2f; }
@@ -328,8 +327,8 @@ class KnihaJizdMap extends HTMLElement {
       const learnedCount = this._data?.learned_places?.length || 0;
       const routeCount = this._data?.today_routes?.length || 0;
       selection.innerHTML = `<h3>Co mapa zobrazuje</h3><dl>
-        <dt>Místa</dt><dd>${learnedCount} naučených parkovacích bodů</dd>
-        <dt>Dnes</dt><dd>${routeCount} úseků jízdy</dd>
+        <dt>Místa</dt><dd>${learnedCount} výslovně uložených parkovacích bodů</dd>
+        <dt>Dnes</dt><dd>${routeCount} celých tras bez potvrzených mezibodů</dd>
         <dt>Ovládání</dt><dd>Tažením mapu posunete, kolečkem nebo +/− změníte přiblížení. Kliknutím vyberete místo.</dd>
       </dl>`;
     }

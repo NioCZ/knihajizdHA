@@ -10,13 +10,8 @@ from typing import Any
 
 _TRANSIENT_AMENITIES = {
     "charging_station",
-    "fast_food",
-    "food_court",
     "fuel",
-    "restaurant",
-    "cafe",
     "car_wash",
-    "toilets",
 }
 _TRANSIENT_HIGHWAYS = {"rest_area", "services"}
 _TRANSIENT_TOURISM = {"picnic_site"}
@@ -50,9 +45,7 @@ def detect_transient_stop(
     )
 
     stop_kind: str | None = None
-    if category == "shop":
-        stop_kind = "shop"
-    elif category == "highway" and poi_type in _TRANSIENT_HIGHWAYS:
+    if category == "highway" and poi_type in _TRANSIENT_HIGHWAYS:
         stop_kind = "rest"
     elif category == "tourism" and poi_type in _TRANSIENT_TOURISM:
         stop_kind = "rest"
@@ -61,8 +54,6 @@ def detect_transient_stop(
             stop_kind = "fuel"
         elif poi_type in _WEAK_PARKING_TYPES:
             stop_kind = "parking"
-        elif poi_type in {"restaurant", "cafe", "fast_food", "food_court"}:
-            stop_kind = "food"
         else:
             stop_kind = "service"
     elif (
@@ -140,9 +131,20 @@ def parking_boundary_details(
     )
     if all(value is not None for value in coordinates):
         distance = _haversine_meters(*coordinates)  # type: ignore[arg-type]
-        if distance > max_distance_meters:
-            return None
-        match_method = "gps"
+        previous_accuracy = _number(previous.get("end_accuracy_m"))
+        current_accuracy = _number(current.get("start_accuracy_m"))
+        accuracy_reliable = all(
+            value is None or value <= max_distance_meters
+            for value in (previous_accuracy, current_accuracy)
+        )
+        if distance <= max_distance_meters and accuracy_reliable:
+            match_method = "gps"
+        else:
+            previous_address = _normalize(previous.get("end_address"))
+            current_address = _normalize(current.get("start_address"))
+            if not previous_address or previous_address != current_address:
+                return None
+            match_method = "address_fallback"
     else:
         previous_address = _normalize(previous.get("end_address"))
         current_address = _normalize(current.get("start_address"))
@@ -175,12 +177,14 @@ def apply_journey_classification(
         segment["trip_type"] = trip_type
         segment["classification_source"] = f"journey_inherited:{source}"
         segment["journey_role"] = "transient_stop"
+        segment["visit_role"] = "waypoint"
         segment["journey_inherited_from_segment_id"] = destination_id
 
     destination["purpose"] = purpose
     destination["trip_type"] = trip_type
     destination["classification_source"] = source
     destination["journey_role"] = destination.get("journey_role") or "destination"
+    destination["visit_role"] = "destination"
     for segment in all_segments:
         segment["journey_segment_count"] = len(all_segments)
         segment["journey_distance_km"] = journey_distance
@@ -209,7 +213,7 @@ def map_routes_without_transient_stops(
         journey_id = str(route.get("journey_id") or "").strip()
         if journey_id:
             journeys.setdefault(journey_id, []).append(route)
-        elif route.get("journey_role") != "transient_stop":
+        elif not _is_waypoint(route):
             visible.append(route.copy())
 
     for journey_routes in journeys.values():
@@ -217,10 +221,10 @@ def map_routes_without_transient_stops(
             journey_routes, key=lambda row: str(row.get("started_at") or "")
         )
         transient = [
-            row for row in ordered if row.get("journey_role") == "transient_stop"
+            row for row in ordered if _is_waypoint(row)
         ]
         destinations = [
-            row for row in ordered if row.get("journey_role") != "transient_stop"
+            row for row in ordered if not _is_waypoint(row)
         ]
         if not destinations:
             continue
@@ -242,6 +246,13 @@ def map_routes_without_transient_stops(
         visible.append(collapsed)
 
     return sorted(visible, key=lambda row: str(row.get("started_at") or ""))
+
+
+def _is_waypoint(segment: dict[str, Any]) -> bool:
+    """Read the canonical visit role with legacy journey-role compatibility."""
+    if segment.get("visit_role") is not None:
+        return segment.get("visit_role") == "waypoint"
+    return segment.get("journey_role") == "transient_stop"
 
 
 def _nearby_institution_is_anchor(

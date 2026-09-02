@@ -116,6 +116,7 @@ class KnihaJizdPendingSensor(KnihaJizdEntity, SensorEntity):
             int(diagnostics["closing_count"])
             + int(diagnostics["pending_count"])
             + int(diagnostics["transient_count"])
+            + int(diagnostics["place_prompt_count"])
         )
 
     @property
@@ -127,6 +128,7 @@ class KnihaJizdPendingSensor(KnihaJizdEntity, SensorEntity):
             "waiting_odometer": diagnostics["closing_count"],
             "waiting_classification": diagnostics["pending_count"],
             "waiting_journey_destination": diagnostics["transient_count"],
+            "waiting_place_save": diagnostics["place_prompt_count"],
         }
 
 
@@ -162,6 +164,7 @@ class KnihaJizdLastTripSensor(KnihaJizdEntity, SensorEntity):
             "ended_at",
             "trip_type",
             "journey_role",
+            "visit_role",
             "journey_id",
             "journey_segment_count",
             "journey_distance_km",

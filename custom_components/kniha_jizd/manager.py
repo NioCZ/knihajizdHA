@@ -35,6 +35,9 @@ from .const import (
     ACTION_PREFIX,
     ACTION_PRIVATE,
     ACTION_RETURN,
+    ACTION_SAVE_NAMED_PLACE,
+    ACTION_SAVE_PLACE,
+    ACTION_SKIP_PLACE,
     CONF_ADDRESS_ENTITY,
     CONF_COMPANY_ADDRESS,
     CONF_COMPANY_LATITUDE,
@@ -96,11 +99,15 @@ from .workflow_logic import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-_IMPLICIT_TRANSIENT_STOP_MINUTES = 10.0
+_IMPLICIT_TRANSIENT_STOP_MINUTES = 3.0
 
 _ACTION_PATTERN = re.compile(
     rf"^{ACTION_PREFIX}_({ACTION_CONFIRM}|{ACTION_NEW}|{ACTION_BUSINESS}|{ACTION_PRIVATE}|"
     rf"{ACTION_RETURN})_([0-9a-f]+)$"
+)
+_PLACE_ACTION_PATTERN = re.compile(
+    rf"^{ACTION_PREFIX}_({ACTION_SAVE_PLACE}|{ACTION_SAVE_NAMED_PLACE}|"
+    rf"{ACTION_SKIP_PLACE})_([0-9a-f]+)$"
 )
 
 
@@ -154,6 +161,7 @@ class KnihaJizdManager:
         self._closing: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, dict[str, Any]] = {}
         self._transient: dict[str, dict[str, Any]] = {}
+        self._place_prompts: dict[str, dict[str, Any]] = {}
         self._statistics: dict[str, Any] = {
             "segments_total": 0,
             "business_km_total": 0.0,
@@ -204,10 +212,14 @@ class KnihaJizdManager:
         closing = runtime.get("closing")
         pending = runtime.get("pending")
         transient = runtime.get("transient")
+        place_prompts = runtime.get("place_prompts")
         self._active = active if isinstance(active, dict) else None
         self._closing = closing if isinstance(closing, dict) else {}
         self._pending = pending if isinstance(pending, dict) else {}
         self._transient = transient if isinstance(transient, dict) else {}
+        self._place_prompts = (
+            place_prompts if isinstance(place_prompts, dict) else {}
+        )
         for segment in [
             *self._closing.values(),
             *self._pending.values(),
@@ -300,6 +312,13 @@ class KnihaJizdManager:
                     f"{DOMAIN}_restore_transient_{segment.get('id', 'unknown')}",
                 )
 
+        for prompt in list(self._place_prompts.values()):
+            if not prompt.get("notification_sent_at"):
+                self._create_task(
+                    self._async_send_place_notification(prompt),
+                    f"{DOMAIN}_restore_place_prompt_{prompt.get('segment_id', 'unknown')}",
+                )
+
         trigger_state = self.hass.states.get(self.trigger_entity)
         if trigger_state is not None and trigger_state.state == "on":
             if self._active is None:
@@ -381,6 +400,8 @@ class KnihaJizdManager:
             return "waiting_classification"
         if self._transient:
             return "waiting_journey"
+        if self._place_prompts:
+            return "waiting_place_save"
         return "idle"
 
     @property
@@ -442,6 +463,20 @@ class KnihaJizdManager:
                 self._statistics.get("today_review_count") or 0
             ),
             "transient_count": len(self._transient),
+            "place_prompt_count": len(self._place_prompts),
+            "place_questions": [
+                {
+                    "id": prompt.get("segment_id"),
+                    "started_at": prompt.get("started_at"),
+                    "start_address": prompt.get("start_address"),
+                    "end_address": prompt.get("end_address"),
+                    "place_question": deepcopy(prompt),
+                }
+                for prompt in sorted(
+                    self._place_prompts.values(),
+                    key=lambda item: str(item.get("started_at") or ""),
+                )
+            ],
             "return_context_hours": self.return_context_hours,
             "transient_stop_minutes": self.transient_stop_minutes,
             "pending_review_hours": self.pending_review_hours,
@@ -516,6 +551,7 @@ class KnihaJizdManager:
             "review_count",
             "today_review_count",
             "transient_count",
+            "place_prompt_count",
             "trigger_ok",
             "gps_ok",
             "address_ok",
@@ -563,6 +599,11 @@ class KnihaJizdManager:
             self.private_radius,
             self.transient_radius,
         )
+        learned_places = [
+            place
+            for place in learned_places
+            if place.get("place_role") != PLACE_ROLE_TRANSIENT
+        ]
         configured_places: list[dict[str, Any]] = []
         for marker in (
             {
@@ -856,7 +897,12 @@ class KnihaJizdManager:
         if isinstance(persisted, list):
             for segment in persisted:
                 if isinstance(segment, dict) and segment.get("id"):
-                    rows[str(segment["id"])] = _panel_trip_row(segment, "saved")
+                    segment_id = str(segment["id"])
+                    rows[segment_id] = _panel_trip_row(segment, "saved")
+                    if segment_id in self._place_prompts:
+                        rows[segment_id]["place_question"] = deepcopy(
+                            self._place_prompts[segment_id]
+                        )
 
         runtime_groups: tuple[tuple[str, list[dict[str, Any]]], ...] = (
             ("driving", [self._active] if self._active is not None else []),
@@ -969,6 +1015,7 @@ class KnihaJizdManager:
             if runtime.get("journey_role") == "transient_stop":
                 self._transient.pop(runtime_id, None)
                 runtime["journey_role"] = "destination"
+                runtime["visit_role"] = "destination"
                 stop = runtime.get("transient_stop")
                 if isinstance(stop, dict):
                     stop["manually_resolved"] = True
@@ -977,21 +1024,7 @@ class KnihaJizdManager:
                 purpose=selected_purpose,
                 trip_type=trip_type,
                 source="manual_panel",
-                learn_place=bool(selected_purpose),
-                learned_label=(
-                    str(
-                        runtime.get("map_estimate")
-                        or runtime.get("end_address")
-                        or "Soukromé místo"
-                    )
-                    if trip_type == TRIP_TYPE_PRIVATE
-                    else selected_purpose or None
-                ),
-                place_role=(
-                    PLACE_ROLE_PRIVATE
-                    if trip_type == TRIP_TYPE_PRIVATE
-                    else PLACE_ROLE_CLIENT if selected_purpose else None
-                ),
+                learn_place=False,
             )
             await self._async_clear_classification_notification(segment_id)
             if runtime_id != segment_id:
@@ -1013,16 +1046,21 @@ class KnihaJizdManager:
         )
         if not changed:
             raise ValueError("trip segment was not found")
-        place_result = await self.repository.async_sync_place_from_trip(
-            segment_id,
-            selected_purpose,
-            trip_type,
-            self.client_radius,
-            self.private_radius,
-        )
+        prompt = self._place_prompts.get(segment_id)
+        if prompt is not None:
+            prompt["purpose"] = selected_purpose
+            prompt["trip_type"] = trip_type
+            prompt["trip_type_label"] = (
+                "služební" if trip_type == TRIP_TYPE_BUSINESS else "soukromá"
+            )
+            if selected_purpose and trip_type == TRIP_TYPE_BUSINESS:
+                prompt["suggested_label"] = selected_purpose
+            if end_address is not None and str(end_address).strip():
+                prompt["end_address"] = str(end_address).strip()
+            await self._async_save_runtime()
         await self._async_refresh_statistics()
         await self._async_clear_classification_notification(segment_id)
-        return {"updated": changed, "state": "saved", **place_result}
+        return {"updated": changed, "state": "saved"}
 
     def _find_runtime_segment(self, segment_id: str) -> dict[str, Any] | None:
         """Find one unfinished segment without copying its live state."""
@@ -1084,7 +1122,8 @@ class KnihaJizdManager:
         """Schedule processing for a matching actionable notification event."""
         action = event.data.get("action")
         if not isinstance(action, str) or not _ACTION_PATTERN.match(action):
-            return
+            if not isinstance(action, str) or not _PLACE_ACTION_PATTERN.match(action):
+                return
         self._create_task(
             self._async_process_notification_action(event.data),
             f"{DOMAIN}_notification_action",
@@ -1098,7 +1137,9 @@ class KnihaJizdManager:
             and event.data.get(ATTR_SERVICE) == self.notify_service
         ):
             self._notify_listeners()
-            if event.event_type == EVENT_SERVICE_REGISTERED and self._pending:
+            if event.event_type == EVENT_SERVICE_REGISTERED and (
+                self._pending or self._place_prompts
+            ):
                 self._create_task(
                     self._async_resend_unsent_notifications(),
                     f"{DOMAIN}_resend_pending_notifications",
@@ -1111,6 +1152,9 @@ class KnihaJizdManager:
                 "notification_sent_at"
             ):
                 await self._async_schedule_classification_notification(segment)
+        for prompt in list(self._place_prompts.values()):
+            if not prompt.get("notification_sent_at"):
+                await self._async_send_place_notification(prompt)
 
     def _create_task(self, coro: Coroutine[Any, Any, Any], name: str) -> None:
         """Create a tracked Home Assistant task."""
@@ -1166,12 +1210,19 @@ class KnihaJizdManager:
                 "end_address_raw": None,
                 "start_latitude": location["latitude"],
                 "start_longitude": location["longitude"],
+                "start_accuracy_m": location.get("accuracy_m"),
+                "observed_start_address": location["address"],
+                "observed_start_address_raw": location["address_raw"],
+                "observed_start_latitude": location["latitude"],
+                "observed_start_longitude": location["longitude"],
+                "observed_start_accuracy_m": location.get("accuracy_m"),
                 "start_location_source": location.get("coordinate_source"),
                 "start_location_coordinate_updated_at": location.get(
                     "coordinate_updated_at"
                 ),
                 "end_latitude": None,
                 "end_longitude": None,
+                "end_accuracy_m": None,
                 "purpose": None,
                 "trip_type": None,
                 "classification_source": None,
@@ -1179,6 +1230,7 @@ class KnihaJizdManager:
                 "classification_ready": False,
                 "persisted": False,
                 "journey_role": None,
+                "visit_role": None,
                 "journey_inherited_from_segment_id": None,
                 "transient_stop": None,
                 "transient_continuation": None,
@@ -1229,10 +1281,12 @@ class KnihaJizdManager:
             segment["end_address_raw"] = location["address_raw"]
             segment["end_latitude"] = location["latitude"]
             segment["end_longitude"] = location["longitude"]
+            segment["end_accuracy_m"] = location.get("accuracy_m")
             segment["end_location_initial_address"] = location["address"]
             segment["end_location_initial_address_raw"] = location["address_raw"]
             segment["end_location_initial_latitude"] = location["latitude"]
             segment["end_location_initial_longitude"] = location["longitude"]
+            segment["end_location_initial_accuracy_m"] = location.get("accuracy_m")
             segment["end_location_coordinate_updated_at"] = location.get(
                 "coordinate_updated_at"
             )
@@ -1457,6 +1511,9 @@ class KnihaJizdManager:
                 "longitude": segment.get("end_location_initial_longitude")
                 if segment.get("end_location_initial_longitude") is not None
                 else segment.get("end_longitude"),
+                "accuracy_m": segment.get("end_location_initial_accuracy_m")
+                if segment.get("end_location_initial_accuracy_m") is not None
+                else segment.get("end_accuracy_m"),
                 "coordinate_updated_at": segment.get(
                     "end_location_coordinate_updated_at"
                 ),
@@ -1490,6 +1547,7 @@ class KnihaJizdManager:
                 or segment.get("end_address"),
                 "latitude": segment.get("end_location_initial_latitude"),
                 "longitude": segment.get("end_location_initial_longitude"),
+                "accuracy_m": segment.get("end_location_initial_accuracy_m"),
                 "coordinate_updated_at": segment.get(
                     "end_location_coordinate_updated_at"
                 ),
@@ -1532,6 +1590,7 @@ class KnihaJizdManager:
             segment["end_address_raw"] = location.get("address_raw")
         segment["end_latitude"] = location.get("latitude")
         segment["end_longitude"] = location.get("longitude")
+        segment["end_accuracy_m"] = location.get("accuracy_m")
         segment["end_location_coordinate_updated_at"] = location.get(
             "coordinate_updated_at"
         )
@@ -1596,6 +1655,7 @@ class KnihaJizdManager:
                 or location.get("address_raw"),
                 "latitude": previous.get("end_latitude"),
                 "longitude": previous.get("end_longitude"),
+                "accuracy_m": previous.get("end_accuracy_m"),
                 "alignment_source": previous.get("id"),
             }
         return location
@@ -1624,12 +1684,17 @@ class KnihaJizdManager:
             )
             if distance is not None and distance > self.transient_radius:
                 return
+            if distance is None and str(active.get("start_address") or "").casefold() != str(
+                finished_segment.get("end_address") or ""
+            ).casefold():
+                return
             active["start_address"] = finished_segment.get("end_address")
             active["start_address_raw"] = finished_segment.get(
                 "end_address_raw"
             ) or finished_segment.get("end_address")
             active["start_latitude"] = finished_segment.get("end_latitude")
             active["start_longitude"] = finished_segment.get("end_longitude")
+            active["start_accuracy_m"] = finished_segment.get("end_accuracy_m")
             active["start_location_source"] = "previous_segment_final"
 
     async def _async_prepare_classification(
@@ -2027,6 +2092,7 @@ class KnihaJizdManager:
             segment["review_reason"] = "ignored_expired_transient_stop"
             segment["review_created_at"] = _iso_utc(datetime.now(UTC))
             segment["journey_role"] = "destination"
+            segment["visit_role"] = "destination"
             await self._async_finalize_segment(
                 segment,
                 purpose=str(
@@ -2048,6 +2114,7 @@ class KnihaJizdManager:
         segment_id = str(segment["id"])
         segment["journey_id"] = segment.get("journey_id") or uuid4().hex
         segment["journey_role"] = "transient_stop"
+        segment["visit_role"] = "waypoint_candidate"
         segment["classification_prepared"] = True
         self._closing.pop(segment_id, None)
         self._pending.pop(segment_id, None)
@@ -2091,6 +2158,7 @@ class KnihaJizdManager:
             stop["expired"] = True
             stop["max_duration_minutes"] = self.transient_stop_minutes
         segment["journey_role"] = "destination"
+        segment["visit_role"] = "destination"
         if (
             isinstance(stop, dict)
             and stop.get("detection_source") == "learned_contextual_place"
@@ -2167,6 +2235,7 @@ class KnihaJizdManager:
             if was_pending:
                 self._pending.pop(transient_id, None)
                 transient["journey_role"] = "transient_stop"
+                transient["visit_role"] = "waypoint"
                 transient["transient_stop"] = {
                     "detected": True,
                     "kind": "very_short_stop",
@@ -2192,6 +2261,7 @@ class KnihaJizdManager:
             )
             transient["continued_by_segment_id"] = current.get("id")
             transient["continuation"] = details
+            transient["visit_role"] = "waypoint"
             return transient
         return None
 
@@ -2460,54 +2530,35 @@ class KnihaJizdManager:
             return
         segment_id = str(segment["id"])
         estimate = str(segment.get("map_estimate") or "Neznámý cíl")
-        candidates = _map_candidates(segment)
-        candidate_lines = [
-            f"{index}. {candidate['name']} ({_format_distance(candidate.get('distance_m'))})"
-            for index, candidate in enumerate(candidates[:3], start=1)
-        ]
         return_context = segment.get("return_context")
-        transient_stop = segment.get("transient_stop")
         known_place_exception = bool(segment.get("known_place_exception"))
         if known_place_exception:
             base_message = (
                 f"Místo {estimate} je výjimka používaná služebně i soukromě. "
-                "Potvrďte typ této jízdy."
+                "Jaký typ měla tato jízda?"
             )
         elif isinstance(return_context, dict) and return_context.get("suggested"):
             previous_purpose = return_context.get("previous_purpose")
             if previous_purpose:
                 base_message = (
                     f"Možný návrat po návštěvě {previous_purpose}. "
-                    f"Odhadovaný cíl: {estimate}. Byla to služební zpáteční "
-                    "jízda, další klient, nebo osobní cesta?"
+                    f"Odhadovaný cíl: {estimate}. Jaký typ měla tato jízda?"
                 )
             else:
                 base_message = (
-                    f"Cíl {estimate} je uložený jako návratové místo, ale "
-                    "nenavazuje na známou služební jízdu. Jak cestu zařadit?"
+                    f"Odhadovaný cíl: {estimate}. Jaký typ měla tato jízda?"
                 )
-        elif isinstance(transient_stop, dict) and transient_stop.get("expired"):
-            base_message = (
-                f"Zastavení {estimate} vypadalo jako mezizastávka, ale další "
-                f"jízda nezačala do {self.transient_stop_minutes:g} minut. "
-                "Jak tento samostatný segment zařadit?"
-            )
-        elif candidate_lines:
-            base_message = (
-                f"Jízda ukončena. Nejpravděpodobnější cíl: {estimate}. "
-                f"Návrhy: {'; '.join(candidate_lines)}. Jak jízdu zařadit? "
-                "U volby Navrhnout nového lze zadat vlastní název nebo číslo návrhu."
-            )
         elif segment.get("candidate_search_status") == "error":
             base_message = (
-                f"Jízda ukončena v cíli {estimate}. Vyhledávání okolních "
-                "institucí je dočasně nedostupné; jízdu lze přesto zařadit "
-                "ručně a hledání bude diagnostikované v panelu."
+                f"Jízda ukončena v cíli {estimate}. Mapový odhad není úplný. "
+                "Jaký typ měla tato jízda?"
             )
         else:
             base_message = (
-                f"Jízda ukončena. Odhadovaný cíl: {estimate}. Jak jízdu zařadit?"
+                f"Jízda ukončena. Odhadovaný cíl: {estimate}. "
+                "Jaký typ měla tato jízda?"
             )
+        base_message += " Uložení místa nabídneme zvlášť až po zařazení jízdy."
         message = (
             f"{validation_message} {base_message}"
             if validation_message
@@ -2528,10 +2579,21 @@ class KnihaJizdManager:
             )
             return
 
-        if known_place_exception:
-            actions = [
+        actions = []
+        if isinstance(return_context, dict) and (
+            return_context.get("previous_segment_id")
+            or return_context.get("previous_purpose")
+        ):
+            actions.append(
                 {
-                    "action": _action_id(ACTION_CONFIRM, segment_id),
+                    "action": _action_id(ACTION_RETURN, segment_id),
+                    "title": "Služební návrat",
+                }
+            )
+        actions.extend(
+            [
+                {
+                    "action": _action_id(ACTION_BUSINESS, segment_id),
                     "title": "Služební",
                 },
                 {
@@ -2539,60 +2601,7 @@ class KnihaJizdManager:
                     "title": "Soukromá",
                 },
             ]
-        elif isinstance(return_context, dict) and return_context.get("suggested"):
-            actions = [
-                {
-                    "action": _action_id(ACTION_RETURN, segment_id),
-                    "title": "Služební návrat",
-                },
-                {
-                    "action": _action_id(ACTION_NEW, segment_id),
-                    "title": "Jiný klient",
-                    "behavior": "textInput",
-                    "textInputButtonTitle": "Uložit",
-                    "textInputPlaceholder": "Název nebo číslo návrhu 1–3",
-                },
-                {
-                    "action": _action_id(ACTION_PRIVATE, segment_id),
-                    "title": "Osobní KM",
-                },
-            ]
-        elif candidates:
-            actions = [
-                {
-                    "action": _action_id(ACTION_CONFIRM, segment_id),
-                    "title": "Potvrdit klienta",
-                },
-                {
-                    "action": _action_id(ACTION_NEW, segment_id),
-                    "title": "Navrhnout nového",
-                    "behavior": "textInput",
-                    "textInputButtonTitle": "Uložit",
-                    "textInputPlaceholder": "Název nebo číslo návrhu 1–3",
-                },
-                {
-                    "action": _action_id(ACTION_PRIVATE, segment_id),
-                    "title": "Osobní KM",
-                },
-            ]
-        else:
-            actions = [
-                {
-                    "action": _action_id(ACTION_BUSINESS, segment_id),
-                    "title": "Služební bez klienta",
-                },
-                {
-                    "action": _action_id(ACTION_NEW, segment_id),
-                    "title": "Zadat klienta",
-                    "behavior": "textInput",
-                    "textInputButtonTitle": "Uložit",
-                    "textInputPlaceholder": "Klient nebo účel",
-                },
-                {
-                    "action": _action_id(ACTION_PRIVATE, segment_id),
-                    "title": "Osobní KM",
-                },
-            ]
+        )
         try:
             await self.hass.services.async_call(
                 "notify",
@@ -2641,6 +2650,87 @@ class KnihaJizdManager:
                 "Could not clear trip notification for segment %s", segment_id
             )
 
+    async def _async_send_place_notification(
+        self, prompt: dict[str, Any], validation_message: str | None = None
+    ) -> None:
+        """Ask only whether an already classified destination should be remembered."""
+        segment_id = str(prompt.get("segment_id") or "")
+        if not segment_id or segment_id not in self._place_prompts:
+            return
+        if prompt.get("notification_sent_at") and validation_message is None:
+            return
+        service = self.notify_service
+        if not self.hass.services.has_service("notify", service):
+            prompt["notification_error"] = f"notify.{service} is not registered"
+            await self._async_save_runtime()
+            return
+
+        suggested_label = str(prompt.get("suggested_label") or "Místo")
+        message = (
+            f"Jízda je uložená jako {prompt.get('trip_type_label')}. "
+            f"Chcete cíl {suggested_label} uložit pro automatické rozpoznání příště?"
+        )
+        if validation_message:
+            message = f"{validation_message} {message}"
+        actions = [
+            {
+                "action": _action_id(ACTION_SAVE_PLACE, segment_id),
+                "title": f"Uložit {suggested_label[:24]}",
+            },
+            {
+                "action": _action_id(ACTION_SAVE_NAMED_PLACE, segment_id),
+                "title": "Jiný název",
+                "behavior": "textInput",
+                "textInputButtonTitle": "Uložit místo",
+                "textInputPlaceholder": "Název místa",
+            },
+            {
+                "action": _action_id(ACTION_SKIP_PLACE, segment_id),
+                "title": "Jen tentokrát",
+            },
+        ]
+        try:
+            await self.hass.services.async_call(
+                "notify",
+                service,
+                {
+                    "title": "Kniha jízd · místo",
+                    "message": message,
+                    "data": {
+                        "tag": f"kniha_jizd_place_{segment_id}",
+                        "actions": actions,
+                    },
+                },
+                blocking=True,
+            )
+        except Exception as err:  # noqa: BLE001 - panel remains available
+            prompt["notification_error"] = f"{type(err).__name__}: {err}"
+            await self._async_save_runtime()
+            return
+        prompt.pop("notification_error", None)
+        prompt["notification_sent_at"] = _iso_utc(datetime.now(UTC))
+        await self._async_save_runtime()
+
+    async def _async_clear_place_notification(self, segment_id: str) -> None:
+        """Dismiss the independent place-save question."""
+        service = self.notify_service
+        if not self.hass.services.has_service("notify", service):
+            return
+        try:
+            await self.hass.services.async_call(
+                "notify",
+                service,
+                {
+                    "message": "clear_notification",
+                    "data": {"tag": f"kniha_jizd_place_{segment_id}"},
+                },
+                blocking=True,
+            )
+        except Exception:  # noqa: BLE001 - the decision is already stored
+            _LOGGER.exception(
+                "Could not clear place notification for segment %s", segment_id
+            )
+
     async def async_resolve_trip(
         self,
         segment_id: str,
@@ -2674,6 +2764,48 @@ class KnihaJizdManager:
                 channel,
             )
 
+    async def async_resolve_place(
+        self,
+        segment_id: str,
+        action: str,
+        label: str = "",
+        channel: str = "panel",
+    ) -> dict[str, Any]:
+        """Save or dismiss a place independently of the trip classification."""
+        normalized_action = str(action or "").strip().casefold()
+        if normalized_action not in {"save", "skip"}:
+            raise ValueError("action must be save or skip")
+        async with self._resolution_lock:
+            prompt = self._place_prompts.get(segment_id)
+            if prompt is None:
+                await self._async_clear_place_notification(segment_id)
+                return {"updated": 0, "state": "already_resolved"}
+            result: dict[str, Any] = {"place_updated": False}
+            if normalized_action == "save":
+                selected_label = str(label or prompt.get("suggested_label") or "").strip()
+                if not selected_label:
+                    raise ValueError("zadejte název místa")
+                result = await self.repository.async_sync_place_from_trip(
+                    segment_id,
+                    str(prompt.get("purpose") or ""),
+                    str(prompt.get("trip_type") or TRIP_TYPE_PRIVATE),
+                    self.client_radius,
+                    self.private_radius,
+                    selected_label,
+                )
+            self._place_prompts.pop(segment_id, None)
+            await self._async_save_runtime()
+            await self._async_clear_place_notification(segment_id)
+            await self._async_refresh_statistics()
+            self._last_notification_action = {
+                "segment_id": segment_id,
+                "action": f"place_{normalized_action}",
+                "channel": channel,
+                "processed_at": _iso_utc(datetime.now(UTC)),
+            }
+            self._notify_listeners()
+            return {"updated": 1, "state": "saved", **result}
+
     async def _async_resolve_trip_locked(
         self,
         segment_id: str,
@@ -2692,12 +2824,8 @@ class KnihaJizdManager:
         selected_candidate: dict[str, Any] | None = None
         learned_label: str | None = None
         place_role: str | None = None
-        learn_place = True
+        learn_place = False
         return_context = segment.get("return_context")
-        transient_stop = segment.get("transient_stop")
-        expired_transient = bool(
-            isinstance(transient_stop, dict) and transient_stop.get("expired")
-        )
 
         if action == ACTION_RETURN:
             if not isinstance(return_context, dict) or not (
@@ -2730,9 +2858,6 @@ class KnihaJizdManager:
                     selected_candidate = candidates[candidate_index - 1]
                     purpose = str(selected_candidate["name"])
                     trip_type = TRIP_TYPE_BUSINESS
-                    learned_label = purpose
-                    place_role = PLACE_ROLE_CLIENT
-                    learn_place = True
                 else:
                     # The phone's generic confirm action intentionally accepts
                     # the first displayed proposal. Panel buttons always send
@@ -2744,9 +2869,6 @@ class KnihaJizdManager:
                         or ""
                     )
                     trip_type = TRIP_TYPE_BUSINESS
-                    learned_label = purpose or None
-                    place_role = PLACE_ROLE_CLIENT if purpose else None
-                    learn_place = bool(purpose)
             elif action == ACTION_NEW:
                 selected_value = value
                 if candidate_index is None and selected_value.isdigit():
@@ -2762,26 +2884,20 @@ class KnihaJizdManager:
                 else:
                     raise ValueError("enter a customer or purpose")
                 trip_type = TRIP_TYPE_BUSINESS
-                learned_label = purpose
-                place_role = PLACE_ROLE_CLIENT
                 if isinstance(return_context, dict):
                     segment["journey_role"] = "destination"
             elif action == ACTION_BUSINESS:
-                purpose = ""
+                purpose = value
+                if not purpose and segment.get("known_place_exception"):
+                    purpose = str(
+                        segment.get("map_estimate")
+                        or segment.get("return_destination_label")
+                        or ""
+                    )
                 trip_type = TRIP_TYPE_BUSINESS
-                learn_place = False
             elif action == ACTION_PRIVATE:
                 purpose = "Soukromá"
                 trip_type = TRIP_TYPE_PRIVATE
-                learn_place = expired_transient or not bool(
-                    segment.get("matched_place_id")
-                )
-                place_role = PLACE_ROLE_PRIVATE
-                learned_label = str(
-                    segment.get("map_estimate")
-                    or segment.get("end_address")
-                    or "Soukromé místo"
-                )
             else:  # guarded by async_resolve_trip
                 raise ValueError("unsupported trip resolution action")
 
@@ -2824,13 +2940,39 @@ class KnihaJizdManager:
         self, event_data: dict[str, Any]
     ) -> None:
         """Classify and persist a pending segment from a mobile app action."""
-        match = _ACTION_PATTERN.match(str(event_data.get("action", "")))
-        if match is None:
-            return
-        action, segment_id = match.groups()
+        action_id = str(event_data.get("action", ""))
         reply_text = str(
             event_data.get("reply_text") or event_data.get("replyText") or ""
         ).strip()
+        place_match = _PLACE_ACTION_PATTERN.match(action_id)
+        if place_match is not None:
+            action, segment_id = place_match.groups()
+            try:
+                if action == ACTION_SKIP_PLACE:
+                    await self.async_resolve_place(
+                        segment_id, "skip", channel="notification"
+                    )
+                else:
+                    if action == ACTION_SAVE_NAMED_PLACE and not reply_text:
+                        raise ValueError("zadejte název místa")
+                    await self.async_resolve_place(
+                        segment_id,
+                        "save",
+                        reply_text,
+                        channel="notification",
+                    )
+            except ValueError as err:
+                prompt = self._place_prompts.get(segment_id)
+                if prompt is not None:
+                    await self._async_send_place_notification(
+                        prompt, f"{err}. Zkuste to prosím znovu."
+                    )
+            return
+
+        match = _ACTION_PATTERN.match(action_id)
+        if match is None:
+            return
+        action, segment_id = match.groups()
         try:
             await self.async_resolve_trip(
                 segment_id,
@@ -2994,7 +3136,6 @@ class KnihaJizdManager:
                 transient["classification_prepared"] = True
                 transient["classification_ready"] = True
                 transient["persisted"] = True
-                await self._async_learn_transient_place(transient)
                 await self.repository.async_append_segment(transient)
                 self._transient.pop(str(transient.get("id")), None)
 
@@ -3003,63 +3144,11 @@ class KnihaJizdManager:
             if segment_date:
                 await self.repository.async_reconcile_day(segment_date)
 
-            if learn_place and (
-                segment.get("end_address")
-                or (
-                    segment.get("end_latitude") is not None
-                    and segment.get("end_longitude") is not None
-                )
-            ):
-                transient_stop = segment.get("transient_stop")
-                transient_capable = bool(
-                    isinstance(transient_stop, dict)
-                    and transient_stop.get("detected")
-                )
-                await self.repository.async_learn_place(
-                    {
-                        "id": (
-                            segment.get("matched_place_id")
-                            if place_role is not None
-                            and segment.get("matched_place_id")
-                            else uuid4().hex
-                        ),
-                        "latitude": segment.get("end_latitude"),
-                        "longitude": segment.get("end_longitude"),
-                        "address": segment.get("end_address_raw")
-                        or segment.get("end_address"),
-                        "label": learned_label or purpose,
-                        "trip_type": trip_type,
-                        "place_role": place_role,
-                        **(
-                            {"radius_m": self.private_radius}
-                            if place_role == PLACE_ROLE_PRIVATE
-                            else (
-                                {"radius_m": self.transient_radius}
-                                if place_role == PLACE_ROLE_TRANSIENT
-                                else {"radius_m": self.client_radius}
-                            )
-                        ),
-                        "map_name": segment.get("map_estimate"),
-                        "transient_capable": transient_capable,
-                        "transient_kind": (
-                            transient_stop.get("kind")
-                            if isinstance(transient_stop, dict)
-                            else None
-                        ),
-                        "updated_at": _iso_utc(datetime.now(UTC)),
-                    }
-                )
-            if source == "manual_panel" and trip_type in {
-                TRIP_TYPE_BUSINESS,
-                TRIP_TYPE_PRIVATE,
-            }:
-                await self.repository.async_sync_place_from_trip(
-                    str(segment.get("id")),
-                    purpose,
-                    trip_type,
-                    self.client_radius,
-                    self.private_radius,
-                )
+            # Places are persisted only through the independent save-place
+            # decision after the trip itself is safely classified.
+            del learn_place, learned_label, place_role
+        if self._should_offer_place_save(segment, source, trip_type):
+            await self._async_queue_place_prompt(segment, purpose, trip_type)
         self._last_error = None
         await self._async_refresh_statistics()
         _LOGGER.info(
@@ -3087,47 +3176,77 @@ class KnihaJizdManager:
             key=lambda item: str(item.get("started_at") or ""),
         )
 
-    async def _async_learn_transient_place(
-        self, segment: dict[str, Any]
-    ) -> None:
-        """Learn a confirmed intermediate POI using a deliberately small radius."""
-        stop = segment.get("transient_stop")
-        if not isinstance(stop, dict):
-            return
-        if segment.get("matched_place_id") and segment.get(
-            "matched_place_role"
-        ) not in {None, PLACE_ROLE_TRANSIENT}:
-            # A known private/business destination may be a contextual stop, but
-            # its durable default classification must not be replaced by transient.
-            return
-        if not (
-            segment.get("end_address")
-            or (
-                segment.get("end_latitude") is not None
-                and segment.get("end_longitude") is not None
+    @staticmethod
+    def _should_offer_place_save(
+        segment: dict[str, Any], source: str, trip_type: str
+    ) -> bool:
+        """Offer learning only after an explicit classification of a real destination."""
+        return bool(
+            trip_type in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}
+            and source.startswith(("manual_panel", "notification"))
+            and segment.get("journey_role") != "return"
+            and segment.get("visit_role") != "waypoint"
+            and segment.get("journey_role") != "transient_stop"
+            and not segment.get("configured_place")
+            and not segment.get("matched_place_id")
+            and not segment.get("needs_review")
+            and (
+                segment.get("end_address")
+                or (
+                    segment.get("end_latitude") is not None
+                    and segment.get("end_longitude") is not None
+                )
             )
-        ):
+        )
+
+    async def _async_queue_place_prompt(
+        self, segment: dict[str, Any], purpose: str, trip_type: str
+    ) -> None:
+        """Create the second, independent decision about remembering a place."""
+        segment_id = str(segment.get("id") or "")
+        if not segment_id or segment_id in self._place_prompts:
             return
-        place_id = str(segment.get("matched_place_id") or uuid4().hex)
-        segment["matched_place_id"] = place_id
-        await self.repository.async_learn_place(
-            {
-                "id": place_id,
-                "latitude": segment.get("end_latitude"),
-                "longitude": segment.get("end_longitude"),
-                "address": segment.get("end_address_raw")
-                or segment.get("end_address"),
-                "label": (
-                    stop.get("name")
-                    or segment.get("map_estimate")
-                    or "Mezizastávka"
-                ),
-                "trip_type": TRIP_TYPE_CONTEXTUAL,
-                "place_role": PLACE_ROLE_TRANSIENT,
-                "radius_m": self.transient_radius,
-                "map_name": segment.get("map_estimate"),
-                "updated_at": _iso_utc(datetime.now(UTC)),
-            }
+        suggested_label = str(
+            (
+                purpose
+                if trip_type == TRIP_TYPE_BUSINESS and str(purpose).strip()
+                else segment.get("map_estimate")
+                or segment.get("end_address")
+                or ("Soukromé místo" if trip_type == TRIP_TYPE_PRIVATE else "Klient")
+            )
+        ).strip()
+        prompt = {
+            "segment_id": segment_id,
+            "title": "Uložit místo pro příště?",
+            "prompt": (
+                f"Jízda už je zařazená jako "
+                f"{'služební' if trip_type == TRIP_TYPE_BUSINESS else 'soukromá'}. "
+                "Teď můžete samostatně rozhodnout, zda se má cíl příště rozpoznat automaticky."
+            ),
+            "suggested_label": suggested_label,
+            "purpose": purpose,
+            "trip_type": trip_type,
+            "started_at": segment.get("started_at"),
+            "start_address": segment.get("start_address"),
+            "end_address": segment.get("end_address"),
+            "trip_type_label": (
+                "služební" if trip_type == TRIP_TYPE_BUSINESS else "soukromá"
+            ),
+            "candidates": [
+                {
+                    "index": index,
+                    "name": str(candidate.get("name") or "").strip(),
+                }
+                for index, candidate in enumerate(_map_candidates(segment)[:3], start=1)
+                if str(candidate.get("name") or "").strip()
+            ],
+            "created_at": _iso_utc(datetime.now(UTC)),
+        }
+        self._place_prompts[segment_id] = prompt
+        await self._async_save_runtime()
+        self._create_task(
+            self._async_send_place_notification(prompt),
+            f"{DOMAIN}_place_notification_{segment_id}",
         )
 
     def _capture_location(self) -> dict[str, float | str | None]:
@@ -3182,6 +3301,7 @@ class KnihaJizdManager:
                     "closing": deepcopy(self._closing),
                     "pending": deepcopy(self._pending),
                     "transient": deepcopy(self._transient),
+                    "place_prompts": deepcopy(self._place_prompts),
                 }
             )
         self._notify_listeners()
@@ -3387,6 +3507,7 @@ def _panel_trip_row(segment: dict[str, Any], status: str) -> dict[str, Any]:
         "purpose": segment.get("purpose"),
         "trip_type": segment.get("trip_type"),
         "journey_role": segment.get("journey_role"),
+        "visit_role": segment.get("visit_role"),
         "needs_review": bool(segment.get("needs_review")),
         "review_reason": segment.get("review_reason"),
         "decision": decision,
@@ -3519,6 +3640,7 @@ def _map_trip_row(segment: dict[str, Any], status: str) -> dict[str, Any]:
         "trip_type": segment.get("trip_type"),
         "journey_id": segment.get("journey_id"),
         "journey_role": segment.get("journey_role"),
+        "visit_role": segment.get("visit_role"),
         "needs_review": bool(segment.get("needs_review")),
         "status": status,
     }

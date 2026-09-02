@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
 from math import asin, cos, floor, radians, sin, sqrt
 from pathlib import Path
@@ -19,8 +18,6 @@ SUMMARY_COLUMNS = [
     "Služební km",
     "Soukromé km",
 ]
-_IMPLICIT_TRANSIENT_STOP_SECONDS = 10 * 60
-_IMPLICIT_TRANSIENT_CONTINUATION_RADIUS_M = 250
 
 
 def export_excel(
@@ -125,20 +122,11 @@ def _build_summary_rows(
             for segment in day_segments
             if segment.get("trip_type") == "business"
         ]
-        visible_business_segments = []
-        for index, segment in enumerate(business_segments):
-            next_segment = (
-                business_segments[index + 1]
-                if index + 1 < len(business_segments)
-                else None
-            )
-            if segment.get("journey_role") == "transient_stop":
-                continue
-            if next_segment is not None and _is_very_short_stop(
-                segment, next_segment
-            ):
-                continue
-            visible_business_segments.append(segment)
+        visible_business_segments = [
+            segment
+            for segment in business_segments
+            if not _is_waypoint(segment)
+        ]
         route_nodes: list[str] = []
         if business_segments:
             route_nodes.append(
@@ -274,60 +262,11 @@ def _whole_km(value: float) -> int:
     return int(floor(max(0.0, value) + 0.5))
 
 
-def _is_very_short_stop(
-    segment: dict[str, Any], next_segment: dict[str, Any]
-) -> bool:
-    """Hide an untagged quick stop without swallowing a real client visit."""
-    ended_at = _parse_iso_datetime(segment.get("ended_at"))
-    next_started_at = _parse_iso_datetime(next_segment.get("started_at"))
-    if ended_at is None or next_started_at is None:
-        return False
-    gap_seconds = (next_started_at - ended_at).total_seconds()
-    if gap_seconds < 0 or gap_seconds > _IMPLICIT_TRANSIENT_STOP_SECONDS:
-        return False
-    if _is_meaningful_business_destination(segment):
-        return False
-
-    distance_m = _coordinate_distance_m(
-        segment.get("end_latitude"),
-        segment.get("end_longitude"),
-        next_segment.get("start_latitude"),
-        next_segment.get("start_longitude"),
-    )
-    if distance_m is not None:
-        return distance_m <= _IMPLICIT_TRANSIENT_CONTINUATION_RADIUS_M
-
-    end_address = str(segment.get("end_address") or "").strip().casefold()
-    next_start_address = str(next_segment.get("start_address") or "").strip().casefold()
-    return bool(end_address and end_address == next_start_address)
-
-
-def _is_meaningful_business_destination(segment: dict[str, Any]) -> bool:
-    """Keep a short stop when the data contains affirmative client evidence."""
-    journey_role = str(segment.get("journey_role") or "").strip().casefold()
-    classification_source = str(
-        segment.get("classification_source") or ""
-    ).strip().casefold()
-    if (
-        journey_role in {"return", "transient_stop"}
-        or segment.get("return_of_segment_id")
-        or classification_source.endswith("notification_return")
-    ):
-        return False
-    if str(segment.get("matched_place_role") or "").casefold() == "client":
-        return True
-    return bool(str(segment.get("purpose") or "").strip())
-
-
-def _parse_iso_datetime(value: Any) -> datetime | None:
-    """Parse one stored ISO timestamp for short-stop comparisons."""
-    try:
-        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+def _is_waypoint(segment: dict[str, Any]) -> bool:
+    """Hide only visits that the journey classifier actually confirmed as waypoints."""
+    if segment.get("visit_role") is not None:
+        return segment.get("visit_role") == "waypoint"
+    return segment.get("journey_role") == "transient_stop"
 
 
 def _deduplicate_adjacent(values: list[str]) -> list[str]:
@@ -404,6 +343,7 @@ def _raw_columns() -> list[str]:
         "journey_distance_km",
         "journey_distance_complete",
         "journey_role",
+        "visit_role",
         "journey_inherited_from_segment_id",
         "transient_stop",
         "transient_continuation",

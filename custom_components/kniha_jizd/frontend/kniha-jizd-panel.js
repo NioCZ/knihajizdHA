@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.13.0";
+import "./kniha-jizd-map.js?v=1.14.0";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -11,6 +11,9 @@ class KnihaJizdPanel extends HTMLElement {
     this._resolvingTrip = null;
     this._questionValues = new Map();
     this._resolvedQuestions = new Set();
+    this._placeQuestionValues = new Map();
+    this._resolvedPlaceQuestions = new Set();
+    this._resolvingPlace = null;
     this._scrollPositions = new Map();
     this._activeTab = "overview";
     this._mapData = null;
@@ -168,6 +171,14 @@ class KnihaJizdPanel extends HTMLElement {
       this._resolvedQuestions = new Set(
         [...this._resolvedQuestions].filter((segmentId) => questions.has(segmentId)),
       );
+      const placeQuestions = new Set(
+        (data?.diagnostics?.place_questions || data?.diagnostics?.today_trips || [])
+          .filter((trip) => trip?.place_question)
+          .map((trip) => String(trip.id)),
+      );
+      this._resolvedPlaceQuestions = new Set(
+        [...this._resolvedPlaceQuestions].filter((segmentId) => placeQuestions.has(segmentId)),
+      );
     } catch (error) {
       if (requestId !== this._overviewRequestId) return;
       this._overviewError = error.message || String(error);
@@ -226,6 +237,7 @@ class KnihaJizdPanel extends HTMLElement {
       waiting_odometer: "Čeká se na tachometr",
       waiting_classification: "Čeká na zařazení",
       waiting_journey: "Čeká na pokračování jízdy",
+      waiting_place_save: "Čeká na uložení místa",
       processing_destination: "Určuje se cíl",
       saved: "Uloženo",
       error: "Chyba",
@@ -319,6 +331,11 @@ class KnihaJizdPanel extends HTMLElement {
       const segmentId = String(card.dataset.segmentId || "");
       const value = card.querySelector(".question-value")?.value ?? "";
       if (segmentId && value) this._questionValues.set(segmentId, value);
+    });
+    this.shadowRoot.querySelectorAll(".place-question-card[data-segment-id]").forEach((card) => {
+      const segmentId = String(card.dataset.segmentId || "");
+      const value = card.querySelector(".place-question-value")?.value ?? "";
+      if (segmentId) this._placeQuestionValues.set(segmentId, value);
     });
   }
 
@@ -431,7 +448,6 @@ class KnihaJizdPanel extends HTMLElement {
     const question = trip.question || {};
     const segmentId = String(trip.id || "");
     const resolving = this._resolvingTrip === segmentId;
-    const requiresValue = (question.actions || []).some((action) => action.requires_value);
     const phoneLabel = {
       sent: "Dotaz byl poslán i do telefonu",
       panel_only: "Jen v panelu – telefon nebyl rušen",
@@ -444,8 +460,9 @@ class KnihaJizdPanel extends HTMLElement {
       <h3>${this._text(question.title, "Zařaďte jízdu")}</h3>
       <p>${this._text(question.prompt)}</p>
       <div class="question-route"><span>${this._text(trip.start_address)}</span><span aria-hidden="true">→</span><span>${this._text(trip.end_address)}</span></div>
-      ${requiresValue ? `<label class="question-input"><span>Jiný klient nebo účel</span><input class="question-value" type="text" value="${this._text(value, "")}" placeholder="Napište název nebo účel" ${resolving ? "disabled" : ""}></label>` : ""}
-      <div class="question-actions">${(question.actions || []).map((action) => `<button class="resolve-trip ${action.id === "private" ? "secondary" : ""}" data-action="${this._text(action.id)}" ${action.candidate_index ? `data-candidate-index="${this._text(action.candidate_index)}"` : ""} ${action.requires_value ? 'data-requires-value="true"' : ""} ${resolving ? "disabled" : ""}>${this._text(action.label)}</button>`).join("")}</div>
+      ${question.purpose_input ? `<label class="question-input"><span>Zákazník nebo účel <small>(volitelné, jen pro služební jízdu)</small></span><input class="question-value" type="text" value="${this._text(value, "")}" placeholder="Např. FN Brno nebo servis" ${resolving ? "disabled" : ""}></label>` : ""}
+      ${(question.candidates || []).length ? `<div class="question-suggestions"><small>Mapové návrhy pouze předvyplní účel:</small>${question.candidates.map((candidate) => `<button class="use-purpose-suggestion secondary" data-value="${this._text(candidate.name)}" ${resolving ? "disabled" : ""}>${this._text(candidate.name)}</button>`).join("")}</div>` : ""}
+      <div class="question-actions">${(question.actions || []).map((action) => `<button class="resolve-trip ${action.id === "private" ? "secondary" : ""}" data-action="${this._text(action.id)}" ${resolving ? "disabled" : ""}>${this._text(action.label)}</button>`).join("")}</div>
       <details class="question-details decision" data-details-key="question:${this._text(segmentId)}" ${this._openDetails.has(`question:${segmentId}`) ? "open" : ""}><summary>Podrobnosti návrhu</summary>${this._decisionDetails(trip, false)}</details>
     </article>`;
   }
@@ -455,19 +472,8 @@ class KnihaJizdPanel extends HTMLElement {
     const card = button.closest(".question-card");
     const segmentId = String(card?.dataset?.segmentId || "");
     const action = String(button.dataset.action || "");
-    const requiresValue = button.dataset.requiresValue === "true";
     const value = card?.querySelector(".question-value")?.value?.trim() || "";
-    const candidateIndex = Number(button.dataset.candidateIndex);
     if (!segmentId || !action) return;
-    if (requiresValue && !value) {
-      this._message = "Nejdřív napište klienta nebo účel jízdy.";
-      this._render();
-      [...this.shadowRoot.querySelectorAll(".question-card")]
-        .find((item) => item.dataset.segmentId === segmentId)
-        ?.querySelector(".question-value")
-        ?.focus();
-      return;
-    }
 
     this._resolvingTrip = segmentId;
     this._message = "Ukládám rozhodnutí…";
@@ -477,9 +483,6 @@ class KnihaJizdPanel extends HTMLElement {
         segment_id: segmentId,
         action,
         ...(value ? { value } : {}),
-        ...(Number.isInteger(candidateIndex) && candidateIndex > 0
-          ? { candidate_index: candidateIndex }
-          : {}),
       });
       this._resolvedQuestions.add(segmentId);
       this._questionValues.delete(segmentId);
@@ -491,6 +494,69 @@ class KnihaJizdPanel extends HTMLElement {
       this._message = `Rozhodnutí se nepodařilo uložit: ${error.message || error}`;
     } finally {
       this._resolvingTrip = null;
+      this._render();
+    }
+  }
+
+  _placeQuestionCards(rows) {
+    const questions = (Array.isArray(rows) ? rows : []).filter(
+      (trip) => trip?.place_question && !this._resolvedPlaceQuestions.has(String(trip.id)),
+    );
+    if (!questions.length) return "";
+    return `<section class="questions" aria-labelledby="place-questions-title">
+      <div class="section-heading"><div><h2 id="place-questions-title">Uložit místa pro příště?</h2><div class="muted">Tyto jízdy už jsou zařazené. Teď jen rozhodujete o budoucím rozpoznání cíle.</div></div><span class="count-badge place-count">${questions.length}</span></div>
+      <div class="question-grid">${questions.map((trip) => this._placeQuestionCard(trip)).join("")}</div>
+    </section>`;
+  }
+
+  _placeQuestionCard(trip) {
+    const question = trip.place_question || {};
+    const segmentId = String(trip.id || "");
+    const resolving = this._resolvingPlace === segmentId;
+    const value = this._placeQuestionValues.has(segmentId)
+      ? this._placeQuestionValues.get(segmentId)
+      : String(question.suggested_label || "");
+    return `<article class="question-card place-question-card" data-segment-id="${this._text(segmentId)}">
+      <div class="question-meta"><span>${this._time(trip.started_at)}</span><span>Jízda je už zařazená</span></div>
+      <h3>${this._text(question.title, "Uložit místo pro příště?")}</h3>
+      <p>${this._text(question.prompt)}</p>
+      <div class="question-route"><span>${this._text(trip.start_address)}</span><span aria-hidden="true">→</span><span>${this._text(trip.end_address)}</span></div>
+      <label class="question-input"><span>Název uloženého místa</span><input class="place-question-value" type="text" value="${this._text(value, "")}" placeholder="Název místa" ${resolving ? "disabled" : ""}></label>
+      ${(question.candidates || []).length ? `<div class="question-suggestions">${question.candidates.map((candidate) => `<button class="use-place-suggestion secondary" data-value="${this._text(candidate.name)}" ${resolving ? "disabled" : ""}>${this._text(candidate.name)}</button>`).join("")}</div>` : ""}
+      <div class="question-actions"><button class="resolve-place" data-action="save" ${resolving ? "disabled" : ""}>Uložit pro příště</button><button class="resolve-place secondary" data-action="skip" ${resolving ? "disabled" : ""}>Jen tentokrát</button></div>
+    </article>`;
+  }
+
+  async _resolvePlace(button) {
+    if (!this._hass || this._resolvingPlace) return;
+    const card = button.closest(".place-question-card");
+    const segmentId = String(card?.dataset?.segmentId || "");
+    const action = String(button.dataset.action || "");
+    const value = card?.querySelector(".place-question-value")?.value?.trim() || "";
+    if (!segmentId || !action) return;
+    if (action === "save" && !value) {
+      this._message = "Nejdřív zadejte název místa.";
+      this._render();
+      return;
+    }
+    this._resolvingPlace = segmentId;
+    this._message = action === "save" ? "Ukládám místo…" : "Nabídku místa zavírám…";
+    this._render();
+    try {
+      await this._hass.callService("kniha_jizd", "save_trip_place", {
+        segment_id: segmentId,
+        action,
+        ...(action === "save" ? { value } : {}),
+      });
+      this._resolvedPlaceQuestions.add(segmentId);
+      this._placeQuestionValues.delete(segmentId);
+      this._message = action === "save" ? "Místo bylo uloženo pro příští rozpoznání." : "Místo se nebude učit.";
+      this._overviewLoadedAt = 0;
+      await this._loadOverviewData();
+    } catch (error) {
+      this._message = `Rozhodnutí o místě se nepodařilo uložit: ${error.message || error}`;
+    } finally {
+      this._resolvingPlace = null;
       this._render();
     }
   }
@@ -929,9 +995,7 @@ class KnihaJizdPanel extends HTMLElement {
       const hasCoordinates = [anchor.latitude, anchor.longitude].every(
         (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)),
       );
-      const hiddenLabel = place.classification === "transient"
-        ? "Skryto – krátká zastávka"
-        : hasCoordinates
+      const hiddenLabel = hasCoordinates
           ? "Skryto – v zóně domova/firmy"
           : "Skryto – bez souřadnic";
       const point = anchors.length ? `<div class="place-anchor">
@@ -945,7 +1009,6 @@ class KnihaJizdPanel extends HTMLElement {
           <option value="business" ${values.classification === "business" ? "selected" : ""}>Služební</option>
           <option value="private" ${values.classification === "private" ? "selected" : ""}>Soukromé</option>
           <option value="mixed" ${values.classification === "mixed" ? "selected" : ""}>Služební i soukromé</option>
-          <option value="transient" ${values.classification === "transient" ? "selected" : ""}>Krátká zastávka</option>
         </select></td>
         <td data-label="Poloměr"><input class="place-radius" type="number" min="25" max="5000" step="25" value="${this._text(values.radius, "")}" data-original-value="${this._text(serverValues.radius, "")}" ${disabled ? "disabled" : ""}> m</td>
         <td data-label="Fyzický bod">${point}</td>
@@ -991,6 +1054,7 @@ class KnihaJizdPanel extends HTMLElement {
       Number(attrs.closing_count || 0)
       + Number(attrs.pending_count || 0)
       + Number(attrs.transient_count || 0)
+      + Number(attrs.place_prompt_count || 0)
     );
     const totalTripsValue = statistics.segments_total ?? totalTrips?.state;
     const totalBusinessValue = statistics.business_km_total ?? totalBusiness?.state;
@@ -1081,6 +1145,10 @@ class KnihaJizdPanel extends HTMLElement {
         .question-input { display:grid; gap:5px; margin:11px 0; color:var(--secondary-text-color); font-size:12px; }
         .question-actions { display:flex; gap:7px; flex-wrap:wrap; margin-top:12px; }
         .question-actions button { flex:1 1 135px; min-height:42px; padding:9px 11px; }
+        .question-suggestions { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:8px 0; }
+        .question-suggestions small { flex-basis:100%; }
+        .question-suggestions button { padding:6px 9px; font-size:12px; }
+        .count-badge.place-count { background:var(--primary-color); }
         .question-details { margin-top:11px; color:var(--secondary-text-color); font-size:12px; }
         .question-details summary { cursor:pointer; color:var(--primary-color); font-weight:600; }
         .table-wrap, .calendar-scroll { position:relative; display:block; width:100%; max-width:100%; min-width:0; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; scrollbar-gutter:stable; padding-bottom:8px; }
@@ -1217,6 +1285,7 @@ class KnihaJizdPanel extends HTMLElement {
           ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.", "overview-trips")}
         </section>
         ${this._questionCards(todayTripRows)}
+        ${this._placeQuestionCards(attrs.place_questions || todayTripRows)}
         <section class="grid metrics-grid">
           <article class="card metric-card"><div class="muted">Dnes služební</div><div class="metric">${this._number(businessValue)} km</div></article>
           <article class="card metric-card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateValue)} km</div></article>
@@ -1252,14 +1321,15 @@ class KnihaJizdPanel extends HTMLElement {
               <dt>Čeká tachometr</dt><dd>${this._text(attrs.closing_count, "0")}</dd>
               <dt>Čeká zařazení</dt><dd>${this._text(attrs.pending_count, "0")}</dd>
               <dt>Čeká na cíl celé jízdy</dt><dd>${this._text(attrs.transient_count, "0")}</dd>
+              <dt>Čeká uložení místa</dt><dd>${this._text(attrs.place_prompt_count, "0")}</dd>
               <dt>Návaznost návratu</dt><dd>${this._text(attrs.return_context_hours)} h</dd>
-              <dt>Limit mezizastávky</dt><dd>${this._text(attrs.transient_stop_minutes)} min</dd>
+              <dt>Okno návaznosti návštěvy</dt><dd>${this._text(attrs.transient_stop_minutes)} min</dd>
               <dt>Automatická revize</dt><dd>${this._text(attrs.pending_review_hours)} h</dd>
               <dt>Ustálení cíle</dt><dd>${this._text(attrs.location_settle_seconds)} s</dd>
               <dt>Denní kontrola km</dt><dd>${odometerCheck.consistent ? "Sedí" : "Čeká / rozdíl"} · odometer ${this._number(odometerCheck.odometer_delta_km)} km · potvrzené segmenty ${this._number(odometerCheck.assigned_segment_km)} km · čekající ${this._number(odometerCheck.pending_segment_km)} km · rozdíl ${this._number(odometerCheck.difference_km)} km</dd>
               <dt>Domov</dt><dd>${this._text(attrs.home_address)} · ${this._text(attrs.home_latitude)}, ${this._text(attrs.home_longitude)}</dd>
               <dt>Firma</dt><dd>${this._text(attrs.company_address)} · ${this._text(attrs.company_latitude)}, ${this._text(attrs.company_longitude)} → ${this._text(attrs.company_label)}</dd>
-              <dt>Poloměry</dt><dd>domov ${this._number(attrs.home_radius_m)} m · firma ${this._number(attrs.company_radius_m)} m · klient ${this._number(attrs.client_radius_m)} m · soukromé ${this._number(attrs.private_radius_m)} m · zastávka ${this._number(attrs.transient_radius_m)} m</dd>
+              <dt>Poloměry</dt><dd>domov ${this._number(attrs.home_radius_m)} m · firma ${this._number(attrs.company_radius_m)} m · klient ${this._number(attrs.client_radius_m)} m · soukromé ${this._number(attrs.private_radius_m)} m · návaznost ${this._number(attrs.transient_radius_m)} m</dd>
               <dt>Celkem</dt><dd>${this._text(totalTripsValue, "0")} záznamů · ${this._number(totalBusinessValue)} služebních km · ${this._number(totalPrivateValue)} soukromých km</dd>
               <dt>Poslední rozhodnutí</dt><dd>${attrs.last_notification_action ? `${this._text(attrs.last_notification_action.action)} · ${attrs.last_notification_action.channel === "panel" ? "panel" : "telefon"} · ${this._text(attrs.last_notification_action.processed_at)}` : "—"}</dd>
               <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
@@ -1300,15 +1370,15 @@ class KnihaJizdPanel extends HTMLElement {
           </section>
         </div>` : ""}
         ${this._activeTab === "map" ? `<section class="card map-card">
-          <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Aktuální auto, naučené parkovací body, rozpoznávací poloměry a dnešní úseky.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
+          <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Mapa zobrazuje jen výslovně uložená místa a celé dnešní trasy; potvrzené mezibody se do ní nepřidávají.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
           <div class="map-loading"></div>
           <kniha-jizd-map></kniha-jizd-map>
         </section>` : ""}
         ${this._activeTab === "places" ? `<section class="card daily-trips">
-          <div class="places-heading"><div><h2>Správa míst</h2><div class="muted">Každý řádek je jeden samostatný fyzický bod. Shodný název body nespojuje; volbu „Služební i soukromé“ používejte jen pro skutečnou výjimku na tomto bodě.</div></div>
+          <div class="places-heading"><div><h2>Správa míst</h2><div class="muted">Jsou zde jen místa, která jste výslovně uložili. Každý řádek je samostatný fyzický bod; volbu „Služební i soukromé“ používejte jen pro skutečnou výjimku.</div></div>
             <div class="place-toolbar"><span class="selected-place-count">${this._selectedPlaces.size} vybráno</span><button id="merge-places" ${this._selectedPlaces.size < 2 || this._savingPlace ? "disabled" : ""}>Sloučit GPS duplicity</button><button id="refresh-places" ${this._placesLoading || this._savingPlace ? "disabled" : ""}>Aktualizovat</button></div>
           </div>
-          <div class="radius-summary">Aktivní výchozí poloměry: domov ${this._number(this._placesData?.radii?.home)} m · firma ${this._number(this._placesData?.radii?.company)} m · klient ${this._number(this._placesData?.radii?.business)} m · soukromé ${this._number(this._placesData?.radii?.private)} m · zastávka ${this._number(this._placesData?.radii?.transient)} m</div>
+          <div class="radius-summary">Aktivní výchozí poloměry: domov ${this._number(this._placesData?.radii?.home)} m · firma ${this._number(this._placesData?.radii?.company)} m · klient ${this._number(this._placesData?.radii?.business)} m · soukromé ${this._number(this._placesData?.radii?.private)} m</div>
           <div class="history-status">${this._placesError ? `Správu míst se nepodařilo načíst: ${this._text(this._placesError)}` : this._placesLoading ? "Načítám místa…" : this._text(this._placesMessage, this._placesData ? `${this._placesData.places?.length || 0} naučených míst obsahuje ${this._placesData.stored_point_count || 0} fyzických bodů. Na mapě je ${this._placesData.map_point_count || 0} bodů včetně konfigurovaného domova a firmy.` : "Místa ještě nejsou načtená.")}</div>
           ${this._placesTable()}
         </section>` : ""}
@@ -1366,10 +1436,37 @@ class KnihaJizdPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll(".resolve-trip").forEach((button) => {
       button.addEventListener("click", () => this._resolveTrip(button));
     });
+    this.shadowRoot.querySelectorAll(".use-purpose-suggestion").forEach((button) => {
+      button.addEventListener("click", () => {
+        const input = button.closest(".question-card")?.querySelector(".question-value");
+        if (input) {
+          input.value = button.dataset.value || "";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      });
+    });
     this.shadowRoot.querySelectorAll(".question-value").forEach((input) => {
       input.addEventListener("input", () => {
         const segmentId = String(input.closest(".question-card")?.dataset?.segmentId || "");
         if (segmentId) this._questionValues.set(segmentId, input.value);
+      });
+    });
+    this.shadowRoot.querySelectorAll(".resolve-place").forEach((button) => {
+      button.addEventListener("click", () => this._resolvePlace(button));
+    });
+    this.shadowRoot.querySelectorAll(".place-question-value").forEach((input) => {
+      input.addEventListener("input", () => {
+        const segmentId = String(input.closest(".place-question-card")?.dataset?.segmentId || "");
+        if (segmentId) this._placeQuestionValues.set(segmentId, input.value);
+      });
+    });
+    this.shadowRoot.querySelectorAll(".use-place-suggestion").forEach((button) => {
+      button.addEventListener("click", () => {
+        const input = button.closest(".place-question-card")?.querySelector(".place-question-value");
+        if (input) {
+          input.value = button.dataset.value || "";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
       });
     });
     this.shadowRoot.querySelectorAll(".save-place").forEach((button) => {

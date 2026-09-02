@@ -110,8 +110,8 @@ class ExportExcelTest(unittest.TestCase):
         self.assertEqual(rows[0]["Zákazník"], "Nemocnice")
         self.assertEqual(rows[0]["Služební km"], 70)
 
-    def test_untagged_three_minute_stop_is_also_hidden(self) -> None:
-        """Historical quick stops stay out of Přes even without journey metadata."""
+    def test_untagged_short_visit_remains_visible(self) -> None:
+        """Elapsed time alone must never erase a destination from the export."""
         rows = EXPORT_MODULE._build_summary_rows(
             [
                 {
@@ -138,13 +138,13 @@ class ExportExcelTest(unittest.TestCase):
         )
 
         self.assertEqual(rows[0]["Start/Odkud"], "Výstavní 378/18")
-        self.assertEqual(rows[0]["Přes"], "")
+        self.assertEqual(rows[0]["Přes"], "Masná 458/106")
         self.assertEqual(rows[0]["Cíl/Kam"], "Jihlavská 24")
         self.assertEqual(rows[0]["Zákazník"], "Fakultní nemocnice")
         self.assertEqual(rows[0]["Služební km"], 18)
 
-    def test_today_fuel_and_quick_handoff_stops_are_hidden(self) -> None:
-        """Hide the observed Mořice and Novovysočanská stops but keep all km."""
+    def test_confirmed_waypoints_are_hidden(self) -> None:
+        """Hide confirmed Mořice and Novovysočanská waypoints but keep all km."""
         rows = EXPORT_MODULE._build_summary_rows(
             [
                 {
@@ -159,6 +159,7 @@ class ExportExcelTest(unittest.TestCase):
                     "trip_type": "business",
                     "classification_source": "manual_panel",
                     "journey_role": "destination",
+                    "visit_role": "waypoint",
                     "distance_km": 17,
                 },
                 {
@@ -190,6 +191,7 @@ class ExportExcelTest(unittest.TestCase):
                     "trip_type": "business",
                     "classification_source": "notification_return",
                     "journey_role": "return",
+                    "visit_role": "waypoint",
                     "return_of_segment_id": "thomayer",
                     "distance_km": 14,
                 },
