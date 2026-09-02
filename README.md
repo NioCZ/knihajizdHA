@@ -93,7 +93,8 @@ umí kromě čistého číselného stavu přečíst také hodnotu s jednotkou ne
 - Potvrzené služební místo ve výchozím okruhu 500 m se zařadí automaticky.
   Soukromé místo používá výchozí okruh 250 m. U neznámého cíle se
   v okruhu 3 000 m vyhledají a obodují odborné instituce. Výsledek se zobrazí v
-  panelu; telefon se ozve jen při dostatečně užitečném návrhu.
+  panelu jako návrh. Každý stále nevyřešený cíl dostane po ochranné prodlevě
+  stejnou jednoduchou otázku na typ jízdy i bez mapového návrhu.
 
 V panelu i v notifikaci lze odpovědět ještě před dokončením tachometru. Obě cesty
 používají stejnou validovanou akci, takže dvojité kliknutí ani souběžná odpověď
@@ -109,10 +110,11 @@ ukončení se použije původní záložní poloha místo aktuální polohy tele
 
 ### Nastavený domov a firma
 
-Je-li dostupná GPS, integrace porovná cíl se zadanými souřadnicemi a použije
-samostatný poloměr domova nebo firmy (výchozí 300 m). Text telefonu pak nemůže
-přebít GPS mimo tento okruh. Jen při chybějící GPS se krátká nastavená adresa
-porovnává s celou geokódovanou adresou: musí souhlasit ulice, číslo domu a
+Je-li dostupná dostatečně přesná GPS, integrace porovná cíl se zadanými
+souřadnicemi a použije samostatný poloměr domova nebo firmy (výchozí 300 m).
+Text telefonu pak nemůže přebít přesnou GPS mimo tento okruh. Při chybějící GPS
+nebo fixu prokazatelně širším než zóna se nastavená adresa porovnává s celou
+geokódovanou adresou: musí souhlasit ulice, číslo domu a
 všechny další zadané části. PSČ, stát, interpunkce ani diakritika shodu
 neovlivní. Použitá metoda a vzdálenost se ukládají do
 `configured_place_match` v raw datech.
@@ -134,16 +136,15 @@ služební i soukromá. Místo toho kontroluje návaznost na poslední uložený
 
 - předchozí segment musí být služební,
 - nová jízda musí začít v nastaveném okruhu od jeho cíle (případně na přesně
-  stejné adrese, pokud GPS chybí),
+  stejné adrese, pokud GPS chybí nebo je pro tento okruh příliš nepřesná),
 - časová mezera nesmí překročit nastavenou hodnotu, výchozí je 18 hodin,
 - pokud jsou známé oba stavy tachometru, jejich rozdíl nesmí být větší než 1 km;
   větší rozdíl znamená, že mezi segmenty pravděpodobně proběhla jiná cesta.
 
-Při první takové jízdě nabídne panel a případně telefon **Služební návrat**,
-**Jiný klient** a **Osobní KM**. Potvrzený domov, firma či hotel se uloží s rolí
-`return`. Příští
-návrat na stejné místo se zapíše automaticky jako služební jen při platné
-návaznosti na klienta; bez návaznosti se integrace znovu zeptá. Služební návrat
+Při první takové jízdě nabídne panel a telefon **Služební návrat**,
+**Služební** a **Soukromá**. Návrat se ukládá jako vztah mezi jízdami, nikoli jako
+typ místa. Příští návrat na stejné místo se zapíše automaticky jako služební jen
+při platné návaznosti na klienta; bez návaznosti se integrace znovu zeptá. Služební návrat
 si ponechá zákazníka předchozího segmentu a v raw datech má `journey_role: return`
 a `return_of_segment_id`, takže agregovaný Excel zákazníka nerozdělí na dvě jména.
 
@@ -151,43 +152,44 @@ Maximální čas návaznosti lze změnit přes **Konfigurovat** u integrace v ro
 1–72 hodin. Volnější hodnota je vhodná pro přenocování v hotelu, kratší omezuje
 riziko, že se za návrat nabídne pozdější nesouvisející cesta.
 
-### Celá jízda a krátké mezizastávky
+### Celá jízda a návštěvy po cestě
 
-Odpojení Android Auto na benzince, odpočívadle, při nabíjení,
-občerstvení nebo rychlém nákupu samo o sobě neurčuje účel jízdy. Nominatim vrací
-vedle názvu také OSM kategorii a typ místa. Integrace z nich vytvoří dočasnou
-mezizastávku a čeká na pokračování celé cesty.
+Odpojení Android Auto na benzince, odpočívadle nebo při nabíjení samo o sobě
+neurčuje účel jízdy. Nominatim vrací vedle názvu také OSM kategorii a typ místa.
+Jen silné servisní typy (palivo, nabíjení, automyčka a odpočívadlo) mohou vytvořit
+dočasného kandidáta návštěvy po cestě, a to pouze pokud hlášená přesnost GPS není
+širší než zóna návaznosti. Obchod, restaurace ani kavárna už se za mezibod
+nepovažují jen podle své mapové kategorie.
 
 Segmenty se spojí do jednoho `journey_id`, pouze když:
 
 - další jízda začne nejpozději do 60 minut (nastavitelné 5–180 minut),
-- začne nejvýše 500 m od místa zastavení; pokud je užší poloměr potvrzených míst,
-  použije se tato užší hodnota,
+- začne v nastaveném poloměru návaznosti (výchozí 200 m),
 - známý konečný a nový počáteční stav tachometru se neliší o více než 1 km.
 
-Velmi krátké stání do 10 minut se při odjezdu ze stejného místa považuje za
-mezizastávku i bez spolehlivé mapové kategorie. Návaznost se ověřuje GPS a při
-chybějících souřadnicích shodou adresy. Tím se například rychlé zastavení na
-benzince, předání věcí nebo krátké vysazení nepropíše jako samostatný bod denní
-trasy. Potvrzený klient nebo pojmenovaný samostatný účel zůstane viditelný i při
-kratší návštěvě. Kilometry skrytého úseku se vždy zachovají v denním součtu.
+Velmi krátké stání se bez mapové kategorie spojí pouze tehdy, když další jízda
+začne do 3 minut ze stejného místa. Návaznost se ověřuje GPS, přesností fixu,
+shodou adresy a dostupnou návazností tachometru. Samotná krátká doba nestačí k
+tomu, aby se historický cíl skryl. Potvrzený klient nebo pojmenovaný samostatný
+účel proto zůstane viditelný i při krátké návštěvě. Kilometry potvrzeného mezibodu
+se vždy zachovají v denním součtu.
 
 Skutečný cíl následně zařadí celý řetězec. Například `firma → benzinka → klient`
-převezme zákazníka i služební typ z klienta; `domov → obchod → domov` převezme
-soukromý typ z domova. Totéž funguje při návratu `klient → odpočívadlo → hotel`.
+převezme zákazníka i služební typ z klienta. Totéž funguje při návratu
+`klient → odpočívadlo → hotel`.
 Mezizastávky se v agregovaném Excelu ve sloupci **Přes** nezobrazují, ale jejich
 kilometry se stále započítají ke konečnému účelu celé jízdy.
 
-Obyčejné parkoviště se samo o sobě nepovažuje za tranzitní zastávku, aby nezmizela
+Obyčejné parkoviště se samo o sobě nepovažuje za mezibod, aby nezmizela
 skutečná návštěva zákazníka, který ještě není dobře zakreslený v OpenStreetMap.
-Výjimkou je parkoviště pojmenované jako odpočívadlo či servisní místo. Potvrzená
-tranzitní místa se učí jen s malým poloměrem 200 m.
+Výjimkou je parkoviště pojmenované jako odpočívadlo či servisní místo. Mezibody se
+nikdy neukládají do `learned_places.json`; jsou vlastností konkrétní návštěvy.
 Pokud po předpokládané mezizastávce v časovém limitu žádná jízda nezačne,
-otázka zůstane v panelu a segment lze zařadit samostatně. Samotná krátká zastávka
-telefonní upozornění nevyvolá.
+otázka se zobrazí v panelu i telefonu a segment lze zařadit jako samostatný cíl.
 
 V raw datech jsou pro audit dostupná pole `journey_id`,
-`journey_role: transient_stop`, `transient_stop`, `continuation` a
+`visit_role: waypoint`, kompatibilní `journey_role: transient_stop`,
+`transient_stop`, `continuation` a
 `journey_inherited_from_segment_id`. Pole `journey_segment_count` a
 `journey_distance_km` obsahují počet segmentů a celkovou délku analyzované cesty.
 Rozpracovaný řetězec je uložen v HA Store a přežije restart Home Assistantu.
@@ -231,32 +233,37 @@ zůstává v `distance_km_raw`.
 
 ### Rozhodnutí v panelu a notifikaci
 
-- **Potvrdit klienta** – použije nejpravděpodobnější mapový návrh.
-- **Navrhnout nového** – přijme vlastní název nebo číslo návrhu `1`, `2` či `3`.
-- **Služební bez klienta** – uloží služební jízdu bez vymyšleného zákazníka.
-- **Osobní KM** – označí segment jako soukromý.
+- **Služební** – uloží služební jízdu; zákazník nebo účel je v panelu volitelný.
+- **Soukromá** – označí segment jako soukromý.
+- **Služební návrat** – je dostupný jen při potvrzené návaznosti na předchozí
+  služební jízdu.
 
 Stejné volby jsou kdykoli dostupné v sekci **Potřebuje vaši odpověď** v panelu.
-U běžného nového cíle telefon čeká deset minut, aby mezitím mohla navázat další
-jízda, a upozorní jen na čerstvou otázku s důvěryhodným mapovým návrhem nebo
-návratem. Známá smíšená zóna a volba po příjezdu domů se mohou zobrazit ihned.
-Neznámý cíl bez dobrého návrhu a krátká zastávka zůstávají pouze v panelu.
+Mapové návrhy jsou pouze pomůcka pro předvyplnění účelu, nikoli další typ
+rozhodnutí. U běžného nového cíle telefon krátce počká na možné pokračování a pak
+pošle jedinou otázku na typ jízdy. Známá smíšená zóna a volba po příjezdu domů se
+mohou zobrazit ihned. Také neznámý cíl bez dobrého mapového návrhu lze zařadit z
+telefonu.
 
-U rozpoznané návazné jízdy se první dvě volby nahradí tlačítky **Služební návrat**
-a **Jiný klient**. Návrat je uložen jen jako vztah mezi jízdami (`journey_role` a
+Návrat je uložen jen jako vztah mezi jízdami (`journey_role` a
 `return_of_segment_id`); nevytváří ani neučí samostatný typ místa.
 
-Volba se spolu se souřadnicemi a typem jízdy uloží do
-`/config/learned_places.json`. Příští cíl v nastaveném poloměru se už neptá.
-Soukromé cíle se učí pod názvem mapového místa s nastavitelnou výchozí zónou 250 m,
+Po zařazení jízdy se zobrazí samostatná otázka **Uložit místo pro příště?**.
+Teprve potvrzení této druhé otázky uloží souřadnice a typ místa do
+`/config/learned_places.json`; volba **Jen tentokrát** jízdu ponechá beze změny a
+nic neučí. Příští návštěva výslovně uloženého cíle v nastaveném poloměru se už
+neptá. Bod se neuloží, pokud je známá přesnost GPS horší než zvolený poloměr;
+je-li současně dostupná skutečná textová adresa, uloží se bezpečně jen tato
+adresa bez nepřesných souřadnic.
+Výslovně uložené soukromé cíle používají název z druhého kroku a nastavitelnou výchozí zónu 250 m,
 takže několik různých soukromých cílů nesplyne do jedné široké kilometrové zóny.
 V raw jízdě zůstává účel `Soukromá`.
 
 Každý fyzický parkovací bod má jediný záznam. Běžné známé místo nese právě jednu
 výchozí klasifikaci (`business` nebo `private`) a další návštěva se zařadí
-automaticky. Pokud je stejné místo vědomě potvrzené oběma způsoby, uloží se jako
-jedna výjimka s oběma hodnotami a telefon se při další návštěvě zeptá pouze na typ
-jízdy; druhý bod na mapě nevznikne.
+automaticky. Pokud místo ve správě výslovně přepnete na **Služební i soukromé**,
+uloží se jako jedna výjimka s oběma hodnotami a při další návštěvě se položí pouze
+otázka na typ jízdy; druhý bod na mapě nevznikne.
 
 ### Denní tabulka a dodatečné opravy
 
@@ -275,9 +282,9 @@ To funguje také v případě, kdy byla mobilní notifikace omylem smazána: seg
 zůstane ve stavu **Čeká na zařazení** a lze jej dokončit přímo v tabulce. Pokud
 ještě čeká tachometr, ruční volba se uloží a finální zápis proběhne později.
 Oprava již uložené cesty změní všechny segmenty se stejným `journey_id`, takže
-benzinka či odpočívadlo nezůstanou v jiném typu než konečný cíl. Současně se
-přeučí výchozí typ odpovídajícího fyzického místa; další návštěva proto neopakuje
-původní chybnou klasifikaci.
+benzinka či odpočívadlo nezůstanou v jiném typu než konečný cíl. Oprava jízdy už
+automaticky nepřepisuje uložené místo; změna místa je vědomý samostatný krok ve
+správě míst.
 
 Stejnou opravu lze volat jako HA akci:
 
@@ -298,49 +305,65 @@ data:
   action: business
 ```
 
-Hodnota `action` může být `confirm`, `new`, `business`, `private` nebo `return`.
-Pro `new` se přidá `value`, případně `candidate_index` od 1 do 3.
+Hodnota `action` je běžně `business`, `private` nebo `return`; starší hodnoty
+`confirm` a `new` zůstávají přijaty kvůli rozpracovaným notifikacím z předchozí
+verze. Volitelný `value` u `business` určuje zákazníka nebo účel.
+
+Samostatnou otázku k místu lze vyřešit i HA akcí:
+
+```yaml
+action: kniha_jizd.save_trip_place
+data:
+  segment_id: "ID_Z_TABULKY_NEBO_RAW_DAT"
+  action: save
+  value: "Název místa"
+```
+
+Místo `save` lze použít `skip`, které místo neuloží.
 
 ### Mapa míst a zón
 
 Záložka **Mapa míst** v administračním panelu načítá přes přihlášené HA API:
 
-- aktuální GPS auta, použitý zdroj polohy a informaci, zda je auto uvnitř známé zóny,
+- aktuální GPS auta, použitý zdroj, přesnost a informaci, zda je auto uvnitř známé
+  zóny; pokud je fix širší než překrývající se zóna, mapa místo falešné shody
+  zobrazí, že zónu nelze spolehlivě určit,
 - nakonfigurovaný domov a firmu,
 - všechny fyzické body z `learned_places.json` včetně názvu, role, adresy a skutečně
   použitého rozpoznávacího poloměru,
 - dnešní uložené i rozpracované úseky jízdy.
 
-Mapa rozlišuje klienty a soukromá místa. Nakonfigurovaný domov a firma
+Mapa rozlišuje výslovně uložené klienty a soukromá místa. Nakonfigurovaný domov a firma
 mají vždy jen jeden bod bez ohledu na to, zda tam vedla soukromá nebo služební
-jízda. Krátké zastávky, například benzinky a obchody, se na mapě nekreslí a jejich
-úseky se sloučí do celé cesty k výslednému cíli. Interně zůstávají zapamatované jen
-pro správné rozpoznání návaznosti jízd. Totéž platí pro interní návratový kontext:
+jízda. Služební trasy jsou modré, soukromé fialové a aktivní či dosud nezařazené
+trasy oranžové a přerušované, takže čekající kandidát nepůsobí jako potvrzená
+služební jízda. Jen potvrzené mezibody konkrétní cesty se na mapě nekreslí a jejich úseky
+se sloučí do celé trasy k výslednému cíli. Kandidát zůstává viditelný jako běžná
+návštěva, dokud další jízda skutečně nepotvrdí návaznost. Totéž platí pro interní návratový kontext:
 ovlivní zařazení trasy, ale nevytváří kategorii místa na mapě. Podklad tvoří
 dlaždice OpenStreetMap. Po výběru naučeného bodu lze přímo v jeho detailu použít
 **Odstranit označený bod**. Smaže se jen vybraný fyzický GPS bod; historické jízdy
 zůstanou zachované. Konfigurovaný domov a firmu mapa odstranit nedovolí, protože
 se upravují v nastavení integrace.
 
-Krátká zastávka nevyvolá telefonní notifikaci. Otázka je vidět v panelu a
-integrace čeká nastavený počet minut na pokračování: pokud další jízda začne,
-zastávka zdědí klasifikaci celé cesty. Pokud nepokračuje, zůstane běžná otázka v
-panelu a potvrzený obchod či jiné místo se uloží jako standardní soukromý nebo
-služební cíl. Každé známé soukromé místo po
-služebním cíli nejdřív počká na možné pokračování: při odjezdu v limitu zdědí
-služební cestu, bez pokračování se samo uloží jako soukromý cíl. Známé služební
-místo má naopak přednost a zaznamená se jako skutečný cíl i při krátké návštěvě.
-Pokud otázka na samostatnou krátkou zastávku zůstane bez odpovědi, po výchozích
-24 hodinách se segment uloží jako **Nevyřešený – k revizi**. Jeho kilometry se do
-opravy nezapočtou ani jako služební, ani jako soukromé a segment už nezůstává
-neomezeně v runtime frontě.
+U servisního kandidáta integrace čeká nastavený počet minut na pokračování: pokud
+další jízda začne ze stejného místa, návštěva zdědí klasifikaci celé cesty. Pokud
+nepokračuje, přijde běžná otázka na služební nebo soukromý typ. Uložení obchodu či
+jiného cíle je vždy až následující samostatná volba. Známé soukromé i služební
+místo má přednost před časovou domněnkou a zaznamená se jako skutečný cíl i při
+krátké návštěvě.
+Pokud zůstane bez odpovědi otázka vzniklá z nepotvrzeného servisního kandidáta,
+po výchozích 24 hodinách se segment uloží jako **Nevyřešený – k revizi**. Jeho
+kilometry se do opravy nezapočtou ani jako služební, ani jako soukromé a segment
+už nezůstává neomezeně v runtime frontě. Obyčejný neznámý cíl zůstává čekat na
+vědomé zařazení uživatelem.
 
 ### Správa míst
 
 Záložka **Správa míst** zobrazuje každý fyzický bod jako samostatný řádek, jeho
 typ a skutečný poloměr. Bod lze přejmenovat, přepnout mezi služebním,
-soukromým, smíšenou výjimkou a interní krátkou zastávkou, změnit mu poloměr nebo
-jej odstranit. Shodný název vzdálené body nikdy nespojí. Automaticky se sloučí jen
+soukromým a smíšenou výjimkou, změnit mu poloměr nebo jej odstranit. Staré interní
+záznamy mezizastávek se ve správě ani při rozpoznávání nepoužívají. Shodný název vzdálené body nikdy nespojí. Automaticky se sloučí jen
 GPS duplicity vzdálené nejvýše 25 m; stejné omezení chrání i ruční sloučení.
 Historické jízdy zůstávají při odstranění bodu zachované.
 
@@ -364,12 +387,13 @@ Rozpoznávání používá oddělené vzdálenosti:
 - **Firma** – výchozí 300 m.
 - **Služební místo** – výchozí 500 m. Vztahuje se na klienty,
   které už uživatel potvrdil. Nejbližší shoda se zapíše automaticky. Je-li GPS
-  dostupná, shodná textová adresa nemůže tento okruh obejít; adresa je záloha jen
-  při chybějících souřadnicích.
+  dostatečně přesná, shodná textová adresa nemůže tento okruh obejít. Adresa je
+  záloha při chybějících souřadnicích nebo prokazatelně širším GPS fixu.
 - **Soukromé místo** – výchozí 250 m.
-- **Návaznost krátké zastávky** – výchozí 200 m.
+- **Návaznost návštěvy** – výchozí 200 m.
 - **Poloměr hledání nových institucí** – výchozí 3 000 m. Slouží jen pro sestavení
-  návrhů; samotný mapový odhad se bez potvrzení nezapíše.
+  návrhů; samotný mapový odhad se bez potvrzení nezapíše. Při GPS fixu širším než
+  rozpoznávací zóna klienta se hledání přeskočí, aby nevznikaly zavádějící návrhy.
 
 Jeden Overpass dotaz načte objekty označené jako nemocnice, klinika, krevní banka,
 odběrové/transfuzní centrum, univerzita, výzkumný ústav, výzkumná kancelář,
@@ -387,10 +411,12 @@ a při výpadku lze použít i starší cache. Pokud mobilní notifikační slu�
 dojezdu ještě není zaregistrovaná, panel zůstává funkční. Po jejím zpřístupnění
 se odešlou jen stále aktuální otázky, které splňují pravidla pro telefon.
 
-U vhodné telefonní otázky se vloží až tři nejlepší výsledky se vzdáleností.
-Tlačítko potvrzení vybere první; v textovém vstupu lze napsat číslo
-druhého/třetího výsledku nebo úplně vlastní název. V panelu lze konkrétní návrh
-vybrat přímo. Kompletní skóre, důvody a kandidáti zůstávají v raw datech pro audit.
+Telefonní otázka na typ jízdy už mapové výsledky nepoužívá jako odpovědi: nabízí
+jen služební, soukromou a případně služební návrat. V panelu se až tři nejlepší
+mapové výsledky se vzdáleností zobrazí pouze jako návrhy pro předvyplnění
+volitelného účelu. Název ukládaného místa se potvrzuje nebo mění až ve druhé
+samostatné otázce. Kompletní skóre, důvody a kandidáti zůstávají v raw datech pro
+audit.
 
 Každý záznam v `learned_places.json` představuje právě jeden fyzický bod. Stejný
 název může mít více samostatných bodů (například různé pobočky), ale každý má své

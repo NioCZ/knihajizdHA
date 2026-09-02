@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 import json
-from math import asin, cos, floor, radians, sin, sqrt
+from math import asin, cos, floor, isfinite, radians, sin, sqrt
 import os
 from pathlib import Path
 import re
@@ -146,9 +146,36 @@ def _place_anchors(place: dict[str, Any]) -> list[dict[str, Any]]:
 def _optional_float(value: Any) -> float | None:
     """Return a finite-enough coordinate number or None."""
     try:
-        return float(value) if value is not None else None
+        parsed = float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+    return parsed if parsed is not None and isfinite(parsed) else None
+
+
+def _coordinate_address(value: Any) -> bool:
+    """Return whether an address is only the integration's GPS fallback text."""
+    return bool(
+        re.fullmatch(
+            r"-?\d+\.\d{6},\s*-?\d+\.\d{6}",
+            str(value or "").strip(),
+        )
+    )
+
+
+def _valid_coordinate_pair(
+    latitude: Any, longitude: Any
+) -> tuple[float, float] | None:
+    """Return a finite WGS84 coordinate pair."""
+    parsed_latitude = _optional_float(latitude)
+    parsed_longitude = _optional_float(longitude)
+    if (
+        parsed_latitude is None
+        or parsed_longitude is None
+        or not -90 <= parsed_latitude <= 90
+        or not -180 <= parsed_longitude <= 180
+    ):
+        return None
+    return parsed_latitude, parsed_longitude
 
 
 def _validated_place_radius(value: Any) -> float:
@@ -214,10 +241,12 @@ def places_for_map(
             place, fallback_radius, private_radius, transient_radius
         )
         for index, anchor in enumerate(_place_anchors(place)):
-            latitude = _optional_float(anchor.get("latitude"))
-            longitude = _optional_float(anchor.get("longitude"))
-            if latitude is None or longitude is None:
+            coordinates = _valid_coordinate_pair(
+                anchor.get("latitude"), anchor.get("longitude")
+            )
+            if coordinates is None:
                 continue
+            latitude, longitude = coordinates
             markers.append(
                 {
                     "id": f"{place_id}:{index}",
@@ -246,15 +275,19 @@ def suppress_configured_place_duplicates(
     """Prefer a configured marker over learned markers for the same location."""
     visible: list[dict[str, Any]] = []
     for marker in markers:
-        latitude = _optional_float(marker.get("latitude"))
-        longitude = _optional_float(marker.get("longitude"))
+        coordinates = _valid_coordinate_pair(
+            marker.get("latitude"), marker.get("longitude")
+        )
         duplicate = False
-        if latitude is not None and longitude is not None:
+        if coordinates is not None:
+            latitude, longitude = coordinates
             for configured in configured_places:
-                configured_latitude = _optional_float(configured.get("latitude"))
-                configured_longitude = _optional_float(configured.get("longitude"))
-                if configured_latitude is None or configured_longitude is None:
+                configured_coordinates = _valid_coordinate_pair(
+                    configured.get("latitude"), configured.get("longitude")
+                )
+                if configured_coordinates is None:
                     continue
+                configured_latitude, configured_longitude = configured_coordinates
                 distance = _haversine_meters(
                     latitude,
                     longitude,
@@ -280,15 +313,19 @@ def _places_overlap(
     second_anchors = _place_anchors(second)
     compared_coordinates = False
     for first_anchor in first_anchors:
-        first_latitude = _optional_float(first_anchor.get("latitude"))
-        first_longitude = _optional_float(first_anchor.get("longitude"))
-        if first_latitude is None or first_longitude is None:
+        first_coordinates = _valid_coordinate_pair(
+            first_anchor.get("latitude"), first_anchor.get("longitude")
+        )
+        if first_coordinates is None:
             continue
+        first_latitude, first_longitude = first_coordinates
         for second_anchor in second_anchors:
-            second_latitude = _optional_float(second_anchor.get("latitude"))
-            second_longitude = _optional_float(second_anchor.get("longitude"))
-            if second_latitude is None or second_longitude is None:
+            second_coordinates = _valid_coordinate_pair(
+                second_anchor.get("latitude"), second_anchor.get("longitude")
+            )
+            if second_coordinates is None:
                 continue
+            second_latitude, second_longitude = second_coordinates
             compared_coordinates = True
             if (
                 _haversine_meters(
@@ -318,26 +355,24 @@ def _merge_place_records(
     merged = existing.copy()
     anchors = _place_anchors(existing)
     for candidate in _place_anchors(incoming):
-        candidate_latitude = _optional_float(candidate.get("latitude"))
-        candidate_longitude = _optional_float(candidate.get("longitude"))
+        candidate_coordinates = _valid_coordinate_pair(
+            candidate.get("latitude"), candidate.get("longitude")
+        )
         duplicate_index: int | None = None
         for index, anchor in enumerate(anchors):
-            anchor_latitude = _optional_float(anchor.get("latitude"))
-            anchor_longitude = _optional_float(anchor.get("longitude"))
+            anchor_coordinates = _valid_coordinate_pair(
+                anchor.get("latitude"), anchor.get("longitude")
+            )
             if (
-                candidate_latitude is not None
-                and candidate_longitude is not None
-                and anchor_latitude is not None
-                and anchor_longitude is not None
+                candidate_coordinates is not None
+                and anchor_coordinates is not None
                 and _haversine_meters(
-                    candidate_latitude,
-                    candidate_longitude,
-                    anchor_latitude,
-                    anchor_longitude,
+                    *candidate_coordinates,
+                    *anchor_coordinates,
                 )
                 <= 25
             ) or (
-                candidate_latitude is None
+                candidate_coordinates is None
                 and _normalize_address(candidate.get("address"))
                 and _normalize_address(candidate.get("address"))
                 == _normalize_address(anchor.get("address"))
@@ -664,14 +699,17 @@ def _trusted_odometer_end(segment: dict[str, Any]) -> float | None:
 
 def _segment_distance_weight(segment: dict[str, Any]) -> float:
     """Estimate only the relative share of a combined odometer increment."""
-    coordinates = (
-        _optional_float(segment.get("start_latitude")),
-        _optional_float(segment.get("start_longitude")),
-        _optional_float(segment.get("end_latitude")),
-        _optional_float(segment.get("end_longitude")),
+    start_coordinates = _valid_coordinate_pair(
+        segment.get("start_latitude"), segment.get("start_longitude")
     )
-    if all(value is not None for value in coordinates):
-        return max(0.1, _haversine_meters(*coordinates) / 1000)  # type: ignore[arg-type]
+    end_coordinates = _valid_coordinate_pair(
+        segment.get("end_latitude"), segment.get("end_longitude")
+    )
+    if start_coordinates is not None and end_coordinates is not None:
+        return max(
+            0.1,
+            _haversine_meters(*start_coordinates, *end_coordinates) / 1000,
+        )
     raw_distance = _optional_float(
         segment.get("distance_km_raw", segment.get("distance_km"))
     )
@@ -1257,6 +1295,11 @@ class KnihaJizdRepository:
         )
         if target is None:
             return 0
+        manual_distance = _optional_float(distance_km)
+        if distance_km is not None and (
+            manual_distance is None or manual_distance < 0
+        ):
+            raise ValueError("distance_km must be a finite non-negative number")
         journey_id = target.get("journey_id")
         changed = 0
         edited_at = datetime.now(UTC).isoformat()
@@ -1289,7 +1332,6 @@ class KnihaJizdRepository:
         ):
             target["end_address"] = str(end_address).strip()
             target["end_address_manual"] = True
-        manual_distance = _optional_float(distance_km)
         current_distance = _optional_float(target.get("distance_km"))
         if (
             manual_distance is not None
@@ -1514,8 +1556,9 @@ class KnihaJizdRepository:
         if any(item is None for item in selected):
             raise ValueError("one or more selected places were not found")
         if any(
-            not _places_overlap(selected[0], incoming)  # type: ignore[arg-type]
-            for incoming in selected[1:]
+            not _places_overlap(first, incoming)  # type: ignore[arg-type]
+            for index, first in enumerate(selected)
+            for incoming in selected[index + 1 :]
         ):
             raise ValueError(
                 "Vybraná místa nejsou stejný fyzický bod (maximum je 25 m)."
@@ -1599,11 +1642,30 @@ class KnihaJizdRepository:
         )
         if target.get("configured_place") in {"home", "company"}:
             return {"place_updated": False, "reason": "configured_place"}
-        latitude = _optional_float(target.get("end_latitude"))
-        longitude = _optional_float(target.get("end_longitude"))
+        classification = "private" if trip_type == TRIP_TYPE_PRIVATE else "business"
+        radius = private_radius if classification == "private" else client_radius
+        coordinates = _valid_coordinate_pair(
+            target.get("end_latitude"), target.get("end_longitude")
+        )
+        latitude = coordinates[0] if coordinates is not None else None
+        longitude = coordinates[1] if coordinates is not None else None
         address = target.get("end_address_raw") or target.get("end_address")
-        has_coordinates = latitude is not None and longitude is not None
-        if not has_coordinates and not address:
+        has_coordinates = coordinates is not None
+        accuracy = _optional_float(target.get("end_accuracy_m"))
+        if accuracy is not None and accuracy < 0:
+            accuracy = None
+        stable_address = bool(
+            str(address or "").strip() and not _coordinate_address(address)
+        )
+        if has_coordinates and accuracy is not None and accuracy > radius:
+            # A user may still remember an address reported alongside a poor GPS
+            # fix, but saving the inaccurate point would poison future matches.
+            if not stable_address:
+                return {"place_updated": False, "reason": "unreliable_destination"}
+            latitude = None
+            longitude = None
+            has_coordinates = False
+        if not has_coordinates and not stable_address:
             return {"place_updated": False, "reason": "missing_destination"}
 
         data = self._load_places_sync()
@@ -1620,14 +1682,16 @@ class KnihaJizdRepository:
             if has_coordinates:
                 for place in places:
                     for anchor in _place_anchors(place):
-                        anchor_latitude = _optional_float(anchor.get("latitude"))
-                        anchor_longitude = _optional_float(anchor.get("longitude"))
-                        if anchor_latitude is None or anchor_longitude is None:
+                        anchor_coordinates = _valid_coordinate_pair(
+                            anchor.get("latitude"), anchor.get("longitude")
+                        )
+                        if anchor_coordinates is None:
                             continue
+                        anchor_latitude, anchor_longitude = anchor_coordinates
                         distance = _haversine_meters(
                             latitude, longitude, anchor_latitude, anchor_longitude
                         )
-                        if distance <= max(client_radius, private_radius) and (
+                        if distance <= _PHYSICAL_POINT_MERGE_DISTANCE_M and (
                             closest is None or distance < closest[0]
                         ):
                             closest = (distance, place)
@@ -1648,8 +1712,6 @@ class KnihaJizdRepository:
                         None,
                     )
 
-        classification = "private" if trip_type == TRIP_TYPE_PRIVATE else "business"
-        radius = private_radius if classification == "private" else client_radius
         default_label = (
             str(
                 target.get("map_estimate")
@@ -1696,6 +1758,7 @@ class KnihaJizdRepository:
         radius_meters: float,
         private_radius: float = LEARNED_PRIVATE_RADIUS,
         transient_radius: float = LEARNED_TRANSIENT_RADIUS,
+        accuracy_m: float | None = None,
     ) -> dict[str, Any] | None:
         """Find the closest coordinate match or an exact normalized address."""
         async with self._lock:
@@ -1707,6 +1770,7 @@ class KnihaJizdRepository:
                 radius_meters,
                 private_radius,
                 transient_radius,
+                accuracy_m,
             )
 
     def _find_place_sync(
@@ -1717,11 +1781,21 @@ class KnihaJizdRepository:
         radius_meters: float,
         private_radius: float = LEARNED_PRIVATE_RADIUS,
         transient_radius: float = LEARNED_TRANSIENT_RADIUS,
+        accuracy_m: float | None = None,
     ) -> dict[str, Any] | None:
         """Find a learned place in an executor."""
         places = self._load_places_sync()["places"]
         closest: tuple[float, dict[str, Any], dict[str, Any]] | None = None
-        if latitude is not None and longitude is not None:
+        address_fallback: tuple[float, dict[str, Any], dict[str, Any]] | None = None
+        address_only_match: tuple[dict[str, Any], dict[str, Any]] | None = None
+        coordinates = _valid_coordinate_pair(latitude, longitude)
+        if coordinates is not None:
+            latitude, longitude = coordinates
+        accuracy = _optional_float(accuracy_m)
+        if accuracy is not None and accuracy < 0:
+            accuracy = None
+        normalized = _normalize_address(address)
+        if coordinates is not None:
             for place in places:
                 if place.get("place_role") == PLACE_ROLE_TRANSIENT:
                     continue
@@ -1729,20 +1803,41 @@ class KnihaJizdRepository:
                     place, radius_meters, private_radius, transient_radius
                 )
                 for anchor in _place_anchors(place):
-                    anchor_latitude = _optional_float(anchor.get("latitude"))
-                    anchor_longitude = _optional_float(anchor.get("longitude"))
-                    if anchor_latitude is None or anchor_longitude is None:
+                    anchor_coordinates = _valid_coordinate_pair(
+                        anchor.get("latitude"), anchor.get("longitude")
+                    )
+                    if anchor_coordinates is None:
+                        if (
+                            address_only_match is None
+                            and normalized
+                            and _normalize_address(anchor.get("address")) == normalized
+                        ):
+                            address_only_match = (place, anchor)
                         continue
+                    anchor_latitude, anchor_longitude = anchor_coordinates
                     distance = _haversine_meters(
                         latitude,
                         longitude,
                         anchor_latitude,
                         anchor_longitude,
                     )
-                    if distance <= place_radius and (
-                        closest is None or distance < closest[0]
+                    if (
+                        (accuracy is None or accuracy <= place_radius)
+                        and distance <= place_radius
+                        and (closest is None or distance < closest[0])
                     ):
                         closest = (distance, place, anchor)
+                    if (
+                        accuracy is not None
+                        and accuracy > place_radius
+                        and normalized
+                        and _normalize_address(anchor.get("address")) == normalized
+                        and (
+                            address_fallback is None
+                            or distance < address_fallback[0]
+                        )
+                    ):
+                        address_fallback = (distance, place, anchor)
             if closest is not None:
                 result = closest[1].copy()
                 result["match_distance_m"] = round(closest[0], 1)
@@ -1751,12 +1846,39 @@ class KnihaJizdRepository:
                 )
                 result["match_method"] = "gps"
                 result["matched_address"] = closest[2].get("address")
+                if accuracy is not None:
+                    result["match_accuracy_m"] = accuracy
+                return result
+            if address_fallback is not None:
+                result = address_fallback[1].copy()
+                result["match_distance_m"] = round(address_fallback[0], 1)
+                result["match_radius_m"] = effective_place_radius(
+                    address_fallback[1],
+                    radius_meters,
+                    private_radius,
+                    transient_radius,
+                )
+                result["match_method"] = "address_accuracy_fallback"
+                result["matched_address"] = address_fallback[2].get("address")
+                result["match_accuracy_m"] = accuracy
+                return result
+            if address_only_match is not None:
+                result = address_only_match[0].copy()
+                result["matched_address"] = address_only_match[1].get("address")
+                result["match_radius_m"] = effective_place_radius(
+                    address_only_match[0],
+                    radius_meters,
+                    private_radius,
+                    transient_radius,
+                )
+                result["match_method"] = "address_only_place"
+                if accuracy is not None:
+                    result["match_accuracy_m"] = accuracy
                 return result
             # With valid GPS the configured circle is authoritative. An address
             # can cover a whole campus and must not create a match outside it.
             return None
 
-        normalized = _normalize_address(address)
         if normalized:
             for place in places:
                 if place.get("place_role") == PLACE_ROLE_TRANSIENT:
@@ -1843,29 +1965,27 @@ class KnihaJizdRepository:
                 and previous_place_role not in {None, PLACE_ROLE_TRANSIENT}
             )
             anchors = _place_anchors(learned)[-_MAX_ANCHORS_PER_PLACE:]
-            new_latitude = _optional_float(new_anchor.get("latitude"))
-            new_longitude = _optional_float(new_anchor.get("longitude"))
+            new_coordinates = _valid_coordinate_pair(
+                new_anchor.get("latitude"), new_anchor.get("longitude")
+            )
             duplicate_index: int | None = None
             for index, anchor in enumerate(anchors):
-                anchor_latitude = _optional_float(anchor.get("latitude"))
-                anchor_longitude = _optional_float(anchor.get("longitude"))
+                anchor_coordinates = _valid_coordinate_pair(
+                    anchor.get("latitude"), anchor.get("longitude")
+                )
                 if (
-                    new_latitude is not None
-                    and new_longitude is not None
-                    and anchor_latitude is not None
-                    and anchor_longitude is not None
+                    new_coordinates is not None
+                    and anchor_coordinates is not None
                     and _haversine_meters(
-                        new_latitude,
-                        new_longitude,
-                        anchor_latitude,
-                        anchor_longitude,
+                        *new_coordinates,
+                        *anchor_coordinates,
                     )
                     <= 25
                 ):
                     duplicate_index = index
                     break
                 if (
-                    new_latitude is None
+                    new_coordinates is None
                     and normalized_address
                     and _normalize_address(anchor.get("address")) == normalized_address
                 ):

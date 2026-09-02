@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from math import isfinite
 import time
 from typing import Any
 
@@ -34,7 +35,14 @@ class NominatimGeocoder:
         self, latitude: float | None, longitude: float | None
     ) -> dict[str, Any] | None:
         """Return a normalized reverse-geocoding result."""
-        if latitude is None or longitude is None:
+        if (
+            latitude is None
+            or longitude is None
+            or not isfinite(latitude)
+            or not isfinite(longitude)
+            or not -90 <= latitude <= 90
+            or not -180 <= longitude <= 180
+        ):
             return None
 
         parameters: dict[str, str | float | int] = {

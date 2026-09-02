@@ -33,6 +33,8 @@ class InputParsingTest(unittest.TestCase):
         self.assertEqual(INPUT_MODULE.parse_decimal("50,123 4567"), 50.1234567)
         self.assertEqual(INPUT_MODULE.parse_decimal(14.7654321), 14.7654321)
         self.assertIsNone(INPUT_MODULE.parse_decimal(True))
+        self.assertIsNone(INPUT_MODULE.parse_decimal("NaN"))
+        self.assertIsNone(INPUT_MODULE.parse_decimal(float("inf")))
 
     def test_reads_android_geocoded_location_attribute(self) -> None:
         """Accept the lowercase Location attribute exposed by Android."""
@@ -64,6 +66,10 @@ class InputParsingTest(unittest.TestCase):
         )
 
         self.assertEqual(result, (98332.0, "attribute:total_distance"))
+
+    def test_rejects_nonfinite_or_negative_odometer(self) -> None:
+        self.assertIsNone(INPUT_MODULE.odometer_from_state(float("nan"), {}))
+        self.assertIsNone(INPUT_MODULE.odometer_from_state(-1, {}))
 
 
 if __name__ == "__main__":

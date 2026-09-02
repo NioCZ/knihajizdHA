@@ -6,6 +6,7 @@ from typing import Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
@@ -54,6 +55,8 @@ class KnihaJizdPlacesView(HomeAssistantView):
         if not user.is_admin:
             raise web.HTTPForbidden(text="Administrator access is required")
         for entry in self.hass.config_entries.async_entries(DOMAIN):
+            if entry.state is not ConfigEntryState.LOADED:
+                continue
             manager = getattr(entry, "runtime_data", None)
             if isinstance(manager, KnihaJizdManager):
                 return manager

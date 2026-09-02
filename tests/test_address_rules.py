@@ -92,6 +92,31 @@ class AddressRulesTest(unittest.TestCase):
 
         self.assertIsNone(match)
 
+    def test_inaccurate_gps_requires_matching_address(self) -> None:
+        without_address = MODULE.configured_place_match(
+            50.0001,
+            14.0002,
+            ["Jiné místo"],
+            "Testovací 123, Ukázkov",
+            50.0,
+            14.0,
+            300,
+            900,
+        )
+        with_address = MODULE.configured_place_match(
+            50.01,
+            14.01,
+            ["Testovací 123, Ukázkov"],
+            "Testovací 123, Ukázkov",
+            50.0,
+            14.0,
+            300,
+            900,
+        )
+
+        self.assertIsNone(without_address)
+        self.assertEqual(with_address["method"], "address_accuracy_fallback")
+
     def test_address_is_fallback_without_gps(self) -> None:
         """Keep recognition available if the phone temporarily has no GPS."""
         match = MODULE.configured_place_match(

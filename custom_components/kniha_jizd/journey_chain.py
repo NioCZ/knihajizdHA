@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from math import asin, cos, radians, sin, sqrt
+from math import asin, cos, isfinite, radians, sin, sqrt
 import re
 import unicodedata
 from typing import Any
@@ -129,10 +129,10 @@ def parking_boundary_details(
         _number(current.get("start_latitude")),
         _number(current.get("start_longitude")),
     )
-    if all(value is not None for value in coordinates):
+    if _valid_coordinates(coordinates):
         distance = _haversine_meters(*coordinates)  # type: ignore[arg-type]
-        previous_accuracy = _number(previous.get("end_accuracy_m"))
-        current_accuracy = _number(current.get("start_accuracy_m"))
+        previous_accuracy = _accuracy(previous.get("end_accuracy_m"))
+        current_accuracy = _accuracy(current.get("start_accuracy_m"))
         accuracy_reliable = all(
             value is None or value <= max_distance_meters
             for value in (previous_accuracy, current_accuracy)
@@ -298,9 +298,27 @@ def _normalize(value: Any) -> str:
 def _number(value: Any) -> float | None:
     """Convert an optional JSON number."""
     try:
-        return float(value) if value is not None else None
+        parsed = float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+    return parsed if parsed is not None and isfinite(parsed) else None
+
+
+def _accuracy(value: Any) -> float | None:
+    """Return a meaningful nonnegative GPS accuracy."""
+    parsed = _number(value)
+    return parsed if parsed is not None and parsed >= 0 else None
+
+
+def _valid_coordinates(values: tuple[float | None, ...]) -> bool:
+    """Require two valid WGS84 pairs before computing a boundary distance."""
+    return bool(
+        all(value is not None for value in values)
+        and -90 <= values[0] <= 90  # type: ignore[operator]
+        and -180 <= values[1] <= 180  # type: ignore[operator]
+        and -90 <= values[2] <= 90  # type: ignore[operator]
+        and -180 <= values[3] <= 180  # type: ignore[operator]
+    )
 
 
 def _haversine_meters(

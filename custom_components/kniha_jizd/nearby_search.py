@@ -6,7 +6,7 @@ import asyncio
 from copy import deepcopy
 from datetime import UTC, datetime
 import logging
-from math import asin, cos, radians, sin, sqrt
+from math import asin, cos, isfinite, radians, sin, sqrt
 import re
 import time
 from typing import Any
@@ -79,7 +79,15 @@ class NearbyInstitutionSearcher:
         radius_meters: float,
     ) -> list[dict[str, Any]]:
         """Return up to five scored institution candidates."""
-        if latitude is None or longitude is None:
+        if (
+            latitude is None
+            or longitude is None
+            or not isfinite(latitude)
+            or not isfinite(longitude)
+            or not -90 <= latitude <= 90
+            or not -180 <= longitude <= 180
+            or not isfinite(radius_meters)
+        ):
             self._set_result("skipped", 0, False, None, 0)
             return []
 
@@ -290,6 +298,13 @@ def _candidate_from_element(
         candidate_latitude = float(candidate_latitude)
         candidate_longitude = float(candidate_longitude)
     except (TypeError, ValueError):
+        return None
+    if not (
+        isfinite(candidate_latitude)
+        and isfinite(candidate_longitude)
+        and -90 <= candidate_latitude <= 90
+        and -180 <= candidate_longitude <= 180
+    ):
         return None
 
     distance = _haversine_meters(

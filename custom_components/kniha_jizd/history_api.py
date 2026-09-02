@@ -7,6 +7,7 @@ from datetime import date, datetime
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
@@ -65,6 +66,8 @@ class KnihaJizdHistoryView(HomeAssistantView):
     def _loaded_manager(self) -> KnihaJizdManager | None:
         """Find the single loaded runtime manager."""
         for entry in self.hass.config_entries.async_entries(DOMAIN):
+            if entry.state is not ConfigEntryState.LOADED:
+                continue
             manager = getattr(entry, "runtime_data", None)
             if isinstance(manager, KnihaJizdManager):
                 return manager

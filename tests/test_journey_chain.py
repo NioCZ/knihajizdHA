@@ -235,6 +235,22 @@ class JourneyChainTest(unittest.TestCase):
 
         self.assertEqual(visible, [])
 
+    def test_map_keeps_waypoint_candidate_visible_until_continuation(self) -> None:
+        """A possible service stop must remain visible until a next leg confirms it."""
+        visible = CHAIN_MODULE.map_routes_without_transient_stops(
+            [
+                {
+                    "id": "possible-fuel-stop",
+                    "journey_id": "journey",
+                    "journey_role": "transient_stop",
+                    "visit_role": "waypoint_candidate",
+                    "started_at": "2026-08-24T08:00:00+00:00",
+                }
+            ]
+        )
+
+        self.assertEqual([row["id"] for row in visible], ["possible-fuel-stop"])
+
     def test_business_trip_can_be_saved_without_customer(self) -> None:
         """Switching a private suggestion to business must clear its sentinel."""
         self.assertEqual(

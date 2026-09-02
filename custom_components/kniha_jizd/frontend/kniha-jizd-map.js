@@ -91,6 +91,19 @@ class KnihaJizdMap extends HTMLElement {
     }).format(parsed);
   }
 
+  _finiteValue(value) {
+    return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+  }
+
+  _coordinatePair(latitude, longitude) {
+    return this._finiteValue(latitude)
+      && this._finiteValue(longitude)
+      && Number(latitude) >= -90
+      && Number(latitude) <= 90
+      && Number(longitude) >= -180
+      && Number(longitude) <= 180;
+  }
+
   _roleLabel(role) {
     return {
       home: "Domov",
@@ -102,12 +115,18 @@ class KnihaJizdMap extends HTMLElement {
     }[role] || "Místo";
   }
 
+  _routeClass(route) {
+    if (route?.trip_type === "private") return "private";
+    if (route?.trip_type === "business") return "business";
+    return "pending";
+  }
+
   _markers() {
     if (!this._data) return [];
     return [
       ...(Array.isArray(this._data.configured_places) ? this._data.configured_places : []),
       ...(Array.isArray(this._data.learned_places) ? this._data.learned_places : []),
-    ].filter((item) => item.place_role !== "transient" && Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude)));
+    ].filter((item) => item && item.place_role !== "transient" && this._coordinatePair(item.latitude, item.longitude));
   }
 
   _points() {
@@ -116,14 +135,14 @@ class KnihaJizdMap extends HTMLElement {
       longitude: Number(item.longitude),
     }));
     const car = this._data?.car;
-    if (Number.isFinite(Number(car?.latitude)) && Number.isFinite(Number(car?.longitude))) {
+    if (this._coordinatePair(car?.latitude, car?.longitude)) {
       points.push({ latitude: Number(car.latitude), longitude: Number(car.longitude) });
     }
     for (const route of this._data?.today_routes || []) {
       for (const side of ["start", "end"]) {
         const latitude = Number(route[`${side}_latitude`]);
         const longitude = Number(route[`${side}_longitude`]);
-        if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        if (this._coordinatePair(route[`${side}_latitude`], route[`${side}_longitude`])) {
           points.push({ latitude, longitude });
         }
       }
@@ -159,7 +178,7 @@ class KnihaJizdMap extends HTMLElement {
     const car = this._data?.car;
     const carLatitude = Number(car?.latitude);
     const carLongitude = Number(car?.longitude);
-    if (!Number.isFinite(carLatitude) || !Number.isFinite(carLongitude)) {
+    if (!this._coordinatePair(car?.latitude, car?.longitude)) {
       this._fitAll();
       return;
     }
@@ -225,6 +244,7 @@ class KnihaJizdMap extends HTMLElement {
         .zone-layer { pointer-events:none; }
         .route { stroke:#1769aa; stroke-width:4; stroke-linecap:round; opacity:.8; filter:drop-shadow(0 1px 1px rgba(255,255,255,.8)); }
         .route.private { stroke:#8e44ad; }
+        .route.pending { stroke:#ef6c00; stroke-dasharray:9 7; }
         .zone { stroke-width:2; fill-opacity:.12; stroke-opacity:.7; }
         .zone.active { stroke-width:4; fill-opacity:.2; stroke-opacity:1; }
         .zone.client { fill:#1976d2; stroke:#1976d2; } .zone.private { fill:#8e44ad; stroke:#8e44ad; }
@@ -260,6 +280,9 @@ class KnihaJizdMap extends HTMLElement {
         .swatch.mixed { background:#6d4c41; }
         .swatch.home { background:#2e7d32; }
         .swatch.company { background:#00897b; } .swatch.car { background:#d32f2f; }
+        .route-swatch { width:18px; height:0; border-top:4px solid #1769aa; border-radius:2px; }
+        .route-swatch.private { border-color:#8e44ad; }
+        .route-swatch.pending { border-color:#ef6c00; border-top-style:dashed; }
         .empty { display:grid; place-items:center; height:100%; color:#455a64; padding:24px; text-align:center; }
         @media (max-width:850px) { .map-layout { grid-template-columns:1fr; } .map-canvas { min-height:420px; height:58vh; } aside { display:grid; grid-template-columns:1fr 1fr; gap:12px; } .info-card { margin:0; } }
         @media (max-width:560px) { .map-canvas { min-height:360px; } aside { grid-template-columns:1fr; } .marker-label { display:none; } }
@@ -276,6 +299,9 @@ class KnihaJizdMap extends HTMLElement {
           <span><i class="swatch mixed"></i>Služební / soukromé</span>
           <span><i class="swatch home"></i>Domov</span>
           <span><i class="swatch company"></i>Firma</span>
+          <span><i class="route-swatch"></i>Služební trasa</span>
+          <span><i class="route-swatch private"></i>Soukromá trasa</span>
+          <span><i class="route-swatch pending"></i>Čeká na zařazení</span>
         </div></div></aside>
       </div>`;
     const canvas = this.shadowRoot.querySelector(".map-canvas");
@@ -295,11 +321,17 @@ class KnihaJizdMap extends HTMLElement {
     if (!this.shadowRoot?.querySelector(".car-info")) return;
     const car = this._data?.car || {};
     const zone = car.current_zone;
-    const hasCar = Number.isFinite(Number(car.latitude)) && Number.isFinite(Number(car.longitude));
+    const zoneText = zone
+      ? `${this._text(zone.label)} · ${this._number(zone.distance_m)} m od bodu`
+      : car.zone_status === "accuracy_limited"
+        ? `Nelze spolehlivě určit · GPS ±${this._number(car.accuracy_m)} m`
+        : "Mimo známé zóny";
+    const hasCar = this._coordinatePair(car.latitude, car.longitude);
     this.shadowRoot.querySelector(".car-info").innerHTML = `<h3>Aktuální poloha auta</h3><dl>
       <dt>Stav</dt><dd>${car.driving ? "Právě jede" : "Zaparkováno"}</dd>
-      <dt>Zóna</dt><dd class="zone-state ${zone ? "" : "outside"}">${zone ? `${this._text(zone.label)} · ${this._number(zone.distance_m)} m od bodu` : "Mimo známé zóny"}</dd>
+      <dt>Zóna</dt><dd class="zone-state ${zone ? "" : "outside"}">${zoneText}</dd>
       <dt>Poloha</dt><dd>${hasCar ? `${this._number(car.latitude, 5)}, ${this._number(car.longitude, 5)}` : "GPS není dostupná"}</dd>
+      <dt>Přesnost GPS</dt><dd>${this._finiteValue(car.accuracy_m) ? `${this._number(car.accuracy_m)} m` : "Neznámá"}</dd>
       <dt>Adresa</dt><dd>${this._text(car.address)}</dd>
       <dt>Zdroj</dt><dd>${this._text(car.coordinate_source)}</dd>
       <dt>Aktualizace</dt><dd>${this._text(car.updated_at)}</dd>
@@ -415,11 +447,14 @@ class KnihaJizdMap extends HTMLElement {
     });
     const routes = [];
     for (const route of this._data?.today_routes || []) {
+      if (
+        !this._coordinatePair(route.start_latitude, route.start_longitude)
+        || !this._coordinatePair(route.end_latitude, route.end_longitude)
+      ) continue;
       const values = [route.start_latitude, route.start_longitude, route.end_latitude, route.end_longitude].map(Number);
-      if (!values.every(Number.isFinite)) continue;
       const start = this._screenPoint(values[0], values[1], width, height);
       const end = this._screenPoint(values[2], values[3], width, height);
-      routes.push(`<line class="route ${route.trip_type === "private" ? "private" : ""}" x1="${start.x.toFixed(1)}" y1="${start.y.toFixed(1)}" x2="${end.x.toFixed(1)}" y2="${end.y.toFixed(1)}"><title>${this._text(route.purpose || route.end_address || "Dnešní jízda")}</title></line>`);
+      routes.push(`<line class="route ${this._routeClass(route)}" x1="${start.x.toFixed(1)}" y1="${start.y.toFixed(1)}" x2="${end.x.toFixed(1)}" y2="${end.y.toFixed(1)}"><title>${this._text(route.purpose || route.end_address || "Dnešní jízda")}</title></line>`);
     }
     const svg = this.shadowRoot.querySelector(".zone-layer");
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -434,7 +469,7 @@ class KnihaJizdMap extends HTMLElement {
       return `<button class="marker ${role} ${selected ? "selected" : ""}" data-id="${id}" style="left:${point.x.toFixed(1)}px;top:${point.y.toFixed(1)}px" title="${this._text(marker.label)}"><span class="marker-label">${this._text(marker.label)}</span></button>`;
     });
     const car = this._data?.car;
-    if (Number.isFinite(Number(car?.latitude)) && Number.isFinite(Number(car?.longitude))) {
+    if (this._coordinatePair(car?.latitude, car?.longitude)) {
       const point = this._screenPoint(car.latitude, car.longitude, width, height);
       markerHtml.push(`<button class="marker car" style="left:${point.x.toFixed(1)}px;top:${point.y.toFixed(1)}px" title="Aktuální poloha auta">🚗</button>`);
     }

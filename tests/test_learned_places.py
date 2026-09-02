@@ -201,6 +201,32 @@ class LearnedPlacesTest(unittest.TestCase):
         self.assertNotIn("return", by_id)
         self.assertEqual(by_id["client"]["radius_m"], 1000)
 
+    def test_management_omits_legacy_transient_places(self) -> None:
+        """Old timing-derived place records must not remain editable map places."""
+        places = STORAGE_MODULE.places_for_management(
+            {
+                "places": [
+                    {
+                        "id": "legacy-stop",
+                        "label": "Starý mezibod",
+                        "trip_type": "contextual",
+                        "place_role": "transient",
+                    },
+                    {
+                        "id": "client",
+                        "label": "Klient",
+                        "trip_type": "business",
+                        "place_role": "client",
+                    },
+                ]
+            },
+            500,
+            250,
+            200,
+        )
+
+        self.assertEqual([place["id"] for place in places], ["client"])
+
     def test_configured_home_suppresses_old_learned_duplicates(self) -> None:
         """Prefer one configured home marker over private/business learned copies."""
         markers = [
@@ -269,7 +295,7 @@ class LearnedPlacesTest(unittest.TestCase):
             )
             repository._learn_place_sync(
                 {
-                    "id": "first",
+                    "id": "second",
                     "latitude": 50.018,
                     "longitude": 14.0,
                     "address": "Zadní vjezd",
@@ -324,6 +350,139 @@ class LearnedPlacesTest(unittest.TestCase):
 
             self.assertIsNone(match)
             self.assertEqual(fallback["label"], "Laboratoř A")
+
+    def test_inaccurate_gps_may_use_exact_address_but_precise_gps_may_not(self) -> None:
+        """Use an address only when the reported fix is wider than the place zone."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository._learn_place_sync(
+                {
+                    "latitude": 50.0,
+                    "longitude": 14.0,
+                    "address": "Univerzitní kampus",
+                    "label": "Laboratoř A",
+                    "trip_type": "business",
+                    "radius_m": 250,
+                }
+            )
+
+            precise = repository._find_place_sync(
+                50.02,
+                14.0,
+                "Univerzitní kampus",
+                500,
+                accuracy_m=20,
+            )
+            inaccurate = repository._find_place_sync(
+                50.02,
+                14.0,
+                "Univerzitní kampus",
+                500,
+                accuracy_m=900,
+            )
+
+            self.assertIsNone(precise)
+            self.assertEqual(inaccurate["label"], "Laboratoř A")
+            self.assertEqual(
+                inaccurate["match_method"], "address_accuracy_fallback"
+            )
+
+    def test_explicit_save_does_not_persist_an_inaccurate_coordinate(self) -> None:
+        """Keep a stable address but discard a GPS point outside its own accuracy."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.raw_path = Path(temporary_directory) / "raw.json"
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.raw_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "segments": [
+                            {
+                                "id": "trip",
+                                "journey_role": "destination",
+                                "ended_at": "2026-08-24T10:00:00+00:00",
+                                "end_latitude": 50.0,
+                                "end_longitude": 14.0,
+                                "end_accuracy_m": 900,
+                                "end_address": "Na Příkopě 1, Praha",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = repository._sync_place_from_trip_sync(
+                "trip", "Klient", "business", 500, 250
+            )
+            anchor = json.loads(
+                repository.places_path.read_text(encoding="utf-8")
+            )["places"][0]["anchors"][0]
+
+            self.assertTrue(result["place_updated"])
+            self.assertIsNone(anchor["latitude"])
+            self.assertIsNone(anchor["longitude"])
+            self.assertEqual(anchor["address"], "Na Příkopě 1, Praha")
+
+            matched = repository._find_place_sync(
+                50.1,
+                14.4,
+                "Na Příkopě 1, Praha",
+                500,
+                accuracy_m=20,
+            )
+            self.assertEqual(matched["match_method"], "address_only_place")
+            self.assertEqual(matched["label"], "Klient")
+
+    def test_explicit_save_rejects_inaccurate_coordinate_only_destination(self) -> None:
+        """Do not create a place from a poor fix and its synthetic coordinate text."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.raw_path = Path(temporary_directory) / "raw.json"
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.raw_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "segments": [
+                            {
+                                "id": "trip",
+                                "journey_role": "destination",
+                                "ended_at": "2026-08-24T10:00:00+00:00",
+                                "end_latitude": 50.0,
+                                "end_longitude": 14.0,
+                                "end_accuracy_m": 900,
+                                "end_address": "50.000000, 14.000000",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = repository._sync_place_from_trip_sync(
+                "trip", "Klient", "business", 500, 250
+            )
+
+            self.assertEqual(
+                result,
+                {"place_updated": False, "reason": "unreliable_destination"},
+            )
+            self.assertFalse(repository.places_path.exists())
 
     def test_return_is_not_learned_over_an_existing_private_place(self) -> None:
         """Keep return on the trip and preserve the destination's real place type."""
@@ -874,6 +1033,106 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertEqual(place["place_role"], "private")
             self.assertEqual(place["label"], "Albert Kroměříž")
             self.assertEqual(place["radius_m"], 250)
+
+    def test_explicit_save_keeps_nearby_physical_places_separate(self) -> None:
+        """A recognition radius must not merge two different parking points."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.raw_path = Path(temporary_directory) / "raw.json"
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.raw_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "segments": [
+                            {
+                                "id": "new-trip",
+                                "journey_role": "destination",
+                                "ended_at": "2026-08-24T10:00:00+00:00",
+                                "end_latitude": 50.002,
+                                "end_longitude": 14.0,
+                                "end_address": "Druhý vjezd",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            repository.places_path.write_text(
+                json.dumps(
+                    {
+                        "version": 6,
+                        "places": [
+                            {
+                                "id": "existing",
+                                "label": "První klient",
+                                "trip_type": "business",
+                                "trip_types": ["business"],
+                                "place_role": "client",
+                                "anchors": [{"latitude": 50.0, "longitude": 14.0}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = repository._sync_place_from_trip_sync(
+                "new-trip", "Druhý klient", "business", 500, 250
+            )
+            places = json.loads(
+                repository.places_path.read_text(encoding="utf-8")
+            )["places"]
+
+            self.assertTrue(result["place_updated"])
+            self.assertEqual(len(places), 2)
+            self.assertEqual(
+                {place["label"] for place in places},
+                {"První klient", "Druhý klient"},
+            )
+
+    def test_manual_merge_requires_every_pair_to_be_within_25_metres(self) -> None:
+        """Do not merge a 40 m chain merely because both ends are near its center."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.places_path.write_text(
+                json.dumps(
+                    {
+                        "version": 6,
+                        "places": [
+                            {
+                                "id": place_id,
+                                "label": place_id,
+                                "trip_type": "business",
+                                "place_role": "client",
+                                "anchors": [
+                                    {"latitude": latitude, "longitude": 14.0}
+                                ],
+                            }
+                            for place_id, latitude in (
+                                ("center", 50.0),
+                                ("north", 50.00018),
+                                ("south", 49.99982),
+                            )
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "25 m"):
+                repository._merge_places_sync(
+                    ["center", "north", "south"], None, None, None
+                )
 
     def test_raw_statistics_for_entities_and_panel(self) -> None:
         """Calculate daily totals and the last trip from persisted segments."""

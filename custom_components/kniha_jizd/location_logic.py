@@ -49,18 +49,55 @@ def location_is_fresh(
     return updated >= event - timedelta(seconds=max(0.0, tolerance_seconds))
 
 
+def merge_location_snapshot(
+    preferred: dict[str, Any], fallback: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge a newer snapshot without erasing a usable coordinate pair."""
+    merged = fallback.copy()
+    for key in ("address", "address_raw"):
+        value = preferred.get(key)
+        if isinstance(value, str) and value.strip():
+            merged[key] = value
+
+    coordinates = _coordinate_pair(preferred)
+    if coordinates is not None:
+        merged["latitude"], merged["longitude"] = coordinates
+        merged["accuracy_m"] = _nonnegative_number(preferred.get("accuracy_m"))
+        if preferred.get("coordinate_updated_at") is not None:
+            merged["coordinate_updated_at"] = preferred["coordinate_updated_at"]
+    return merged
+
+
 def _valid_candidate(candidate: dict[str, Any]) -> bool:
+    return _coordinate_pair(candidate) is not None
+
+
+def _coordinate_pair(candidate: dict[str, Any]) -> tuple[float, float] | None:
+    """Return one finite WGS84 pair without accepting half a location."""
     try:
         latitude = float(candidate.get("latitude"))
         longitude = float(candidate.get("longitude"))
     except (TypeError, ValueError):
-        return False
-    return bool(
+        return None
+    if not (
         isfinite(latitude)
         and isfinite(longitude)
         and -90 <= latitude <= 90
         and -180 <= longitude <= 180
-    )
+    ):
+        return None
+    return latitude, longitude
+
+
+def _nonnegative_number(value: Any) -> float | None:
+    """Normalize optional GPS accuracy without propagating NaN or negatives."""
+    try:
+        parsed = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    if parsed is None or not isfinite(parsed) or parsed < 0:
+        return None
+    return parsed
 
 
 def _updated_sort_key(candidate: dict[str, Any]) -> datetime:

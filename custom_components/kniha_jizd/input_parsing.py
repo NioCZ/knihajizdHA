@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from math import isfinite
 import re
 from typing import Any
 
@@ -37,7 +38,7 @@ def parse_decimal(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(
+        parsed = float(
             str(value)
             .strip()
             .replace(" ", "")
@@ -47,6 +48,7 @@ def parse_decimal(value: Any) -> float | None:
         )
     except (TypeError, ValueError):
         return None
+    return parsed if isfinite(parsed) else None
 
 
 def _coordinate(value: Any) -> float | None:
@@ -115,7 +117,8 @@ def parse_measurement(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        parsed = float(value)
+        return parsed if isfinite(parsed) else None
     match = _NUMBER_PATTERN.search(str(value))
     if match is None:
         return None
@@ -139,9 +142,10 @@ def parse_measurement(value: Any) -> float | None:
         )
         token = "".join(parts) if is_grouped_thousands else token.replace(separator, ".")
     try:
-        return float(token)
+        parsed = float(token)
     except ValueError:
         return None
+    return parsed if isfinite(parsed) else None
 
 
 def odometer_from_state(
@@ -149,11 +153,11 @@ def odometer_from_state(
 ) -> tuple[float, str] | None:
     """Read odometer from the state first, then known integration attributes."""
     state_measurement = parse_measurement(state_value)
-    if state_measurement is not None:
+    if state_measurement is not None and state_measurement >= 0:
         return state_measurement, "state"
     normalized = _normalized_attributes(attributes)
     for key in _ODOMETER_ATTRIBUTES:
         measurement = parse_measurement(normalized.get(key))
-        if measurement is not None:
+        if measurement is not None and measurement >= 0:
             return measurement, f"attribute:{key}"
     return None

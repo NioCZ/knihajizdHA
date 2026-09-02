@@ -73,6 +73,35 @@ class LocationLogicTest(unittest.TestCase):
             MODULE.location_is_fresh(ended - timedelta(minutes=2), ended)
         )
 
+    def test_location_merge_never_erases_existing_coordinates(self) -> None:
+        merged = MODULE.merge_location_snapshot(
+            {"address": "Novější adresa", "latitude": None, "longitude": None},
+            {
+                "address": "Původní adresa",
+                "latitude": 50.1,
+                "longitude": 14.4,
+                "accuracy_m": 12,
+            },
+        )
+
+        self.assertEqual(merged["address"], "Novější adresa")
+        self.assertEqual((merged["latitude"], merged["longitude"]), (50.1, 14.4))
+        self.assertEqual(merged["accuracy_m"], 12)
+
+    def test_location_merge_replaces_coordinates_only_as_a_valid_pair(self) -> None:
+        fallback = {"latitude": 50.1, "longitude": 14.4, "accuracy_m": 12}
+
+        incomplete = MODULE.merge_location_snapshot(
+            {"latitude": 49.9, "longitude": None, "accuracy_m": 5}, fallback
+        )
+        complete = MODULE.merge_location_snapshot(
+            {"latitude": 49.9, "longitude": 15.1, "accuracy_m": 5}, fallback
+        )
+
+        self.assertEqual((incomplete["latitude"], incomplete["longitude"]), (50.1, 14.4))
+        self.assertEqual((complete["latitude"], complete["longitude"]), (49.9, 15.1))
+        self.assertEqual(complete["accuracy_m"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from math import asin, cos, floor, radians, sin, sqrt
+from math import asin, cos, floor, isfinite, radians, sin, sqrt
 from pathlib import Path
 import re
 from typing import Any
@@ -231,6 +231,17 @@ def _coordinate_distance_m(
         reference_longitude_value = float(reference_longitude)
     except (TypeError, ValueError):
         return None
+    if not (
+        isfinite(latitude_value)
+        and isfinite(longitude_value)
+        and isfinite(reference_latitude_value)
+        and isfinite(reference_longitude_value)
+        and -90 <= latitude_value <= 90
+        and -180 <= longitude_value <= 180
+        and -90 <= reference_latitude_value <= 90
+        and -180 <= reference_longitude_value <= 180
+    ):
+        return None
     earth_radius_m = 6_371_000.0
     delta_latitude = radians(reference_latitude_value - latitude_value)
     delta_longitude = radians(reference_longitude_value - longitude_value)
@@ -252,9 +263,10 @@ def _date_from_timestamp(value: Any) -> str:
 def _number(value: Any) -> float:
     """Coerce a JSON value to a summable float."""
     try:
-        return float(value) if value is not None else 0.0
+        parsed = float(value) if value is not None else 0.0
     except (TypeError, ValueError):
         return 0.0
+    return parsed if isfinite(parsed) else 0.0
 
 
 def _whole_km(value: float) -> int:

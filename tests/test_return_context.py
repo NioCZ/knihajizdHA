@@ -125,6 +125,20 @@ class ReturnContextTest(unittest.TestCase):
         self.assertIsNotNone(context)
         self.assertEqual(context["start_match_method"], "address")
 
+    def test_inaccurate_gps_cannot_create_return_without_same_address(self) -> None:
+        current = _current()
+        previous = _previous()
+        current["start_accuracy_m"] = 1500
+        previous["end_accuracy_m"] = 1200
+        current["start_address"] = "Jiná budova"
+
+        self.assertIsNone(
+            CONTEXT_MODULE.infer_return_context(current, previous, 18, 1000)
+        )
+        current["start_address"] = previous["end_address"]
+        context = CONTEXT_MODULE.infer_return_context(current, previous, 18, 1000)
+        self.assertEqual(context["start_match_method"], "address_accuracy_fallback")
+
 
 if __name__ == "__main__":
     unittest.main()

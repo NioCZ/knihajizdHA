@@ -207,3 +207,71 @@ assert.deepEqual(resolutionCalls, [
     payload: { segment_id: "pending-1", action: "business" },
   },
 ]);
+
+const placeQuestionCard = {
+  dataset: { segmentId: "saved-1" },
+  querySelector() {
+    return { value: "Genetická laboratoř" };
+  },
+};
+await panel._resolvePlace({
+  dataset: { action: "save" },
+  closest(selector) {
+    assert.equal(selector, ".place-question-card");
+    return placeQuestionCard;
+  },
+});
+
+assert.deepEqual(resolutionCalls[1], {
+  domain: "kniha_jizd",
+  service: "save_trip_place",
+  payload: {
+    segment_id: "saved-1",
+    action: "save",
+    value: "Genetická laboratoř",
+  },
+});
+
+panel._placesData = {
+  places: [
+    {
+      id: "address-only",
+      label: "Adresa bez GPS",
+      classification: "business",
+      radius_m: 250,
+      anchors: [{ address: "Náměstí 1", latitude: null, longitude: null }],
+    },
+  ],
+  configured_places: [],
+  visible_learned_point_ids: [],
+};
+const addressOnlyPlaceHtml = panel._placesTable();
+assert.match(addressOnlyPlaceHtml, /bez GPS souřadnic/);
+assert.doesNotMatch(addressOnlyPlaceHtml, /0,00000, 0,00000/);
+
+const mapPath = new URL(
+  "../custom_components/kniha_jizd/frontend/kniha-jizd-map.js",
+  import.meta.url,
+);
+const mapSource = await readFile(mapPath, "utf8");
+await import(`data:text/javascript;base64,${Buffer.from(mapSource).toString("base64")}`);
+const MapElement = customElements.get("kniha-jizd-map");
+const map = new MapElement();
+assert.equal(map._routeClass({ trip_type: "business" }), "business");
+assert.equal(map._routeClass({ trip_type: "private" }), "private");
+assert.equal(map._routeClass({ trip_type: null, status: "waiting_journey" }), "pending");
+map._data = {
+  car: { latitude: null, longitude: null },
+  configured_places: [],
+  learned_places: [],
+  today_routes: [
+    {
+      start_latitude: null,
+      start_longitude: null,
+      end_latitude: "",
+      end_longitude: "",
+    },
+  ],
+};
+assert.deepEqual(map._points(), [], "missing coordinates must not become 0,0");
+assert.equal(map._finiteValue(null), false, "missing accuracy must stay unknown");

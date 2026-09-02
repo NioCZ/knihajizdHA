@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -62,6 +63,15 @@ def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | Non
         kind = "known_place_exception"
         title = "Potvrďte typ známého místa"
         prompt = f"Místo {estimate} používáte služebně i soukromě."
+    elif (
+        isinstance(return_context, dict)
+        and return_context.get("reason") == "configured_home_destination"
+        and not return_context.get("previous_segment_id")
+        and not return_context.get("previous_purpose")
+    ):
+        kind = "home"
+        title = "Jak zařadit cestu domů?"
+        prompt = "Dojeli jste domů. Byla tato jízda služební, nebo soukromá?"
     elif isinstance(return_context, dict) and return_context.get("suggested"):
         kind = "return"
         title = "Jak zařadit navazující jízdu?"
@@ -116,6 +126,68 @@ def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | Non
         "phone_reason": segment.get("notification_reason")
         or segment.get("notification_suppressed_reason"),
     }
+
+
+def should_offer_place_save(
+    segment: dict[str, Any],
+    source: str,
+    trip_type: str,
+    place_radius_m: float | None = None,
+) -> bool:
+    """Offer a separate save-place choice only for an explicit real destination."""
+    latitude = _number(segment.get("end_latitude"))
+    longitude = _number(segment.get("end_longitude"))
+    coordinates_available = bool(
+        latitude is not None
+        and longitude is not None
+        and -90 <= latitude <= 90
+        and -180 <= longitude <= 180
+    )
+    coordinate_reliable = bool(
+        coordinates_available
+        and gps_accuracy_suitable(segment, place_radius_m)
+    )
+    address = str(segment.get("end_address") or "").strip()
+    stable_address = bool(address and not _coordinate_address(address))
+    return bool(
+        trip_type in {"business", "private"}
+        and source.startswith(("manual_panel", "notification"))
+        and segment.get("journey_role") != "return"
+        and segment.get("visit_role") != "waypoint"
+        and segment.get("journey_role") != "transient_stop"
+        and not segment.get("configured_place")
+        and not segment.get("matched_place_id")
+        and not segment.get("needs_review")
+        and (coordinate_reliable or stable_address)
+    )
+
+
+def gps_accuracy_suitable(
+    segment: dict[str, Any], radius_m: float | None
+) -> bool:
+    """Treat absent legacy accuracy as usable, but reject a known wider fix."""
+    accuracy = _number(segment.get("end_accuracy_m"))
+    if accuracy is None or accuracy < 0 or radius_m is None:
+        return True
+    return accuracy <= radius_m
+
+
+def place_label_suggestion(
+    segment: dict[str, Any], purpose: str, trip_type: str
+) -> str:
+    """Return a predictable label for the independent save-place question."""
+    business_purpose = str(purpose or "").strip() if trip_type == "business" else ""
+    return str(
+        business_purpose
+        or segment.get("map_estimate")
+        or segment.get("end_address")
+        or ("Soukromé místo" if trip_type == "private" else "Klient")
+    ).strip()
+
+
+def _coordinate_address(value: str) -> bool:
+    """Recognize the synthetic address used when only GPS is available."""
+    return bool(re.fullmatch(r"-?\d+\.\d{6},\s*-?\d+\.\d{6}", value.strip()))
 
 
 def _number(value: Any) -> float | None:

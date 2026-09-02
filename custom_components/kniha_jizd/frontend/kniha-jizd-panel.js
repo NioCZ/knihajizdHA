@@ -998,8 +998,11 @@ class KnihaJizdPanel extends HTMLElement {
       const hiddenLabel = hasCoordinates
           ? "Skryto – v zóně domova/firmy"
           : "Skryto – bez souřadnic";
+      const coordinatesLabel = hasCoordinates
+        ? `${this._number(anchor.latitude, 5)}, ${this._number(anchor.longitude, 5)}`
+        : "bez GPS souřadnic";
       const point = anchors.length ? `<div class="place-anchor">
-          <div><strong>${this._text(anchor.address, "bez adresy")}</strong><small>${this._number(anchor.latitude, 5)}, ${this._number(anchor.longitude, 5)}</small></div>
+          <div><strong>${this._text(anchor.address, "bez adresy")}</strong><small>${coordinatesLabel}</small></div>
           <span class="map-point-status ${visible ? "visible" : "hidden"}">${visible ? "Na mapě" : hiddenLabel}</span>
         </div>` : '<div class="muted">Bod nemá použitelné souřadnice ani adresu.</div>';
       return `<tr data-place-id="${this._text(place.id)}">

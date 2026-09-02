@@ -82,7 +82,11 @@ from .journey_chain import (
     normalize_trip_purpose,
     parking_boundary_details,
 )
-from .location_logic import location_is_fresh, select_coordinate_candidate
+from .location_logic import (
+    location_is_fresh,
+    merge_location_snapshot,
+    select_coordinate_candidate,
+)
 from .nearby_search import NearbyInstitutionSearcher
 from .odometer_logic import odometer_update_signal, propagated_start_odometer
 from .storage import (
@@ -94,8 +98,11 @@ from .storage import (
 from .trip_context import infer_trip_context
 from .workflow_logic import (
     PHONE_NOTIFICATION_GRACE_MINUTES,
+    gps_accuracy_suitable,
     mobile_notification_policy,
     panel_question,
+    place_label_suggestion,
+    should_offer_place_save,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -220,6 +227,13 @@ class KnihaJizdManager:
         self._place_prompts = (
             place_prompts if isinstance(place_prompts, dict) else {}
         )
+        for segment in self._closing.values():
+            if segment.get("classification_prepared") and not segment.get(
+                "classification_ready"
+            ):
+                # Preparation may have been cancelled after setting the first
+                # flag but before moving the segment to its durable next queue.
+                segment["classification_prepared"] = False
         for segment in [
             *self._closing.values(),
             *self._pending.values(),
@@ -346,7 +360,9 @@ class KnihaJizdManager:
             )
         segment.setdefault("classification_prepared", False)
         segment.setdefault("classification_ready", bool(segment.get("trip_type")))
-        segment.setdefault("persisted", False)
+        # A segment still present in a runtime queue needs its idempotent final
+        # cleanup even if a crash happened just after the raw-file append.
+        segment["persisted"] = False
         segment.setdefault("end_location_ready", True)
         segment.setdefault("start_address_raw", segment.get("start_address"))
         segment.setdefault("end_address_raw", segment.get("end_address"))
@@ -367,6 +383,9 @@ class KnihaJizdManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        # A task can make one final in-memory change while the first Store save
+        # yields. Persist the settled post-cancellation state as well.
+        await self._async_save_runtime()
         self._odometer_rollover_events.clear()
         self._listeners.clear()
 
@@ -645,7 +664,11 @@ class KnihaJizdManager:
         location = self._capture_location()
         car_latitude = _as_float(location.get("latitude"))
         car_longitude = _as_float(location.get("longitude"))
+        car_accuracy = _as_float(location.get("accuracy_m"))
+        if car_accuracy is not None and car_accuracy < 0:
+            car_accuracy = None
         current_zone: dict[str, Any] | None = None
+        zone_accuracy_limited = False
         for marker in [*configured_places, *learned_places]:
             distance = coordinate_distance_m(
                 car_latitude,
@@ -654,7 +677,13 @@ class KnihaJizdManager:
                 marker.get("longitude"),
             )
             radius = _as_float(marker.get("radius_m"))
-            if distance is None or radius is None or distance > radius:
+            if distance is None or radius is None:
+                continue
+            if car_accuracy is not None and car_accuracy > radius:
+                if distance <= radius + car_accuracy:
+                    zone_accuracy_limited = True
+                continue
+            if distance > radius:
                 continue
             if current_zone is None or distance < float(current_zone["distance_m"]):
                 current_zone = {
@@ -675,10 +704,16 @@ class KnihaJizdManager:
             "longitude": car_longitude,
             "address": location.get("address_raw") or location.get("address"),
             "coordinate_source": gps_source,
-            "updated_at": _iso_utc(
-                _ensure_utc(gps_state.last_updated) if gps_state is not None else None
-            ),
+            "accuracy_m": car_accuracy,
+            "updated_at": location.get("coordinate_updated_at"),
             "current_zone": current_zone,
+            "zone_status": (
+                "matched"
+                if current_zone is not None
+                else "accuracy_limited"
+                if zone_accuracy_limited
+                else "outside"
+            ),
             "driving": self._active is not None,
         }
 
@@ -715,8 +750,7 @@ class KnihaJizdManager:
                 [
                     route
                     for route in routes.values()
-                    if route.get("trip_type") != TRIP_TYPE_UNCLASSIFIED
-                    and not route.get("needs_review")
+                    if not route.get("needs_review")
                 ]
             ),
         }
@@ -958,17 +992,25 @@ class KnihaJizdManager:
         if trip_type not in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}:
             raise ValueError("trip_type must be business or private")
         selected_purpose = normalize_trip_purpose(purpose, trip_type)
+        validated_distance = _as_float(distance_km)
+        if distance_km is not None and (
+            validated_distance is None or validated_distance < 0
+        ):
+            raise ValueError("distance_km must be a finite non-negative number")
 
         runtime = self._find_runtime_segment(segment_id)
         if runtime is not None:
-            if runtime is self._active or not runtime.get("ended_at"):
-                raise ValueError("an active trip cannot be edited before it ends")
             if runtime.get("journey_role") == "transient_stop" and runtime.get(
                 "continued_by_segment_id"
             ):
                 destination = self._find_journey_destination(runtime.get("journey_id"))
-                if destination is not None:
-                    runtime = destination
+                if destination is None:
+                    raise ValueError(
+                        "the continuing trip must end before this journey can be edited"
+                    )
+                runtime = destination
+            if runtime is self._active or not runtime.get("ended_at"):
+                raise ValueError("an active trip cannot be edited before it ends")
             runtime_id = str(runtime["id"])
             # This synchronous marker makes every still-running automatic
             # branch yield to the user's explicit choice after its next await.
@@ -990,7 +1032,7 @@ class KnihaJizdManager:
             ):
                 runtime["end_address"] = str(end_address).strip()
                 runtime["end_address_manual"] = True
-            manual_distance = _as_float(distance_km)
+            manual_distance = validated_distance
             current_distance = _as_float(runtime.get("distance_km"))
             if (
                 manual_distance is not None
@@ -1053,10 +1095,11 @@ class KnihaJizdManager:
             prompt["trip_type_label"] = (
                 "služební" if trip_type == TRIP_TYPE_BUSINESS else "soukromá"
             )
-            if selected_purpose and trip_type == TRIP_TYPE_BUSINESS:
-                prompt["suggested_label"] = selected_purpose
             if end_address is not None and str(end_address).strip():
                 prompt["end_address"] = str(end_address).strip()
+            prompt["suggested_label"] = place_label_suggestion(
+                prompt, selected_purpose, trip_type
+            )
             await self._async_save_runtime()
         await self._async_refresh_statistics()
         await self._async_clear_classification_notification(segment_id)
@@ -1521,6 +1564,7 @@ class KnihaJizdManager:
             self._set_segment_end_location(
                 segment, initial_location, "restart_initial_location_fallback"
             )
+            await self._async_apply_previous_destination_to_new_active(segment)
             await self._async_save_runtime()
             return
         while not segment.get("end_location_ready"):
@@ -1585,13 +1629,26 @@ class KnihaJizdManager:
         source: str,
     ) -> None:
         """Apply one final endpoint consistently to a segment."""
+        selected = merge_location_snapshot(
+            location,
+            {
+                "address": segment.get("end_address"),
+                "address_raw": segment.get("end_address_raw"),
+                "latitude": segment.get("end_latitude"),
+                "longitude": segment.get("end_longitude"),
+                "accuracy_m": segment.get("end_accuracy_m"),
+                "coordinate_updated_at": segment.get(
+                    "end_location_coordinate_updated_at"
+                ),
+            },
+        )
         if not segment.get("end_address_manual"):
-            segment["end_address"] = location.get("address")
-            segment["end_address_raw"] = location.get("address_raw")
-        segment["end_latitude"] = location.get("latitude")
-        segment["end_longitude"] = location.get("longitude")
-        segment["end_accuracy_m"] = location.get("accuracy_m")
-        segment["end_location_coordinate_updated_at"] = location.get(
+            segment["end_address"] = selected.get("address")
+            segment["end_address_raw"] = selected.get("address_raw")
+        segment["end_latitude"] = selected.get("latitude")
+        segment["end_longitude"] = selected.get("longitude")
+        segment["end_accuracy_m"] = selected.get("accuracy_m")
+        segment["end_location_coordinate_updated_at"] = selected.get(
             "coordinate_updated_at"
         )
         segment["end_location_ready"] = True
@@ -1603,6 +1660,25 @@ class KnihaJizdManager:
     ) -> None:
         """Use a reconnect location as the endpoint of a just-finished segment."""
         maximum_gap = self.location_settle_seconds + 30.0
+        coordinate_fresh = location_is_fresh(
+            _parse_datetime(location.get("coordinate_updated_at")),
+            started_at,
+            maximum_gap,
+        )
+        address_fresh = location_is_fresh(
+            _parse_datetime(location.get("address_updated_at")),
+            started_at,
+            maximum_gap,
+        )
+        if not coordinate_fresh and not address_fresh:
+            return
+        settled_location = location.copy()
+        if not coordinate_fresh:
+            for key in ("latitude", "longitude", "accuracy_m", "coordinate_updated_at"):
+                settled_location[key] = None
+        if not address_fresh:
+            settled_location["address"] = None
+            settled_location["address_raw"] = None
         for segment in self._closing.values():
             if segment.get("end_location_ready"):
                 continue
@@ -1612,7 +1688,7 @@ class KnihaJizdManager:
             gap = (_ensure_utc(started_at) - ended_at).total_seconds()
             if 0 <= gap <= maximum_gap:
                 self._set_segment_end_location(
-                    segment, location, "next_segment_start"
+                    segment, settled_location, "next_segment_start"
                 )
 
     def _align_start_with_previous_destination(
@@ -1641,14 +1717,26 @@ class KnihaJizdManager:
                 previous.get("end_latitude"),
                 previous.get("end_longitude"),
             )
-            if distance is not None and distance > self.transient_radius:
+            current_accuracy = _as_float(location.get("accuracy_m"))
+            previous_accuracy = _as_float(previous.get("end_accuracy_m"))
+            coordinate_reliable = bool(
+                distance is not None
+                and all(
+                    value is None or value < 0 or value <= self.transient_radius
+                    for value in (current_accuracy, previous_accuracy)
+                )
+            )
+            addresses_match = bool(
+                str(location.get("address") or "").strip()
+                and str(location.get("address") or "").strip().casefold()
+                == str(previous.get("end_address") or "").strip().casefold()
+            )
+            if coordinate_reliable and distance is not None:
+                if distance > self.transient_radius:
+                    continue
+            elif not addresses_match:
                 continue
-            if distance is None and str(location.get("address") or "").casefold() != str(
-                previous.get("end_address") or ""
-            ).casefold():
-                continue
-            return {
-                **location,
+            previous_snapshot = {
                 "address": previous.get("end_address") or location.get("address"),
                 "address_raw": previous.get("end_address_raw")
                 or previous.get("end_address")
@@ -1656,6 +1744,12 @@ class KnihaJizdManager:
                 "latitude": previous.get("end_latitude"),
                 "longitude": previous.get("end_longitude"),
                 "accuracy_m": previous.get("end_accuracy_m"),
+                "coordinate_updated_at": previous.get(
+                    "end_location_coordinate_updated_at"
+                ),
+            }
+            return {
+                **merge_location_snapshot(previous_snapshot, location),
                 "alignment_source": previous.get("id"),
             }
         return location
@@ -1676,25 +1770,65 @@ class KnihaJizdManager:
                 or active_started < finished_at
             ):
                 return
+            gap = (active_started - finished_at).total_seconds()
+            if gap > self.location_settle_seconds + 30.0:
+                return
             distance = coordinate_distance_m(
                 active.get("start_latitude"),
                 active.get("start_longitude"),
                 finished_segment.get("end_latitude"),
                 finished_segment.get("end_longitude"),
             )
-            if distance is not None and distance > self.transient_radius:
+            active_accuracy = _as_float(active.get("start_accuracy_m"))
+            finished_accuracy = _as_float(finished_segment.get("end_accuracy_m"))
+            coordinate_reliable = bool(
+                distance is not None
+                and all(
+                    value is None or value < 0 or value <= self.transient_radius
+                    for value in (active_accuracy, finished_accuracy)
+                )
+            )
+            addresses_match = bool(
+                str(active.get("start_address") or "").strip()
+                and str(active.get("start_address") or "").strip().casefold()
+                == str(finished_segment.get("end_address") or "").strip().casefold()
+            )
+            if coordinate_reliable and distance is not None:
+                if distance > self.transient_radius:
+                    return
+            elif not addresses_match:
                 return
-            if distance is None and str(active.get("start_address") or "").casefold() != str(
-                finished_segment.get("end_address") or ""
-            ).casefold():
-                return
-            active["start_address"] = finished_segment.get("end_address")
-            active["start_address_raw"] = finished_segment.get(
-                "end_address_raw"
-            ) or finished_segment.get("end_address")
-            active["start_latitude"] = finished_segment.get("end_latitude")
-            active["start_longitude"] = finished_segment.get("end_longitude")
-            active["start_accuracy_m"] = finished_segment.get("end_accuracy_m")
+            selected = merge_location_snapshot(
+                {
+                    "address": finished_segment.get("end_address"),
+                    "address_raw": finished_segment.get("end_address_raw")
+                    or finished_segment.get("end_address"),
+                    "latitude": finished_segment.get("end_latitude"),
+                    "longitude": finished_segment.get("end_longitude"),
+                    "accuracy_m": finished_segment.get("end_accuracy_m"),
+                    "coordinate_updated_at": finished_segment.get(
+                        "end_location_coordinate_updated_at"
+                    ),
+                },
+                {
+                    "address": active.get("start_address"),
+                    "address_raw": active.get("start_address_raw"),
+                    "latitude": active.get("start_latitude"),
+                    "longitude": active.get("start_longitude"),
+                    "accuracy_m": active.get("start_accuracy_m"),
+                    "coordinate_updated_at": active.get(
+                        "start_location_coordinate_updated_at"
+                    ),
+                },
+            )
+            active["start_address"] = selected.get("address")
+            active["start_address_raw"] = selected.get("address_raw")
+            active["start_latitude"] = selected.get("latitude")
+            active["start_longitude"] = selected.get("longitude")
+            active["start_accuracy_m"] = selected.get("accuracy_m")
+            active["start_location_coordinate_updated_at"] = selected.get(
+                "coordinate_updated_at"
+            )
             active["start_location_source"] = "previous_segment_final"
 
     async def _async_prepare_classification(
@@ -1714,6 +1848,7 @@ class KnihaJizdManager:
                 self.client_radius,
                 self.private_radius,
                 self.transient_radius,
+                accuracy_m=_as_float(segment.get("start_accuracy_m")),
             )
             if learned_start is not None and learned_start.get("matched_address"):
                 segment["start_address_raw"] = learned_start["matched_address"]
@@ -1769,6 +1904,7 @@ class KnihaJizdManager:
             self.client_radius,
             self.private_radius,
             self.transient_radius,
+            accuracy_m=_as_float(segment.get("end_accuracy_m")),
         )
         if segment.get("manual_resolution_requested_at"):
             return
@@ -1890,7 +2026,15 @@ class KnihaJizdManager:
         if await self._async_handle_configured_destination(segment):
             return
 
-        transient_stop = detect_transient_stop(map_result, candidates)
+        transient_stop = (
+            detect_transient_stop(map_result, candidates)
+            if gps_accuracy_suitable(segment, self.transient_radius)
+            else None
+        )
+        if map_result is not None and not gps_accuracy_suitable(
+            segment, self.transient_radius
+        ):
+            segment["transient_detection_skipped_reason"] = "gps_accuracy"
         if transient_stop is not None:
             segment["transient_stop"] = transient_stop
             segment["map_estimate"] = transient_stop["name"]
@@ -1923,6 +2067,20 @@ class KnihaJizdManager:
         """Search and audit map candidates around a stored trip endpoint."""
         end_latitude = _as_float(segment.get("end_latitude"))
         end_longitude = _as_float(segment.get("end_longitude"))
+        if not gps_accuracy_suitable(segment, self.client_radius):
+            segment["map_candidates"] = []
+            segment["candidate_search_status"] = "skipped_inaccurate_gps"
+            segment["candidate_search_attempts"] = 0
+            segment["candidate_search_cache_hit"] = False
+            segment["candidate_search_error"] = None
+            segment["candidate_search_radius_m"] = self.institution_search_radius
+            segment["candidate_search_completed_at"] = _iso_utc(datetime.now(UTC))
+            segment["candidate_search_coordinates"] = {
+                "latitude": end_latitude,
+                "longitude": end_longitude,
+            }
+            segment["candidate_count"] = 0
+            return [], None
         search_response, map_result = await asyncio.gather(
             self.institution_searcher.async_search_with_diagnostics(
                 end_latitude,
@@ -1979,6 +2137,7 @@ class KnihaJizdManager:
             self.home_latitude,
             self.home_longitude,
             self.home_radius,
+            accuracy_m=_as_float(segment.get("end_accuracy_m")),
         )
         if home_match is not None:
             segment["configured_place"] = "home"
@@ -2020,6 +2179,7 @@ class KnihaJizdManager:
             self.company_latitude,
             self.company_longitude,
             self.company_radius,
+            accuracy_m=_as_float(segment.get("end_accuracy_m")),
         )
         if company_match is not None:
             label = self.company_label or "Firma"
@@ -2297,7 +2457,7 @@ class KnihaJizdManager:
     def _journey_return_context(
         self, segment: dict[str, Any]
     ) -> dict[str, Any] | None:
-        """Carry return evidence across fuel, rest or shopping stops."""
+        """Carry return evidence across a confirmed service or rest stop."""
         journey_id = segment.get("journey_id")
         if not journey_id:
             return None
@@ -2543,6 +2703,10 @@ class KnihaJizdManager:
                 base_message = (
                     f"Možný návrat po návštěvě {previous_purpose}. "
                     f"Odhadovaný cíl: {estimate}. Jaký typ měla tato jízda?"
+                )
+            elif return_context.get("reason") == "configured_home_destination":
+                base_message = (
+                    "Dojeli jste domů. Byla tato jízda služební, nebo soukromá?"
                 )
             else:
                 base_message = (
@@ -2793,6 +2957,18 @@ class KnihaJizdManager:
                     self.private_radius,
                     selected_label,
                 )
+                if not result.get("place_updated"):
+                    reason = str(result.get("reason") or "unknown")
+                    messages = {
+                        "missing_destination": "Cíl nemá souřadnice ani použitelnou adresu.",
+                        "unreliable_destination": (
+                            "Poloha cíle je příliš nepřesná pro bezpečné uložení."
+                        ),
+                        "configured_place": (
+                            "Domov a firma se upravují v nastavení integrace."
+                        ),
+                    }
+                    raise ValueError(messages.get(reason, "Místo se nepodařilo uložit."))
             self._place_prompts.pop(segment_id, None)
             await self._async_save_runtime()
             await self._async_clear_place_notification(segment_id)
@@ -2804,7 +2980,11 @@ class KnihaJizdManager:
                 "processed_at": _iso_utc(datetime.now(UTC)),
             }
             self._notify_listeners()
-            return {"updated": 1, "state": "saved", **result}
+            return {
+                "updated": 1,
+                "state": "saved" if normalized_action == "save" else "skipped",
+                **result,
+            }
 
     async def _async_resolve_trip_locked(
         self,
@@ -3176,28 +3356,16 @@ class KnihaJizdManager:
             key=lambda item: str(item.get("started_at") or ""),
         )
 
-    @staticmethod
     def _should_offer_place_save(
-        segment: dict[str, Any], source: str, trip_type: str
+        self, segment: dict[str, Any], source: str, trip_type: str
     ) -> bool:
         """Offer learning only after an explicit classification of a real destination."""
-        return bool(
-            trip_type in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}
-            and source.startswith(("manual_panel", "notification"))
-            and segment.get("journey_role") != "return"
-            and segment.get("visit_role") != "waypoint"
-            and segment.get("journey_role") != "transient_stop"
-            and not segment.get("configured_place")
-            and not segment.get("matched_place_id")
-            and not segment.get("needs_review")
-            and (
-                segment.get("end_address")
-                or (
-                    segment.get("end_latitude") is not None
-                    and segment.get("end_longitude") is not None
-                )
-            )
+        radius = (
+            self.private_radius
+            if trip_type == TRIP_TYPE_PRIVATE
+            else self.client_radius
         )
+        return should_offer_place_save(segment, source, trip_type, radius)
 
     async def _async_queue_place_prompt(
         self, segment: dict[str, Any], purpose: str, trip_type: str
@@ -3206,15 +3374,7 @@ class KnihaJizdManager:
         segment_id = str(segment.get("id") or "")
         if not segment_id or segment_id in self._place_prompts:
             return
-        suggested_label = str(
-            (
-                purpose
-                if trip_type == TRIP_TYPE_BUSINESS and str(purpose).strip()
-                else segment.get("map_estimate")
-                or segment.get("end_address")
-                or ("Soukromé místo" if trip_type == TRIP_TYPE_PRIVATE else "Klient")
-            )
-        ).strip()
+        suggested_label = place_label_suggestion(segment, purpose, trip_type)
         prompt = {
             "segment_id": segment_id,
             "title": "Uložit místo pro příště?",
@@ -3229,6 +3389,7 @@ class KnihaJizdManager:
             "started_at": segment.get("started_at"),
             "start_address": segment.get("start_address"),
             "end_address": segment.get("end_address"),
+            "map_estimate": segment.get("map_estimate"),
             "trip_type_label": (
                 "služební" if trip_type == TRIP_TYPE_BUSINESS else "soukromá"
             ),
@@ -3350,6 +3511,8 @@ def _location_coordinate_details(
                 if state.attributes.get("gps_accuracy") is not None
                 else state.attributes.get("accuracy")
             )
+            if accuracy is not None and accuracy < 0:
+                accuracy = None
             candidates.append(
                 {
                     "source": source,
