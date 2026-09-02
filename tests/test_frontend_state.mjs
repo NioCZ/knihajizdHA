@@ -44,6 +44,44 @@ const panel = new Panel();
 panel._render = () => {};
 panel._syncMapElement = () => {};
 
+const trackedDetails = {
+  dataset: { detailsKey: "input-checks" },
+  open: true,
+};
+panel.shadowRoot.querySelectorAll = (selector) => (
+  selector === "details[data-details-key]" ? [trackedDetails] : []
+);
+panel._captureInteractiveState();
+assert.equal(panel._openDetails.has("input-checks"), true);
+trackedDetails.open = false;
+panel._captureInteractiveState();
+assert.equal(panel._openDetails.has("input-checks"), false);
+
+assert.ok(
+  panelSource.indexOf("Hlavní přehled") < panelSource.indexOf("Technický stav"),
+  "the trip table should be rendered before diagnostics",
+);
+
+let overviewGeneratedAt = "2026-09-02T08:00:00+00:00";
+let overviewRenders = 0;
+panel._render = () => { overviewRenders += 1; };
+panel._hass = {
+  async callApi(method, path) {
+    assert.equal(method, "GET");
+    assert.equal(path, "kniha_jizd/overview");
+    return {
+      generated_at: overviewGeneratedAt,
+      diagnostics: { today_trips: [] },
+      statistics: {},
+    };
+  },
+};
+await panel._loadOverviewData();
+overviewGeneratedAt = "2026-09-02T08:00:01+00:00";
+await panel._loadOverviewData();
+assert.equal(overviewRenders, 1, "timestamp-only overview refresh should not rebuild the UI");
+panel._render = () => {};
+
 const historyRequests = [];
 panel._hass = {
   callApi(method, path) {

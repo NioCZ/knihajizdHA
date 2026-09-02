@@ -36,27 +36,35 @@ class KnihaJizdPanel extends HTMLElement {
     this._mapMessage = "";
     this._tripDrafts = new Map();
     this._placeDrafts = new Map();
-    this._openDecisions = new Set();
+    this._openDetails = new Set();
     this._overviewData = null;
+    this._overviewSignature = "";
     this._overviewLoading = false;
     this._overviewError = "";
     this._overviewRequestId = 0;
     this._overviewLoadedAt = 0;
     this._overviewRefreshTimer = null;
     this._renderPending = false;
+    this._pointerActive = false;
+    this._interactionUntil = 0;
+    this._idleRenderTimer = null;
     this.shadowRoot.addEventListener?.("focusout", () => {
       if (!this._renderPending) return;
-      setTimeout(() => {
-        const active = this.shadowRoot?.activeElement;
-        if (!active?.matches?.("input, select, textarea")) {
-          this._renderPending = false;
-          this._render();
-        }
-      }, 0);
+      setTimeout(() => this._requestRender(), 0);
+    });
+    this.shadowRoot.addEventListener?.("pointerdown", () => {
+      this._pointerActive = true;
+    });
+    ["pointerup", "pointercancel"].forEach((eventName) => {
+      this.shadowRoot.addEventListener?.(eventName, () => {
+        this._pointerActive = false;
+        if (this._renderPending) this._requestRender();
+      });
     });
   }
 
   set hass(value) {
+    const firstConnection = !this._hass;
     this._hass = value;
     if (
       this._activeTab === "overview"
@@ -83,12 +91,10 @@ class KnihaJizdPanel extends HTMLElement {
       }
       return;
     }
-    const activeElement = this.shadowRoot?.activeElement;
-    if (activeElement?.matches?.("input, select, textarea")) {
-      this._renderPending = true;
-      return;
-    }
-    this._render();
+    // Home Assistant replaces `hass` frequently. The overview API refresh below
+    // provides the data used by this panel, so rebuilding the whole DOM here
+    // would only interrupt scrolling, open details and in-progress edits.
+    if (firstConnection || !this.shadowRoot?.querySelector?.("main")) this._render();
   }
 
   set narrow(value) {
@@ -97,6 +103,30 @@ class KnihaJizdPanel extends HTMLElement {
 
   set panel(value) {
     this._panel = value;
+  }
+
+  _requestRender() {
+    const activeElement = this.shadowRoot?.activeElement;
+    const interactionDelay = Math.max(0, this._interactionUntil - Date.now());
+    if (
+      this._pointerActive
+      || activeElement?.matches?.("input, select, textarea")
+      || interactionDelay > 0
+    ) {
+      this._renderPending = true;
+      if (!this._pointerActive && !activeElement?.matches?.("input, select, textarea")) {
+        if (this._idleRenderTimer) clearTimeout(this._idleRenderTimer);
+        this._idleRenderTimer = setTimeout(() => {
+          this._idleRenderTimer = null;
+          this._requestRender();
+        }, interactionDelay + 30);
+      }
+      return;
+    }
+    if (this._idleRenderTimer) clearTimeout(this._idleRenderTimer);
+    this._idleRenderTimer = null;
+    this._renderPending = false;
+    this._render();
   }
 
   connectedCallback() {
@@ -109,17 +139,26 @@ class KnihaJizdPanel extends HTMLElement {
     this._mapRefreshTimer = null;
     if (this._overviewRefreshTimer) clearTimeout(this._overviewRefreshTimer);
     this._overviewRefreshTimer = null;
+    if (this._idleRenderTimer) clearTimeout(this._idleRenderTimer);
+    this._idleRenderTimer = null;
   }
 
   async _loadOverviewData() {
     if (!this._hass || this._overviewLoading) return;
     const requestId = ++this._overviewRequestId;
+    const previousError = this._overviewError;
+    let shouldRender = !this._overviewData;
     this._overviewLoading = true;
     this._overviewError = "";
     try {
       const data = await this._hass.callApi("GET", "kniha_jizd/overview");
       if (requestId !== this._overviewRequestId) return;
+      const comparableData = { ...data };
+      delete comparableData.generated_at;
+      const nextSignature = JSON.stringify(comparableData);
+      shouldRender = shouldRender || nextSignature !== this._overviewSignature || Boolean(previousError);
       this._overviewData = data;
+      this._overviewSignature = nextSignature;
       this._overviewLoadedAt = Date.now();
       const questions = new Set(
         (data?.diagnostics?.today_trips || [])
@@ -132,14 +171,13 @@ class KnihaJizdPanel extends HTMLElement {
     } catch (error) {
       if (requestId !== this._overviewRequestId) return;
       this._overviewError = error.message || String(error);
+      shouldRender = true;
     } finally {
       if (requestId === this._overviewRequestId) {
         this._overviewLoading = false;
         this._overviewLoadedAt = Date.now();
         if (this._activeTab !== "overview") return;
-        const active = this.shadowRoot?.activeElement;
-        if (active?.matches?.("input, select, textarea")) this._renderPending = true;
-        else this._render();
+        if (shouldRender) this._requestRender();
       }
     }
   }
@@ -271,11 +309,11 @@ class KnihaJizdPanel extends HTMLElement {
       if (!this._sameValues(values, originals)) this._placeDrafts.set(placeId, values);
       else this._placeDrafts.delete(placeId);
     });
-    this.shadowRoot.querySelectorAll("details.decision[data-decision-id]").forEach((details) => {
-      const decisionId = String(details.dataset.decisionId || "");
-      if (!decisionId) return;
-      if (details.open) this._openDecisions.add(decisionId);
-      else this._openDecisions.delete(decisionId);
+    this.shadowRoot.querySelectorAll("details[data-details-key]").forEach((details) => {
+      const detailsKey = String(details.dataset.detailsKey || "");
+      if (!detailsKey) return;
+      if (details.open) this._openDetails.add(detailsKey);
+      else this._openDetails.delete(detailsKey);
     });
     this.shadowRoot.querySelectorAll(".question-card[data-segment-id]").forEach((card) => {
       const segmentId = String(card.dataset.segmentId || "");
@@ -345,7 +383,7 @@ class KnihaJizdPanel extends HTMLElement {
     if (!Array.isArray(rows) || rows.length === 0) {
       return `<div class="muted">${this._text(emptyMessage)}</div>`;
     }
-    return `<div class="table-wrap" data-scroll-key="${scrollKey}"><table><thead><tr>
+    return `<div class="table-wrap trip-table" data-scroll-key="${scrollKey}"><table><thead><tr>
       <th>Čas</th><th>Odkud</th><th>Kam</th><th>km</th><th>Zákazník / účel</th><th>Typ</th><th>Rozhodnutí</th><th>Stav</th><th></th>
     </tr></thead><tbody>${rows.map((trip) => {
       const segmentId = String(trip.id || "");
@@ -361,19 +399,19 @@ class KnihaJizdPanel extends HTMLElement {
       const disabled = !trip.editable || this._savingTrip === trip.id;
       const dirty = Boolean(draft && !draft.confirmedAt);
       return `<tr data-segment-id="${this._text(trip.id)}">
-        <td>${this._time(trip.started_at)}</td>
-        <td><input class="trip-start" type="text" value="${this._text(values.start, "")}" data-original-value="${this._text(serverValues.start, "")}" placeholder="Místo odjezdu" ${disabled ? "disabled" : ""}></td>
-        <td><input class="trip-end" type="text" value="${this._text(values.end, "")}" data-original-value="${this._text(serverValues.end, "")}" placeholder="Místo příjezdu" ${disabled ? "disabled" : ""}></td>
-        <td><input class="trip-distance" type="number" min="0" step="1" value="${this._text(values.distance, "")}" data-original-value="${this._text(serverValues.distance, "")}" ${disabled ? "disabled" : ""}></td>
-        <td><input class="trip-purpose" type="text" value="${this._text(values.purpose, "")}" data-original-value="${this._text(serverValues.purpose, "")}" placeholder="Volitelný zákazník / účel" ${disabled ? "disabled" : ""}></td>
-        <td><select class="trip-type" data-original-value="${this._text(serverValues.type, "business")}" ${disabled ? "disabled" : ""}>
+        <td data-label="Čas">${this._time(trip.started_at)}</td>
+        <td data-label="Odkud"><input class="trip-start" type="text" value="${this._text(values.start, "")}" data-original-value="${this._text(serverValues.start, "")}" placeholder="Místo odjezdu" ${disabled ? "disabled" : ""}></td>
+        <td data-label="Kam"><input class="trip-end" type="text" value="${this._text(values.end, "")}" data-original-value="${this._text(serverValues.end, "")}" placeholder="Místo příjezdu" ${disabled ? "disabled" : ""}></td>
+        <td data-label="Kilometry"><input class="trip-distance" type="number" min="0" step="1" value="${this._text(values.distance, "")}" data-original-value="${this._text(serverValues.distance, "")}" ${disabled ? "disabled" : ""}></td>
+        <td data-label="Zákazník / účel"><input class="trip-purpose" type="text" value="${this._text(values.purpose, "")}" data-original-value="${this._text(serverValues.purpose, "")}" placeholder="Volitelný zákazník / účel" ${disabled ? "disabled" : ""}></td>
+        <td data-label="Typ"><select class="trip-type" data-original-value="${this._text(serverValues.type, "business")}" ${disabled ? "disabled" : ""}>
           ${reviewSelected ? '<option value="unclassified" selected disabled>Nevyřešená – vyberte typ</option>' : ""}
           <option value="business" ${privateSelected || reviewSelected ? "" : "selected"}>Služební</option>
           <option value="private" ${privateSelected ? "selected" : ""}>Soukromá</option>
         </select></td>
-        <td>${this._decisionDetails(trip)}</td>
-        <td>${trip.needs_review ? '<strong class="review-label">K revizi</strong> · ' : ""}${this._statusLabel(trip.status)}${trip.odometer_ready ? "" : " · čeká km"}<small>${this._text(trip.distance_reconciliation_source)}</small></td>
-        <td><button class="save-trip" ${disabled || !dirty ? "disabled" : ""}>${this._savingTrip === trip.id ? "Ukládám…" : draft?.confirmedAt ? "Uloženo" : "Uložit"}</button></td>
+        <td data-label="Rozhodnutí" class="wide-field">${this._decisionDetails(trip)}</td>
+        <td data-label="Stav" class="wide-field">${trip.needs_review ? '<strong class="review-label">K revizi</strong> · ' : ""}${this._statusLabel(trip.status)}${trip.odometer_ready ? "" : " · čeká km"}<small>${this._text(trip.distance_reconciliation_source)}</small></td>
+        <td data-label="Akce" class="table-action"><button class="save-trip" ${disabled || !dirty ? "disabled" : ""}>${this._savingTrip === trip.id ? "Ukládám…" : draft?.confirmedAt ? "Uloženo" : "Uložit"}</button></td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
   }
@@ -408,7 +446,7 @@ class KnihaJizdPanel extends HTMLElement {
       <div class="question-route"><span>${this._text(trip.start_address)}</span><span aria-hidden="true">→</span><span>${this._text(trip.end_address)}</span></div>
       ${requiresValue ? `<label class="question-input"><span>Jiný klient nebo účel</span><input class="question-value" type="text" value="${this._text(value, "")}" placeholder="Napište název nebo účel" ${resolving ? "disabled" : ""}></label>` : ""}
       <div class="question-actions">${(question.actions || []).map((action) => `<button class="resolve-trip ${action.id === "private" ? "secondary" : ""}" data-action="${this._text(action.id)}" ${action.candidate_index ? `data-candidate-index="${this._text(action.candidate_index)}"` : ""} ${action.requires_value ? 'data-requires-value="true"' : ""} ${resolving ? "disabled" : ""}>${this._text(action.label)}</button>`).join("")}</div>
-      <details class="question-details decision" data-decision-id="question:${this._text(segmentId)}" ${this._openDecisions.has(`question:${segmentId}`) ? "open" : ""}><summary>Podrobnosti návrhu</summary>${this._decisionDetails(trip, false)}</details>
+      <details class="question-details decision" data-details-key="question:${this._text(segmentId)}" ${this._openDetails.has(`question:${segmentId}`) ? "open" : ""}><summary>Podrobnosti návrhu</summary>${this._decisionDetails(trip, false)}</details>
     </article>`;
   }
 
@@ -487,7 +525,7 @@ class KnihaJizdPanel extends HTMLElement {
         ? `<small>Hledání institucí: ${this._text(searchStatus)} · pokusy ${this._text(decision.candidate_search_attempts, "0")}${decision.candidate_search_cache_hit ? " · cache" : ""}${decision.candidate_search_error ? ` · ${this._text(decision.candidate_search_error)}` : ""}</small>`
         : ""}`;
     if (!wrap) return content;
-    return `<details class="decision" data-decision-id="${this._text(decisionId)}" ${this._openDecisions.has(decisionId) ? "open" : ""}><summary>${this._text(decision.source_label, "Proč takto?")}</summary>
+    return `<details class="decision" data-details-key="decision:${this._text(decisionId)}" ${this._openDetails.has(`decision:${decisionId}`) ? "open" : ""}><summary>${this._text(decision.source_label, "Proč takto?")}</summary>
       ${content}</details>`;
   }
 
@@ -865,15 +903,15 @@ class KnihaJizdPanel extends HTMLElement {
     const configuredRows = configuredPlaces.map((place) => {
       const typeLabel = place.place_role === "home" ? "Podle směru jízdy" : "Služební";
       return `<tr class="configured-place-row">
-        <td></td>
-        <td><strong>${this._text(place.label)}</strong><small>Konfigurované místo · upravuje se v nastavení integrace</small></td>
-        <td>${this._text(typeLabel)}</td>
-        <td>${this._number(place.radius_m)} m</td>
-        <td><div class="place-anchor">
+        <td data-label="Výběr"></td>
+        <td data-label="Název"><strong>${this._text(place.label)}</strong><small>Konfigurované místo · upravuje se v nastavení integrace</small></td>
+        <td data-label="Typ">${this._text(typeLabel)}</td>
+        <td data-label="Poloměr">${this._number(place.radius_m)} m</td>
+        <td data-label="Fyzický bod"><div class="place-anchor">
           <div><strong>${this._text(place.address, place.label)}</strong><small>${this._number(place.latitude, 5)}, ${this._number(place.longitude, 5)}</small></div>
           <span class="map-point-status visible">Na mapě</span>
         </div></td>
-        <td></td>
+        <td data-label="Akce"></td>
       </tr>`;
     }).join("");
     const learnedRows = places.map((place) => {
@@ -901,17 +939,17 @@ class KnihaJizdPanel extends HTMLElement {
           <span class="map-point-status ${visible ? "visible" : "hidden"}">${visible ? "Na mapě" : hiddenLabel}</span>
         </div>` : '<div class="muted">Bod nemá použitelné souřadnice ani adresu.</div>';
       return `<tr data-place-id="${this._text(place.id)}">
-        <td><input class="place-select" type="checkbox" value="${this._text(place.id)}" ${this._selectedPlaces.has(String(place.id)) ? "checked" : ""} ${disabled ? "disabled" : ""}></td>
-        <td><input class="place-label" type="text" value="${this._text(values.label, "")}" data-original-value="${this._text(serverValues.label, "")}" ${disabled ? "disabled" : ""}></td>
-        <td><select class="place-classification" data-original-value="${this._text(serverValues.classification, "business")}" ${disabled ? "disabled" : ""}>
+        <td data-label="Výběr"><input class="place-select" type="checkbox" value="${this._text(place.id)}" ${this._selectedPlaces.has(String(place.id)) ? "checked" : ""} ${disabled ? "disabled" : ""}></td>
+        <td data-label="Název"><input class="place-label" type="text" value="${this._text(values.label, "")}" data-original-value="${this._text(serverValues.label, "")}" ${disabled ? "disabled" : ""}></td>
+        <td data-label="Typ"><select class="place-classification" data-original-value="${this._text(serverValues.classification, "business")}" ${disabled ? "disabled" : ""}>
           <option value="business" ${values.classification === "business" ? "selected" : ""}>Služební</option>
           <option value="private" ${values.classification === "private" ? "selected" : ""}>Soukromé</option>
           <option value="mixed" ${values.classification === "mixed" ? "selected" : ""}>Služební i soukromé</option>
           <option value="transient" ${values.classification === "transient" ? "selected" : ""}>Krátká zastávka</option>
         </select></td>
-        <td><input class="place-radius" type="number" min="25" max="5000" step="25" value="${this._text(values.radius, "")}" data-original-value="${this._text(serverValues.radius, "")}" ${disabled ? "disabled" : ""}> m</td>
-        <td>${point}</td>
-        <td><div class="place-actions"><button class="save-place" ${disabled ? "disabled" : ""}>Uložit</button><button class="delete-place danger" ${disabled ? "disabled" : ""}>Odstranit bod</button></div></td>
+        <td data-label="Poloměr"><input class="place-radius" type="number" min="25" max="5000" step="25" value="${this._text(values.radius, "")}" data-original-value="${this._text(serverValues.radius, "")}" ${disabled ? "disabled" : ""}> m</td>
+        <td data-label="Fyzický bod">${point}</td>
+        <td data-label="Akce" class="table-action"><div class="place-actions"><button class="save-place" ${disabled ? "disabled" : ""}>Uložit</button><button class="delete-place danger" ${disabled ? "disabled" : ""}>Odstranit bod</button></div></td>
       </tr>`;
     }).join("");
     return `<div class="table-wrap places-table" data-scroll-key="places"><table><thead><tr>
@@ -978,17 +1016,21 @@ class KnihaJizdPanel extends HTMLElement {
 
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display:block; min-height:100%; background:var(--primary-background-color); color:var(--primary-text-color); }
+        :host { display:block; min-height:100%; color:var(--primary-text-color); background:linear-gradient(180deg,color-mix(in srgb,var(--primary-color) 5%,var(--primary-background-color)) 0,var(--primary-background-color) 260px); }
         * { box-sizing:border-box; }
-        main { width:100%; max-width:1200px; min-width:0; margin:0 auto; padding:24px; font-family:var(--paper-font-body1_-_font-family, sans-serif); }
-        header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:24px; flex-wrap:wrap; }
-        h1 { margin:0; font-size:28px; } h2 { margin:0 0 16px; font-size:18px; }
-        .pill { border-radius:999px; padding:8px 14px; font-weight:600; background:var(--secondary-background-color); }
+        main { width:100%; max-width:1560px; min-width:0; margin:0 auto; padding:clamp(16px,2.5vw,36px); font-family:var(--paper-font-body1_-_font-family, sans-serif); }
+        header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:22px; flex-wrap:wrap; }
+        .title-subtitle { margin-top:5px; font-size:14px; }
+        h1 { margin:0; font-size:clamp(26px,3vw,36px); line-height:1.08; letter-spacing:-.025em; } h2 { margin:0 0 16px; font-size:19px; }
+        .pill { display:inline-flex; align-items:center; gap:8px; border:1px solid var(--divider-color); border-radius:999px; padding:8px 14px; font-weight:700; background:color-mix(in srgb,var(--card-background-color) 88%,transparent); box-shadow:0 2px 8px rgba(0,0,0,.05); }
+        .pill::before { width:8px; height:8px; border-radius:50%; background:currentColor; content:""; }
         .pill.ready { color:var(--success-color, #2e7d32); } .pill.error { color:var(--error-color, #c62828); }
         .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:16px; margin-bottom:16px; }
-        .card { min-width:0; max-width:100%; background:var(--card-background-color); border-radius:14px; padding:18px; box-shadow:var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.12)); }
+        .card { min-width:0; max-width:100%; border:1px solid color-mix(in srgb,var(--divider-color) 85%,transparent); border-radius:16px; padding:20px; background:var(--card-background-color); box-shadow:0 6px 24px rgba(0,0,0,.07); }
+        .metric-card { position:relative; overflow:hidden; padding-top:17px; }
+        .metric-card::before { position:absolute; inset:0 auto auto 0; width:100%; height:3px; background:color-mix(in srgb,var(--primary-color) 65%,transparent); content:""; }
         .card.attention .metric { color:var(--warning-color,#ef6c00); }
-        .metric { font-size:28px; font-weight:700; margin-top:8px; } .muted, small { color:var(--secondary-text-color); }
+        .metric { font-size:30px; font-weight:750; margin-top:8px; letter-spacing:-.025em; } .muted, small { color:var(--secondary-text-color); }
         small { display:block; margin-top:3px; overflow-wrap:anywhere; }
         .check { display:flex; gap:10px; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--divider-color); }
         .check:last-child { border-bottom:0; }
@@ -1000,18 +1042,25 @@ class KnihaJizdPanel extends HTMLElement {
         .month-control { display:flex; flex-direction:column; gap:6px; max-width:220px; margin-top:16px; }
         .month-control label { color:var(--secondary-text-color); }
         input[type="month"] { color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:8px; padding:10px 12px; font:inherit; }
-        input[type="text"], input[type="number"], select { width:100%; min-width:130px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:7px; padding:8px; font:inherit; }
+        input[type="text"], input[type="number"], select { width:100%; min-width:130px; color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:9px; padding:9px 10px; font:inherit; transition:border-color .15s,box-shadow .15s; }
+        input:hover, select:hover { border-color:color-mix(in srgb,var(--primary-color) 55%,var(--divider-color)); }
         .trip-distance { min-width:85px !important; width:95px !important; }
-        button, a.button { border:0; border-radius:10px; padding:12px 18px; font:inherit; font-weight:600; cursor:pointer; text-decoration:none; }
+        button, a.button { border:0; border-radius:10px; padding:12px 18px; font:inherit; font-weight:650; cursor:pointer; text-decoration:none; transition:transform .12s,box-shadow .12s,background-color .12s; }
         button { color:var(--text-primary-color,#fff); background:var(--primary-color); }
+        button:not(:disabled):hover, a.button:hover { transform:translateY(-1px); box-shadow:0 5px 14px rgba(0,0,0,.12); }
         button.secondary { color:var(--primary-text-color); background:var(--secondary-background-color); border:1px solid var(--divider-color); }
         button:disabled { opacity:.6; cursor:wait; } a.button { color:var(--primary-color); background:var(--secondary-background-color); }
         .message { margin-top:12px; color:var(--secondary-text-color); }
         .global-message { margin:-10px 0 18px; padding:11px 14px; border-radius:10px; color:var(--primary-text-color); background:color-mix(in srgb,var(--primary-color) 9%,var(--card-background-color)); }
         button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, a:focus-visible { outline:3px solid var(--primary-color); outline-offset:2px; }
-        .advanced { align-self:start; }
-        .advanced > summary { cursor:pointer; font-size:16px; font-weight:700; }
+        .advanced { align-self:start; padding:0; overflow:hidden; }
+        .advanced > summary { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:18px 20px; cursor:pointer; font-size:16px; font-weight:700; list-style:none; }
+        .advanced > summary::-webkit-details-marker { display:none; }
+        .advanced > summary::after { flex:none; width:9px; height:9px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; content:""; transform:rotate(45deg); transition:transform .18s; }
+        .advanced[open] > summary::after { transform:rotate(225deg); }
+        .advanced[open] > summary { border-bottom:1px solid var(--divider-color); }
         .advanced-body { margin-top:14px; }
+        .advanced > .advanced-body { margin:0; padding:18px 20px 20px; }
         .last-trip-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
         .last-trip-heading h2 { margin:3px 0 0; }
         .last-trip-heading > strong { font-size:24px; white-space:nowrap; }
@@ -1035,19 +1084,32 @@ class KnihaJizdPanel extends HTMLElement {
         .question-details { margin-top:11px; color:var(--secondary-text-color); font-size:12px; }
         .question-details summary { cursor:pointer; color:var(--primary-color); font-weight:600; }
         .table-wrap, .calendar-scroll { position:relative; display:block; width:100%; max-width:100%; min-width:0; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; scrollbar-gutter:stable; padding-bottom:8px; }
-        table { width:max-content; min-width:1180px; border-collapse:collapse; margin-top:12px; }
-        th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--divider-color); padding:9px 8px; min-width:75px; }
-        th { color:var(--secondary-text-color); font-weight:600; } td:nth-child(2), td:nth-child(3) { min-width:180px; }
+        table { width:100%; min-width:1120px; border-collapse:separate; border-spacing:0; margin-top:12px; }
+        th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--divider-color); padding:11px 9px; min-width:75px; }
+        th { position:sticky; top:0; z-index:1; color:var(--secondary-text-color); background:var(--card-background-color); font-size:12px; font-weight:700; letter-spacing:.025em; text-transform:uppercase; }
+        tbody tr { transition:background-color .12s; }
+        tbody tr:hover { background:color-mix(in srgb,var(--primary-color) 4%,transparent); }
+        td:nth-child(2), td:nth-child(3) { min-width:180px; }
         .save-trip { padding:9px 13px; white-space:nowrap; }
         .decision { min-width:220px; max-width:330px; }
         .decision summary { cursor:pointer; color:var(--primary-color); font-weight:600; }
         .decision div { margin-top:6px; }
         .review-label { color:var(--warning-color,#ef6c00); }
         .daily-trips, .history-view { min-width:0; }
-        .daily-trips { overflow:visible; margin-bottom:16px; }
-        .tabs { display:flex; gap:6px; margin:-8px 0 22px; padding:5px; width:max-content; max-width:100%; overflow-x:auto; border-radius:12px; background:var(--secondary-background-color); }
-        .tab { min-width:130px; padding:10px 16px; color:var(--primary-text-color); background:transparent; }
-        .tab.active { color:var(--text-primary-color,#fff); background:var(--primary-color); }
+        .daily-trips { overflow:visible; margin-bottom:18px; }
+        .primary-section { border-color:color-mix(in srgb,var(--primary-color) 24%,var(--divider-color)); box-shadow:0 10px 34px rgba(0,0,0,.09); }
+        .section-titlebar { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:2px; flex-wrap:wrap; }
+        .section-titlebar h2 { margin:0 0 4px; font-size:22px; }
+        .section-kicker { color:var(--primary-color); font-size:12px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
+        .overview-secondary { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr); gap:16px; margin-bottom:18px; }
+        .overview-secondary > .card { margin:0; }
+        .diagnostics-section { margin-top:18px; }
+        .diagnostics-heading { margin:0 0 11px; }
+        .diagnostics-heading h2 { margin:0 0 4px; }
+        .diagnostics-grid { display:grid; grid-template-columns:minmax(280px,.8fr) minmax(420px,1.2fr); gap:16px; }
+        .tabs { display:flex; gap:5px; margin:-6px 0 22px; padding:5px; width:100%; max-width:760px; overflow-x:auto; border:1px solid color-mix(in srgb,var(--divider-color) 75%,transparent); border-radius:14px; background:color-mix(in srgb,var(--secondary-background-color) 82%,transparent); scrollbar-width:thin; }
+        .tab { flex:1 0 125px; min-width:0; padding:10px 15px; color:var(--primary-text-color); background:transparent; box-shadow:none; }
+        .tab.active { color:var(--text-primary-color,#fff); background:var(--primary-color); box-shadow:0 4px 12px color-mix(in srgb,var(--primary-color) 28%,transparent); }
         .map-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
         .map-heading h2 { margin:0; }
         .map-heading button { padding:9px 14px; }
@@ -1093,9 +1155,28 @@ class KnihaJizdPanel extends HTMLElement {
         .configured-place-row { background:color-mix(in srgb,var(--primary-color) 5%,transparent); }
         button.danger { background:var(--error-color,#c62828); }
         .radius-summary { display:flex; gap:10px 16px; flex-wrap:wrap; margin:8px 0 16px; color:var(--secondary-text-color); }
+        @media (max-width:1050px) {
+          .overview-secondary, .diagnostics-grid { grid-template-columns:1fr; }
+          main { padding:14px; }
+          .card { padding:16px; }
+          .trip-table, .places-table { overflow:visible; padding:0; }
+          .trip-table table, .places-table table { display:block; width:100%; min-width:0; margin-top:14px; }
+          .trip-table thead, .places-table thead { display:none; }
+          .trip-table tbody, .places-table tbody { display:grid; gap:12px; }
+          .trip-table tr, .places-table tr { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:11px 12px; padding:14px; border:1px solid var(--divider-color); border-radius:13px; background:color-mix(in srgb,var(--secondary-background-color) 58%,var(--card-background-color)); }
+          .trip-table td, .places-table td, .places-table td:nth-child(5) { display:grid; gap:5px; width:auto !important; min-width:0 !important; padding:0; border:0; }
+          .trip-table td::before, .places-table td::before { color:var(--secondary-text-color); content:attr(data-label); font-size:11px; font-weight:750; letter-spacing:.045em; text-transform:uppercase; }
+          .trip-table .wide-field, .trip-table .table-action, .places-table td:nth-child(5), .places-table .table-action { grid-column:1 / -1; }
+          .trip-table .decision { min-width:0; max-width:none; }
+          .trip-table input, .trip-table select, .places-table input[type="text"], .places-table input[type="number"], .places-table select { min-width:0; }
+          .trip-distance { width:100% !important; }
+          .place-anchor > div { min-width:0; }
+          .place-actions { flex-wrap:wrap; }
+          .table-action button { min-height:42px; }
+        }
         @media (max-width:600px) {
-          main { padding:16px; } dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:8px; }
-          header { margin-bottom:18px; } h1 { font-size:24px; }
+          dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:8px; }
+          header { margin-bottom:18px; }
           .grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
           .card { padding:14px; } .metric { font-size:23px; }
           .question-grid { grid-template-columns:1fr; }
@@ -1104,12 +1185,22 @@ class KnihaJizdPanel extends HTMLElement {
           .calendar-weekdays, .calendar-grid { gap:3px; }
           .calendar-day { min-height:75px; padding:5px; border-radius:7px; }
           .calendar-value { padding:2px 3px; font-size:9px; }
-          .table-wrap { margin:0 -4px; width:calc(100% + 8px); }
+          .calendar-scroll { margin:0 -4px; width:calc(100% + 8px); }
+          .advanced > summary { padding:15px 16px; }
+          .advanced > .advanced-body { padding:15px 16px 17px; }
+          .tabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); max-width:none; margin-bottom:16px; overflow:visible; }
+          .tab { width:100%; min-width:0; }
         }
-        @media (max-width:390px) { .grid { grid-template-columns:1fr; } }
+        @media (max-width:440px) {
+          .grid { grid-template-columns:1fr; }
+          .trip-table tr, .places-table tr { grid-template-columns:1fr; padding:12px; }
+          .trip-table .wide-field, .trip-table .table-action, .places-table td:nth-child(5), .places-table .table-action { grid-column:auto; }
+          .section-titlebar h2 { font-size:20px; }
+          .tab { flex-basis:112px; padding-inline:11px; }
+        }
       </style>
       <main>
-        <header><div><h1>Kniha jízd</h1><div class="muted">Průběžný stav integrace a export reportů</div></div>
+        <header><div><h1>Kniha jízd</h1><div class="muted title-subtitle">Jízdy, historie a reporty na jednom místě</div></div>
           <span class="pill ${readyValue ? "ready" : "error"}">${readyValue ? this._statusLabel(statusValue) : "Vstupy nejsou připravené"}</span>
         </header>
         <nav class="tabs" aria-label="Části panelu">
@@ -1120,55 +1211,60 @@ class KnihaJizdPanel extends HTMLElement {
         </nav>
         ${this._message ? `<div class="global-message" role="status" aria-live="polite">${this._text(this._message)}</div>` : ""}
         <div ${this._activeTab === "overview" ? "" : "hidden"}>
-        <section class="grid">
-          <article class="card"><div class="muted">Dnes služební</div><div class="metric">${this._number(businessValue)} km</div></article>
-          <article class="card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateValue)} km</div></article>
-          <article class="card"><div class="muted">Dnešní jízdy</div><div class="metric">${this._text(todayTripsValue, "0")}</div></article>
-          <article class="card attention"><div class="muted">Vyžaduje pozornost</div><div class="metric">${this._text(pendingValue + Number(attrs.today_review_count || 0), "0")}</div><small>${pendingValue} čeká · ${this._text(attrs.today_review_count, "0")} k revizi</small></article>
+        ${this._overviewError ? `<div class="inline-error" role="alert">Živý přehled se nepodařilo načíst: ${this._text(this._overviewError)}</div>` : ""}
+        <section class="card daily-trips primary-section">
+          <div class="section-titlebar"><div><div class="section-kicker">Hlavní přehled</div><h2>Dnešní jízdy</h2><div class="muted">Jízdy můžete přímo opravit a uložit. Zákazník je u služební jízdy volitelný.</div></div><span class="pill">${this._text(todayTripsValue, "0")} jízd</span></div>
+          ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.", "overview-trips")}
         </section>
-        <section class="grid">
-          <details class="card advanced"><summary>Kontrola vstupů</summary><div class="advanced-body">
-            ${this._check("Android Auto", attrs.trigger_ok, `${attrs.trigger_entity}: ${attrs.trigger_state}`)}
-            ${this._check("GPS telefonu", attrs.gps_ok, gpsDetail)}
-            ${this._check("Geokódovaná adresa", attrs.address_ok, attrs.address_entity)}
-            ${this._check("Tachometr", attrs.odometer_ok, odometerDetail)}
-            ${this._check("Notifikace", attrs.notify_ok, attrs.notify_service)}
-          </div></details>
-          <details class="card advanced"><summary>Automatika a diagnostika</summary><div class="advanced-body"><dl>
-            <dt>Stav</dt><dd>${this._statusLabel(statusValue)}</dd>
-            <dt>Aktivní segment</dt><dd>${this._text(attrs.active_segment_id)}</dd>
-            <dt>Čeká tachometr</dt><dd>${this._text(attrs.closing_count, "0")}</dd>
-            <dt>Čeká zařazení</dt><dd>${this._text(attrs.pending_count, "0")}</dd>
-            <dt>Čeká na cíl celé jízdy</dt><dd>${this._text(attrs.transient_count, "0")}</dd>
-            <dt>Návaznost návratu</dt><dd>${this._text(attrs.return_context_hours)} h</dd>
-            <dt>Limit mezizastávky</dt><dd>${this._text(attrs.transient_stop_minutes)} min</dd>
-            <dt>Automatická revize</dt><dd>${this._text(attrs.pending_review_hours)} h</dd>
-            <dt>Ustálení cíle</dt><dd>${this._text(attrs.location_settle_seconds)} s</dd>
-            <dt>Denní kontrola km</dt><dd>${odometerCheck.consistent ? "Sedí" : "Čeká / rozdíl"} · odometer ${this._number(odometerCheck.odometer_delta_km)} km · potvrzené segmenty ${this._number(odometerCheck.assigned_segment_km)} km · čekající ${this._number(odometerCheck.pending_segment_km)} km · rozdíl ${this._number(odometerCheck.difference_km)} km</dd>
-            <dt>Domov</dt><dd>${this._text(attrs.home_address)} · ${this._text(attrs.home_latitude)}, ${this._text(attrs.home_longitude)}</dd>
-            <dt>Firma</dt><dd>${this._text(attrs.company_address)} · ${this._text(attrs.company_latitude)}, ${this._text(attrs.company_longitude)} → ${this._text(attrs.company_label)}</dd>
-            <dt>Poloměry</dt><dd>domov ${this._number(attrs.home_radius_m)} m · firma ${this._number(attrs.company_radius_m)} m · klient ${this._number(attrs.client_radius_m)} m · soukromé ${this._number(attrs.private_radius_m)} m · zastávka ${this._number(attrs.transient_radius_m)} m</dd>
-            <dt>Celkem</dt><dd>${this._text(totalTripsValue, "0")} záznamů · ${this._number(totalBusinessValue)} služebních km · ${this._number(totalPrivateValue)} soukromých km</dd>
-            <dt>Poslední rozhodnutí</dt><dd>${attrs.last_notification_action ? `${this._text(attrs.last_notification_action.action)} · ${attrs.last_notification_action.channel === "panel" ? "panel" : "telefon"} · ${this._text(attrs.last_notification_action.processed_at)}` : "—"}</dd>
-            <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
-          </dl></div></details>
+        ${this._questionCards(todayTripRows)}
+        <section class="grid metrics-grid">
+          <article class="card metric-card"><div class="muted">Dnes služební</div><div class="metric">${this._number(businessValue)} km</div></article>
+          <article class="card metric-card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateValue)} km</div></article>
+          <article class="card metric-card"><div class="muted">Dnešní jízdy</div><div class="metric">${this._text(todayTripsValue, "0")}</div></article>
+          <article class="card metric-card attention"><div class="muted">Vyžaduje pozornost</div><div class="metric">${this._text(pendingValue + Number(attrs.today_review_count || 0), "0")}</div><small>${pendingValue} čeká · ${this._text(attrs.today_review_count, "0")} k revizi</small></article>
+        </section>
+        <section class="overview-secondary">
           <article class="card last-trip-card"><div class="last-trip-heading"><div><div class="muted">Poslední jízda</div><h2>${this._text(last.purpose, last.trip_type === "private" ? "Soukromá" : "Bez klienta")}</h2></div><strong>${this._number(last.distance_km ?? lastTrip?.state)} km</strong></div>
             <div class="last-trip-route"><span>${this._text(last.start_address)}</span><span aria-hidden="true">→</span><span>${this._text(last.end_address)}</span></div>
             <small>${last.journey_role === "return" ? "Služební návrat" : last.trip_type === "private" ? "Soukromá" : last.trip_type === "unclassified" ? "Nevyřešená – k revizi" : "Služební"} · celá cesta ${this._number(last.journey_distance_km ?? last.distance_km)} km / ${this._text(last.journey_segment_count, "1")} segmentů · ${this._time(last.ended_at)}</small>
           </article>
-        </section>
-        ${this._overviewError ? `<div class="inline-error" role="alert">Živý přehled se nepodařilo načíst: ${this._text(this._overviewError)}</div>` : ""}
-        ${this._questionCards(todayTripRows)}
-        <section class="card daily-trips"><h2>Dnešní jízdy</h2>
-          <div class="muted">Uložené i čekající jízdy lze opravit. Zákazník je u služební jízdy volitelný. Segmenty stejné celé cesty se upraví společně.</div>
-          ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.", "overview-trips")}
-        </section>
-        <section class="card"><h2>Excel report</h2>
+          <section class="card"><h2>Excel report</h2>
           <div class="muted">Oba listy budou obsahovat pouze jízdy z vybraného měsíce.</div>
           <div class="month-control"><label for="month">Měsíc reportu</label><input id="month" type="month" value="${this._text(this._month)}"></div>
           <div class="actions"><button id="export" ${this._exporting ? "disabled" : ""}>${this._exporting ? "Generuji…" : "Vygenerovat a stáhnout Excel"}</button>
           ${downloadUrl ? `<a class="button" href="${downloadUrl}" download="${this._text(downloadFilename)}">Stáhnout poslední export (${this._text(exportData.month)})</a>` : ""}</div>
           <div class="message">${this._text(exportData.generated_at ? `Poslední export: ${exportData.generated_at}, měsíc ${exportData.month}` : "Dosud nebyl vytvořen export.")}</div>
+          </section>
+        </section>
+        <section class="diagnostics-section" aria-labelledby="diagnostics-title">
+          <div class="diagnostics-heading"><h2 id="diagnostics-title">Technický stav</h2><div class="muted">Podrobnosti integrace jsou sbalené, aby nepřekážely běžné práci s jízdami.</div></div>
+          <div class="diagnostics-grid">
+            <details class="card advanced" data-details-key="input-checks" ${this._openDetails.has("input-checks") ? "open" : ""}><summary>Kontrola vstupů</summary><div class="advanced-body">
+              ${this._check("Android Auto", attrs.trigger_ok, `${attrs.trigger_entity}: ${attrs.trigger_state}`)}
+              ${this._check("GPS telefonu", attrs.gps_ok, gpsDetail)}
+              ${this._check("Geokódovaná adresa", attrs.address_ok, attrs.address_entity)}
+              ${this._check("Tachometr", attrs.odometer_ok, odometerDetail)}
+              ${this._check("Notifikace", attrs.notify_ok, attrs.notify_service)}
+            </div></details>
+            <details class="card advanced" data-details-key="automation-diagnostics" ${this._openDetails.has("automation-diagnostics") ? "open" : ""}><summary>Automatika a diagnostika</summary><div class="advanced-body"><dl>
+              <dt>Stav</dt><dd>${this._statusLabel(statusValue)}</dd>
+              <dt>Aktivní segment</dt><dd>${this._text(attrs.active_segment_id)}</dd>
+              <dt>Čeká tachometr</dt><dd>${this._text(attrs.closing_count, "0")}</dd>
+              <dt>Čeká zařazení</dt><dd>${this._text(attrs.pending_count, "0")}</dd>
+              <dt>Čeká na cíl celé jízdy</dt><dd>${this._text(attrs.transient_count, "0")}</dd>
+              <dt>Návaznost návratu</dt><dd>${this._text(attrs.return_context_hours)} h</dd>
+              <dt>Limit mezizastávky</dt><dd>${this._text(attrs.transient_stop_minutes)} min</dd>
+              <dt>Automatická revize</dt><dd>${this._text(attrs.pending_review_hours)} h</dd>
+              <dt>Ustálení cíle</dt><dd>${this._text(attrs.location_settle_seconds)} s</dd>
+              <dt>Denní kontrola km</dt><dd>${odometerCheck.consistent ? "Sedí" : "Čeká / rozdíl"} · odometer ${this._number(odometerCheck.odometer_delta_km)} km · potvrzené segmenty ${this._number(odometerCheck.assigned_segment_km)} km · čekající ${this._number(odometerCheck.pending_segment_km)} km · rozdíl ${this._number(odometerCheck.difference_km)} km</dd>
+              <dt>Domov</dt><dd>${this._text(attrs.home_address)} · ${this._text(attrs.home_latitude)}, ${this._text(attrs.home_longitude)}</dd>
+              <dt>Firma</dt><dd>${this._text(attrs.company_address)} · ${this._text(attrs.company_latitude)}, ${this._text(attrs.company_longitude)} → ${this._text(attrs.company_label)}</dd>
+              <dt>Poloměry</dt><dd>domov ${this._number(attrs.home_radius_m)} m · firma ${this._number(attrs.company_radius_m)} m · klient ${this._number(attrs.client_radius_m)} m · soukromé ${this._number(attrs.private_radius_m)} m · zastávka ${this._number(attrs.transient_radius_m)} m</dd>
+              <dt>Celkem</dt><dd>${this._text(totalTripsValue, "0")} záznamů · ${this._number(totalBusinessValue)} služebních km · ${this._number(totalPrivateValue)} soukromých km</dd>
+              <dt>Poslední rozhodnutí</dt><dd>${attrs.last_notification_action ? `${this._text(attrs.last_notification_action.action)} · ${attrs.last_notification_action.channel === "panel" ? "panel" : "telefon"} · ${this._text(attrs.last_notification_action.processed_at)}` : "—"}</dd>
+              <dt>Poslední chyba</dt><dd>${this._text(attrs.last_error)}</dd>
+            </dl></div></details>
+          </div>
         </section>
         </div>
         ${this._activeTab === "history" ? `<div class="history-view">
@@ -1285,6 +1381,14 @@ class KnihaJizdPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll(".place-select").forEach((input) => {
       input.addEventListener("change", () => this._togglePlaceSelection(input));
     });
+    this.shadowRoot.querySelectorAll("details[data-details-key]").forEach((details) => {
+      details.addEventListener("toggle", () => {
+        const detailsKey = String(details.dataset.detailsKey || "");
+        if (!detailsKey) return;
+        if (details.open) this._openDetails.add(detailsKey);
+        else this._openDetails.delete(detailsKey);
+      });
+    });
     this.shadowRoot.querySelectorAll("[data-scroll-key]").forEach((surface) => {
       const scrollKey = surface.dataset.scrollKey;
       surface.scrollLeft = Math.min(
@@ -1293,6 +1397,8 @@ class KnihaJizdPanel extends HTMLElement {
       );
       surface.addEventListener("scroll", () => {
         this._scrollPositions.set(scrollKey, surface.scrollLeft);
+        this._interactionUntil = Date.now() + 450;
+        if (this._renderPending) this._requestRender();
       }, { passive: true });
     });
     this._syncMapElement();

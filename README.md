@@ -229,7 +229,7 @@ nezmění denní součet; skutečně ujeté úseky dostanou minimálně 1 km, po
 celkový nájezd alespoň tak velký jako počet segmentů. Původní desetinný výpočet
 zůstává v `distance_km_raw`.
 
-### Akce notifikace
+### Rozhodnutí v panelu a notifikaci
 
 - **Potvrdit klienta** – použije nejpravděpodobnější mapový návrh.
 - **Navrhnout nového** – přijme vlastní název nebo číslo návrhu `1`, `2` či `3`.
@@ -237,9 +237,10 @@ zůstává v `distance_km_raw`.
 - **Osobní KM** – označí segment jako soukromý.
 
 Stejné volby jsou kdykoli dostupné v sekci **Potřebuje vaši odpověď** v panelu.
-Telefon čeká deset minut, aby mezitím mohla navázat další jízda, a upozorní jen na
-čerstvou otázku s důvěryhodným mapovým návrhem, návratem nebo známou smíšenou
-zónou. Neznámý cíl bez dobrého návrhu a krátká zastávka zůstávají pouze v panelu.
+U běžného nového cíle telefon čeká deset minut, aby mezitím mohla navázat další
+jízda, a upozorní jen na čerstvou otázku s důvěryhodným mapovým návrhem nebo
+návratem. Známá smíšená zóna a volba po příjezdu domů se mohou zobrazit ihned.
+Neznámý cíl bez dobrého návrhu a krátká zastávka zůstávají pouze v panelu.
 
 U rozpoznané návazné jízdy se první dvě volby nahradí tlačítky **Služební návrat**
 a **Jiný klient**. Návrat je uložen jen jako vztah mezi jízdami (`journey_role` a
