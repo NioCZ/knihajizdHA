@@ -102,6 +102,7 @@ from .workflow_logic import (
     mobile_notification_policy,
     panel_question,
     place_label_suggestion,
+    place_name_input_allowed,
     should_offer_place_save,
 )
 
@@ -2840,19 +2841,24 @@ class KnihaJizdManager:
             {
                 "action": _action_id(ACTION_SAVE_PLACE, segment_id),
                 "title": f"Uložit {suggested_label[:24]}",
-            },
-            {
-                "action": _action_id(ACTION_SAVE_NAMED_PLACE, segment_id),
-                "title": "Jiný název",
-                "behavior": "textInput",
-                "textInputButtonTitle": "Uložit místo",
-                "textInputPlaceholder": "Název místa",
-            },
+            }
+        ]
+        if place_name_input_allowed(str(prompt.get("trip_type") or "")):
+            actions.append(
+                {
+                    "action": _action_id(ACTION_SAVE_NAMED_PLACE, segment_id),
+                    "title": "Jiný název",
+                    "behavior": "textInput",
+                    "textInputButtonTitle": "Uložit místo",
+                    "textInputPlaceholder": "Název místa",
+                }
+            )
+        actions.append(
             {
                 "action": _action_id(ACTION_SKIP_PLACE, segment_id),
                 "title": "Jen tentokrát",
             },
-        ]
+        )
         try:
             await self.hass.services.async_call(
                 "notify",
@@ -3393,6 +3399,7 @@ class KnihaJizdManager:
             "trip_type_label": (
                 "služební" if trip_type == TRIP_TYPE_BUSINESS else "soukromá"
             ),
+            "name_input_allowed": place_name_input_allowed(trip_type),
             "candidates": [
                 {
                     "index": index,

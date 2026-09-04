@@ -163,7 +163,7 @@ nepovažují jen podle své mapové kategorie.
 
 Segmenty se spojí do jednoho `journey_id`, pouze když:
 
-- další jízda začne nejpozději do 60 minut (nastavitelné 5–180 minut),
+- další jízda začne nejpozději do 10 minut (nastavitelné 5–180 minut),
 - začne v nastaveném poloměru návaznosti (výchozí 200 m),
 - známý konečný a nový počáteční stav tachometru se neliší o více než 1 km.
 
@@ -255,7 +255,8 @@ nic neučí. Příští návštěva výslovně uloženého cíle v nastaveném p
 neptá. Bod se neuloží, pokud je známá přesnost GPS horší než zvolený poloměr;
 je-li současně dostupná skutečná textová adresa, uloží se bezpečně jen tato
 adresa bez nepřesných souřadnic.
-Výslovně uložené soukromé cíle používají název z druhého kroku a nastavitelnou výchozí zónu 250 m,
+U soukromé jízdy se na vlastní název nikdo neptá; při potvrzení se použije
+mapový odhad nebo adresa. Výslovně uložené soukromé cíle používají nastavitelnou výchozí zónu 250 m,
 takže několik různých soukromých cílů nesplyne do jedné široké kilometrové zóny.
 V raw jízdě zůstává účel `Soukromá`.
 

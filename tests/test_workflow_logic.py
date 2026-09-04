@@ -246,6 +246,10 @@ class WorkflowLogicTest(unittest.TestCase):
             "Parkoviště Výstaviště",
         )
 
+    def test_private_place_does_not_ask_for_a_customer_name(self) -> None:
+        self.assertTrue(WORKFLOW.place_name_input_allowed("business"))
+        self.assertFalse(WORKFLOW.place_name_input_allowed("private"))
+
 
 if __name__ == "__main__":
     unittest.main()

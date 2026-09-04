@@ -185,6 +185,11 @@ def place_label_suggestion(
     ).strip()
 
 
+def place_name_input_allowed(trip_type: str) -> bool:
+    """Ask for a custom place/customer name only for business trips."""
+    return trip_type == "business"
+
+
 def _coordinate_address(value: str) -> bool:
     """Recognize the synthetic address used when only GPS is available."""
     return bool(re.fullmatch(r"-?\d+\.\d{6},\s*-?\d+\.\d{6}", value.strip()))

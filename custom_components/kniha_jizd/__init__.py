@@ -352,7 +352,7 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate entries to configured places and current journey matching."""
-    if entry.version >= 9:
+    if entry.version >= 10:
         return True
 
     data = dict(entry.data)
@@ -360,6 +360,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     for values in (data, options):
         if not values:
             continue
+        if entry.version < 10 and values.get(CONF_TRANSIENT_STOP_MINUTES) == 60:
+            # Version 9 stored the former default in every config entry. Move
+            # that default to ten minutes while preserving any custom value.
+            values[CONF_TRANSIENT_STOP_MINUTES] = DEFAULT_TRANSIENT_STOP_MINUTES
         if entry.version < 2 and values.get(CONF_PLACE_RADIUS) == 150:
             values[CONF_PLACE_RADIUS] = DEFAULT_PLACE_RADIUS
         values.setdefault(
@@ -405,7 +409,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry,
         data=data,
         options=options,
-        version=9,
+        version=10,
     )
     return True
 

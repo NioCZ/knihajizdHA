@@ -285,7 +285,7 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
 class KnihaJizdConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Kniha jízd."""
 
-    VERSION = 9
+    VERSION = 10
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

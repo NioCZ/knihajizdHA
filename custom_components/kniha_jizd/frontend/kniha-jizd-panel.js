@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.14.0";
+import "./kniha-jizd-map.js?v=1.14.1";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -420,7 +420,7 @@ class KnihaJizdPanel extends HTMLElement {
         <td data-label="Odkud"><input class="trip-start" type="text" value="${this._text(values.start, "")}" data-original-value="${this._text(serverValues.start, "")}" placeholder="Místo odjezdu" ${disabled ? "disabled" : ""}></td>
         <td data-label="Kam"><input class="trip-end" type="text" value="${this._text(values.end, "")}" data-original-value="${this._text(serverValues.end, "")}" placeholder="Místo příjezdu" ${disabled ? "disabled" : ""}></td>
         <td data-label="Kilometry"><input class="trip-distance" type="number" min="0" step="1" value="${this._text(values.distance, "")}" data-original-value="${this._text(serverValues.distance, "")}" ${disabled ? "disabled" : ""}></td>
-        <td data-label="Zákazník / účel"><input class="trip-purpose" type="text" value="${this._text(values.purpose, "")}" data-original-value="${this._text(serverValues.purpose, "")}" placeholder="Volitelný zákazník / účel" ${disabled ? "disabled" : ""}></td>
+        <td data-label="Zákazník / účel"><input class="trip-purpose" type="text" value="${this._text(values.purpose, "")}" data-original-value="${this._text(serverValues.purpose, "")}" placeholder="${privateSelected ? "U soukromé jízdy se neeviduje" : "Volitelný zákazník / účel"}" ${disabled || privateSelected ? "disabled" : ""}></td>
         <td data-label="Typ"><select class="trip-type" data-original-value="${this._text(serverValues.type, "business")}" ${disabled ? "disabled" : ""}>
           ${reviewSelected ? '<option value="unclassified" selected disabled>Nevyřešená – vyberte typ</option>' : ""}
           <option value="business" ${privateSelected || reviewSelected ? "" : "selected"}>Služební</option>
@@ -516,13 +516,14 @@ class KnihaJizdPanel extends HTMLElement {
     const value = this._placeQuestionValues.has(segmentId)
       ? this._placeQuestionValues.get(segmentId)
       : String(question.suggested_label || "");
-    return `<article class="question-card place-question-card" data-segment-id="${this._text(segmentId)}">
+    const privatePlace = question.name_input_allowed === false || question.trip_type === "private";
+    return `<article class="question-card place-question-card" data-segment-id="${this._text(segmentId)}" data-trip-type="${this._text(question.trip_type, "business")}">
       <div class="question-meta"><span>${this._time(trip.started_at)}</span><span>Jízda je už zařazená</span></div>
       <h3>${this._text(question.title, "Uložit místo pro příště?")}</h3>
       <p>${this._text(question.prompt)}</p>
       <div class="question-route"><span>${this._text(trip.start_address)}</span><span aria-hidden="true">→</span><span>${this._text(trip.end_address)}</span></div>
-      <label class="question-input"><span>Název uloženého místa</span><input class="place-question-value" type="text" value="${this._text(value, "")}" placeholder="Název místa" ${resolving ? "disabled" : ""}></label>
-      ${(question.candidates || []).length ? `<div class="question-suggestions">${question.candidates.map((candidate) => `<button class="use-place-suggestion secondary" data-value="${this._text(candidate.name)}" ${resolving ? "disabled" : ""}>${this._text(candidate.name)}</button>`).join("")}</div>` : ""}
+      ${privatePlace ? `<div class="muted">Soukromé místo se uloží jako ${this._text(value, "Soukromé místo")}; jméno zákazníka se neeviduje.</div>` : `<label class="question-input"><span>Název uloženého místa</span><input class="place-question-value" type="text" value="${this._text(value, "")}" placeholder="Název místa" ${resolving ? "disabled" : ""}></label>`}
+      ${!privatePlace && (question.candidates || []).length ? `<div class="question-suggestions">${question.candidates.map((candidate) => `<button class="use-place-suggestion secondary" data-value="${this._text(candidate.name)}" ${resolving ? "disabled" : ""}>${this._text(candidate.name)}</button>`).join("")}</div>` : ""}
       <div class="question-actions"><button class="resolve-place" data-action="save" ${resolving ? "disabled" : ""}>Uložit pro příště</button><button class="resolve-place secondary" data-action="skip" ${resolving ? "disabled" : ""}>Jen tentokrát</button></div>
     </article>`;
   }
@@ -533,8 +534,9 @@ class KnihaJizdPanel extends HTMLElement {
     const segmentId = String(card?.dataset?.segmentId || "");
     const action = String(button.dataset.action || "");
     const value = card?.querySelector(".place-question-value")?.value?.trim() || "";
+    const privatePlace = card?.dataset?.tripType === "private";
     if (!segmentId || !action) return;
-    if (action === "save" && !value) {
+    if (action === "save" && !privatePlace && !value) {
       this._message = "Nejdřív zadejte název místa.";
       this._render();
       return;
@@ -546,7 +548,7 @@ class KnihaJizdPanel extends HTMLElement {
       await this._hass.callService("kniha_jizd", "save_trip_place", {
         segment_id: segmentId,
         action,
-        ...(action === "save" ? { value } : {}),
+        ...(action === "save" && value ? { value } : {}),
       });
       this._resolvedPlaceQuestions.add(segmentId);
       this._placeQuestionValues.delete(segmentId);
@@ -1426,6 +1428,14 @@ class KnihaJizdPanel extends HTMLElement {
         this._captureInteractiveState();
         const row = input.closest("tr[data-segment-id]");
         const segmentId = String(row?.dataset?.segmentId || "");
+        const typeInput = row?.querySelector(".trip-type");
+        const purposeInput = row?.querySelector(".trip-purpose");
+        if (typeInput && purposeInput) {
+          purposeInput.disabled = typeInput.disabled || typeInput.value === "private";
+          purposeInput.placeholder = typeInput.value === "private"
+            ? "U soukromé jízdy se neeviduje"
+            : "Volitelný zákazník / účel";
+        }
         const draft = this._tripDrafts.get(segmentId);
         const save = row?.querySelector(".save-trip");
         if (save) {

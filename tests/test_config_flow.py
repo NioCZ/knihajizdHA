@@ -179,6 +179,15 @@ class ConfigFlowTests(unittest.TestCase):
 
         self.assertNotIn("wait_timeout", fields)
 
+    def test_short_stop_default_is_ten_minutes(self) -> None:
+        module = _load_config_flow()
+
+        schema = module._schema({})
+        fields = {marker.schema: marker for marker in schema.schema}
+
+        self.assertEqual(10, module.DEFAULT_TRANSIENT_STOP_MINUTES)
+        self.assertEqual(10, fields[module.CONF_TRANSIENT_STOP_MINUTES].default)
+
     def test_options_flow_persists_cleared_coordinates(self) -> None:
         """An omitted optional number must override an older saved coordinate."""
         module = _load_config_flow()

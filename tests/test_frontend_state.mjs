@@ -175,6 +175,23 @@ panel._tripTable([
 ]);
 assert.equal(panel._tripDrafts.has("trip-1"), false);
 
+const privateTripHtml = panel._tripTable([
+  {
+    id: "private-1",
+    started_at: "2026-08-25T09:00:00+00:00",
+    start_address: "Start",
+    end_address: "Soukromý cíl",
+    distance_km: 4,
+    purpose: "Soukromá",
+    trip_type: "private",
+    editable: true,
+    status: "saved",
+    odometer_ready: true,
+  },
+]);
+assert.match(privateTripHtml, /class="trip-purpose"[^>]*disabled/);
+assert.match(privateTripHtml, /U soukromé jízdy se neeviduje/);
+
 const resolutionCalls = [];
 panel._hass = {
   async callService(domain, service, payload) {
@@ -229,6 +246,43 @@ assert.deepEqual(resolutionCalls[1], {
     segment_id: "saved-1",
     action: "save",
     value: "Genetická laboratoř",
+  },
+});
+
+const privatePlaceHtml = panel._placeQuestionCard({
+  id: "private-place-1",
+  started_at: "2026-08-25T10:00:00+00:00",
+  start_address: "Start",
+  end_address: "Soukromý cíl",
+  place_question: {
+    trip_type: "private",
+    name_input_allowed: false,
+    suggested_label: "Soukromý cíl",
+  },
+});
+assert.doesNotMatch(privatePlaceHtml, /class="place-question-value"/);
+assert.match(privatePlaceHtml, /jméno zákazníka se neeviduje/);
+
+const privatePlaceQuestionCard = {
+  dataset: { segmentId: "private-place-1", tripType: "private" },
+  querySelector() {
+    return null;
+  },
+};
+await panel._resolvePlace({
+  dataset: { action: "save" },
+  closest(selector) {
+    assert.equal(selector, ".place-question-card");
+    return privatePlaceQuestionCard;
+  },
+});
+
+assert.deepEqual(resolutionCalls[2], {
+  domain: "kniha_jizd",
+  service: "save_trip_place",
+  payload: {
+    segment_id: "private-place-1",
+    action: "save",
   },
 });
 
