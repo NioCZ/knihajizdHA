@@ -243,7 +243,7 @@ class WorkflowLogicTest(unittest.TestCase):
         )
         self.assertEqual(
             WORKFLOW.place_label_suggestion(prompt, "Klient Alfa", "private"),
-            "Parkoviště Výstaviště",
+            "Soukromé",
         )
 
     def test_private_place_does_not_ask_for_a_customer_name(self) -> None:

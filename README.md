@@ -256,8 +256,8 @@ záložní postup samostatná otázka **Uložit místo pro příště?**. Bod se
 se neuloží, pokud je známá přesnost GPS horší než zvolený poloměr; je-li současně
 dostupná skutečná textová adresa, uloží se bezpečně jen tato adresa bez nepřesných
 souřadnic.
-U soukromé jízdy se použije mapový odhad nebo adresa. Uložené soukromé cíle
-používají nastavitelnou výchozí zónu 250 m,
+Soukromý cíl se automaticky pojmenuje pouze **Soukromé**; název provozovny ani
+klienta se u něj neeviduje. Uložené soukromé cíle používají nastavitelnou výchozí zónu 250 m,
 takže několik různých soukromých cílů nesplyne do jedné široké kilometrové zóny.
 V raw jízdě zůstává účel `Soukromá`.
 
@@ -341,8 +341,9 @@ neduplikují. Nakonfigurovaný domov a firma
 mají vždy jen jeden bod bez ohledu na to, zda tam vedla soukromá nebo služební
 jízda. Služební trasy jsou modré, soukromé fialové a aktivní či dosud nezařazené
 trasy oranžové a přerušované, takže čekající kandidát nepůsobí jako potvrzená
-služební jízda. Jen potvrzené mezibody konkrétní cesty se na mapě nekreslí a jejich úseky
-se sloučí do celé trasy k výslednému cíli. Kandidát zůstává viditelný jako běžná
+služební jízda. Úseky přes potvrzené mezibody se sloučí do celé trasy k výslednému
+cíli, ale samotné krátké zastávky zůstávají rozlišené žlutým kosočtvercem.
+Kandidát zůstává viditelný jako běžná
 návštěva, dokud další jízda skutečně nepotvrdí návaznost. Totéž platí pro interní návratový kontext:
 ovlivní zařazení trasy, ale nevytváří kategorii místa na mapě. Podklad tvoří
 dlaždice OpenStreetMap. Po výběru naučeného bodu lze přímo v jeho detailu použít
@@ -393,7 +394,7 @@ Rozpoznávání používá oddělené vzdálenosti:
   které už uživatel potvrdil. Nejbližší shoda se zapíše automaticky. Je-li GPS
   dostatečně přesná, shodná textová adresa nemůže tento okruh obejít. Adresa je
   záloha při chybějících souřadnicích nebo prokazatelně širším GPS fixu.
-- **Soukromé místo** – výchozí 250 m.
+- **Soukromé** – výchozí 250 m; automaticky bez názvu klienta či provozovny.
 - **Návaznost návštěvy** – výchozí 200 m.
 - **Poloměr hledání nových institucí** – výchozí 3 000 m. Slouží jen pro sestavení
   návrhů; samotný mapový odhad se bez potvrzení nezapíše. Při GPS fixu širším než

@@ -303,7 +303,7 @@ const privatePlaceHtml = panel._placeQuestionCard({
   },
 });
 assert.doesNotMatch(privatePlaceHtml, /class="place-question-value"/);
-assert.match(privatePlaceHtml, /jméno zákazníka se neeviduje/);
+assert.match(privatePlaceHtml, /jméno zákazníka ani provozovny se neeviduje/);
 
 const privatePlaceQuestionCard = {
   dataset: { segmentId: "private-place-1", tripType: "private" },
@@ -368,6 +368,20 @@ map._data = {
       end_longitude: "",
     },
   ],
+  short_stops: [
+    {
+      end_latitude: 49.3,
+      end_longitude: 17.4,
+      short_stop_label: "Čerpací stanice",
+      short_stop_confirmed: true,
+    },
+  ],
 };
-assert.deepEqual(map._points(), [], "missing coordinates must not become 0,0");
+assert.deepEqual(
+  map._points(),
+  [{ latitude: 49.3, longitude: 17.4 }],
+  "short stops must be included in the fitted map area",
+);
+assert.equal(map._shortStops().length, 1, "short stops must have their own markers");
+assert.match(mapSource, /Krátká zastávka/, "the map legend must explain short stops");
 assert.equal(map._finiteValue(null), false, "missing accuracy must stay unknown");

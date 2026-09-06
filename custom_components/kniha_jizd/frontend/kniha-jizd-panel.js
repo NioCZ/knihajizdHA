@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.14.3";
+import "./kniha-jizd-map.js?v=1.14.4";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -525,7 +525,7 @@ class KnihaJizdPanel extends HTMLElement {
       <h3>${this._text(question.title, "Uložit místo pro příště?")}</h3>
       <p>${this._text(question.prompt)}</p>
       <div class="question-route"><span>${this._text(trip.start_address)}</span><span aria-hidden="true">→</span><span>${this._text(trip.end_address)}</span></div>
-      ${privatePlace ? `<div class="muted">Soukromé místo se uloží jako ${this._text(value, "Soukromé místo")}; jméno zákazníka se neeviduje.</div>` : `<label class="question-input"><span>Název uloženého místa</span><input class="place-question-value" type="text" value="${this._text(value, "")}" placeholder="Název místa" ${resolving ? "disabled" : ""}></label>`}
+      ${privatePlace ? `<div class="muted">Soukromé místo se uloží jako Soukromé; jméno zákazníka ani provozovny se neeviduje.</div>` : `<label class="question-input"><span>Název uloženého místa</span><input class="place-question-value" type="text" value="${this._text(value, "")}" placeholder="Název místa" ${resolving ? "disabled" : ""}></label>`}
       ${!privatePlace && (question.candidates || []).length ? `<div class="question-suggestions">${question.candidates.map((candidate) => `<button class="use-place-suggestion secondary" data-value="${this._text(candidate.name)}" ${resolving ? "disabled" : ""}>${this._text(candidate.name)}</button>`).join("")}</div>` : ""}
       <div class="question-actions"><button class="resolve-place" data-action="save" ${resolving ? "disabled" : ""}>Uložit pro příště</button><button class="resolve-place secondary" data-action="skip" ${resolving ? "disabled" : ""}>Jen tentokrát</button></div>
     </article>`;
@@ -1388,7 +1388,7 @@ class KnihaJizdPanel extends HTMLElement {
           </section>
         </div>` : ""}
         ${this._activeTab === "map" ? `<section class="card map-card">
-          <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Mapa zobrazuje cíle zařazených jízd a celé dnešní trasy; domov, firma a potvrzené mezibody se neduplikují.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
+          <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Mapa zobrazuje cíle, celé dnešní trasy a žlutě rozlišené krátké zastávky; domov ani firma se neduplikují.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
           <div class="map-loading"></div>
           <kniha-jizd-map></kniha-jizd-map>
         </section>` : ""}

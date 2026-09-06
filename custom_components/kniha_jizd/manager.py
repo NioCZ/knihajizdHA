@@ -736,6 +736,10 @@ class KnihaJizdManager:
                 if str(segment.get("date")) == today and segment.get("id"):
                     routes[str(segment["id"])] = _map_trip_row(segment, status)
 
+        short_stops = [
+            route.copy() for route in routes.values() if route.get("short_stop")
+        ]
+
         return {
             "generated_at": _iso_utc(datetime.now(UTC)),
             "attribution": "© OpenStreetMap contributors",
@@ -747,6 +751,7 @@ class KnihaJizdManager:
             "car": car,
             "configured_places": configured_places,
             "learned_places": learned_places,
+            "short_stops": short_stops,
             "today_routes": map_routes_without_transient_stops(
                 [
                     route
@@ -3827,6 +3832,12 @@ def _classification_decision(segment: dict[str, Any]) -> dict[str, Any]:
 
 def _map_trip_row(segment: dict[str, Any], status: str) -> dict[str, Any]:
     """Serialize coordinates and context for a single map route segment."""
+    stop = segment.get("transient_stop")
+    stop = stop if isinstance(stop, dict) else {}
+    visit_role = segment.get("visit_role")
+    short_stop = visit_role in {"waypoint", "waypoint_candidate"} or (
+        segment.get("journey_role") == "transient_stop"
+    )
     return {
         "id": segment.get("id"),
         "started_at": segment.get("started_at"),
@@ -3841,7 +3852,21 @@ def _map_trip_row(segment: dict[str, Any], status: str) -> dict[str, Any]:
         "trip_type": segment.get("trip_type"),
         "journey_id": segment.get("journey_id"),
         "journey_role": segment.get("journey_role"),
-        "visit_role": segment.get("visit_role"),
+        "visit_role": visit_role,
+        "short_stop": short_stop,
+        "short_stop_label": (
+            stop.get("name")
+            or segment.get("map_estimate")
+            or segment.get("end_address")
+            or "Krátká zastávka"
+        ),
+        "short_stop_kind": stop.get("kind"),
+        "short_stop_confirmed": visit_role == "waypoint"
+        or (
+            status == "saved"
+            and visit_role != "waypoint_candidate"
+            and segment.get("journey_role") == "transient_stop"
+        ),
         "needs_review": bool(segment.get("needs_review")),
         "status": status,
     }

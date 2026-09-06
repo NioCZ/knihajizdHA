@@ -173,12 +173,14 @@ def place_label_suggestion(
     segment: dict[str, Any], purpose: str, trip_type: str
 ) -> str:
     """Return a predictable label for the independent save-place question."""
-    business_purpose = str(purpose or "").strip() if trip_type == "business" else ""
+    if trip_type == "private":
+        return "Soukromé"
+    business_purpose = str(purpose or "").strip()
     return str(
         business_purpose
         or segment.get("map_estimate")
         or segment.get("end_address")
-        or ("Soukromé místo" if trip_type == "private" else "Klient")
+        or "Klient"
     ).strip()
 
 

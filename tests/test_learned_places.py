@@ -307,7 +307,7 @@ class LearnedPlacesTest(unittest.TestCase):
             )
 
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 7)
+            self.assertEqual(document["version"], 8)
             self.assertEqual(len(document["places"]), 2)
             self.assertTrue(
                 all(len(place["anchors"]) == 1 for place in document["places"])
@@ -557,7 +557,7 @@ class LearnedPlacesTest(unittest.TestCase):
 
             match = repository._find_place_sync(50.0, 14.0, None, 1000)
             document = json.loads(repository.places_path.read_text(encoding="utf-8"))
-            self.assertEqual(document["version"], 7)
+            self.assertEqual(document["version"], 8)
             self.assertEqual(len(document["places"]), 1)
             self.assertNotEqual(match.get("place_role"), "return")
             self.assertEqual(match["trip_type"], "private")
@@ -655,10 +655,10 @@ class LearnedPlacesTest(unittest.TestCase):
         added = STORAGE_MODULE.backfill_classified_destinations(document, segments)
 
         self.assertEqual(added, 2)
-        self.assertEqual(document["version"], 7)
+        self.assertEqual(document["version"], 8)
         self.assertEqual(
             {place["label"] for place in document["places"]},
-            {"Existing client", "New client", "Private destination"},
+            {"Existing client", "New client", "Soukromé"},
         )
         self.assertEqual(
             {place["place_role"] for place in document["places"]},
@@ -705,10 +705,69 @@ class LearnedPlacesTest(unittest.TestCase):
             repository._initialize_sync()
             second = json.loads(repository.places_path.read_text(encoding="utf-8"))
 
-            self.assertEqual(first["version"], 7)
+            self.assertEqual(first["version"], 8)
             self.assertEqual(len(first["places"]), 1)
             self.assertEqual(first["places"][0]["label"], "University")
             self.assertEqual(second, first)
+
+    def test_v8_upgrade_renames_private_places_without_repeating_backfill(self) -> None:
+        """Normalize private labels while respecting places deleted after v7."""
+        test_output = ROOT / "test-output"
+        test_output.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=test_output) as temporary_directory:
+            repository = STORAGE_MODULE.KnihaJizdRepository.__new__(
+                STORAGE_MODULE.KnihaJizdRepository
+            )
+            repository.raw_path = Path(temporary_directory) / "raw.json"
+            repository.places_path = Path(temporary_directory) / "learned_places.json"
+            repository.raw_path.write_text(
+                json.dumps(
+                    {
+                        "version": 5,
+                        "segments": [
+                            {
+                                "id": "deleted-business-place",
+                                "classification_source": "notification",
+                                "trip_type": "business",
+                                "journey_role": "destination",
+                                "end_latitude": 49.2,
+                                "end_longitude": 16.6,
+                                "end_address": "Brno",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            repository.places_path.write_text(
+                json.dumps(
+                    {
+                        "version": 7,
+                        "places": [
+                            {
+                                "id": "private",
+                                "label": "Obchodní centrum",
+                                "trip_type": "private",
+                                "trip_types": ["private"],
+                                "place_role": "private",
+                                "anchors": [
+                                    {"latitude": 49.3, "longitude": 17.4}
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            repository._initialize_sync()
+            upgraded = json.loads(
+                repository.places_path.read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(upgraded["version"], 8)
+            self.assertEqual(len(upgraded["places"]), 1)
+            self.assertEqual(upgraded["places"][0]["label"], "Soukromé")
 
     def test_colocated_private_and_business_labels_form_one_exception(self) -> None:
         """Keep both classifications in one record and draw only one map point."""
@@ -782,7 +841,7 @@ class LearnedPlacesTest(unittest.TestCase):
         changed = STORAGE_MODULE.consolidate_learned_places(document)
 
         self.assertTrue(changed)
-        self.assertEqual(document["version"], 7)
+        self.assertEqual(document["version"], 8)
         self.assertEqual(len(document["places"]), 1)
         self.assertEqual(
             document["places"][0]["trip_types"], ["business", "private"]
@@ -1011,7 +1070,7 @@ class LearnedPlacesTest(unittest.TestCase):
         changed = STORAGE_MODULE.consolidate_learned_places(document)
 
         self.assertTrue(changed)
-        self.assertEqual(document["version"], 7)
+        self.assertEqual(document["version"], 8)
         self.assertEqual(len(document["places"]), 3)
         self.assertEqual(
             {place["anchors"][0]["address"] for place in document["places"]},
@@ -1192,7 +1251,7 @@ class LearnedPlacesTest(unittest.TestCase):
             self.assertEqual(place["trip_type"], "private")
             self.assertEqual(place["trip_types"], ["private"])
             self.assertEqual(place["place_role"], "private")
-            self.assertEqual(place["label"], "Albert Kroměříž")
+            self.assertEqual(place["label"], "Soukromé")
             self.assertEqual(place["radius_m"], 250)
 
     def test_explicit_save_keeps_nearby_physical_places_separate(self) -> None:

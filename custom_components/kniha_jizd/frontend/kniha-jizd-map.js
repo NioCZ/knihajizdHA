@@ -129,6 +129,11 @@ class KnihaJizdMap extends HTMLElement {
     ].filter((item) => item && item.place_role !== "transient" && this._coordinatePair(item.latitude, item.longitude));
   }
 
+  _shortStops() {
+    return (Array.isArray(this._data?.short_stops) ? this._data.short_stops : [])
+      .filter((item) => item && this._coordinatePair(item.end_latitude, item.end_longitude));
+  }
+
   _points() {
     const points = this._markers().map((item) => ({
       latitude: Number(item.latitude),
@@ -146,6 +151,12 @@ class KnihaJizdMap extends HTMLElement {
           points.push({ latitude, longitude });
         }
       }
+    }
+    for (const stop of this._shortStops()) {
+      points.push({
+        latitude: Number(stop.end_latitude),
+        longitude: Number(stop.end_longitude),
+      });
     }
     return points;
   }
@@ -258,6 +269,10 @@ class KnihaJizdMap extends HTMLElement {
         .marker.company { background:#00897b; } .marker.selected { outline:3px solid var(--warning-color,#fbc02d); z-index:4; }
         .marker.car { width:32px; height:32px; background:#d32f2f; z-index:6; transform:translate(-50%,-50%); font-size:17px; line-height:27px; }
         .marker.car::after { display:none; }
+        .short-stop-marker { position:absolute; transform:translate(-50%,-50%); z-index:5; pointer-events:none; }
+        .short-stop-marker i { display:block; width:15px; height:15px; transform:rotate(45deg); border:2px solid #fff; border-radius:2px; background:#f9a825; box-shadow:0 2px 6px rgba(0,0,0,.45); }
+        .short-stop-marker.candidate i { background:#fb8c00; }
+        .short-stop-marker .marker-label { left:8px; bottom:14px; }
         .marker-label { position:absolute; left:50%; bottom:27px; transform:translateX(-50%); max-width:180px; padding:3px 7px; border-radius:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#202124; background:rgba(255,255,255,.92); box-shadow:0 1px 4px rgba(0,0,0,.25); font-size:12px; pointer-events:none; }
         .map-controls { position:absolute; top:12px; right:12px; z-index:10; display:flex; flex-direction:column; gap:6px; }
         .map-controls button { width:38px; height:38px; border:0; border-radius:9px; background:var(--card-background-color,#fff); color:var(--primary-text-color,#222); box-shadow:0 1px 5px rgba(0,0,0,.28); cursor:pointer; font:bold 20px sans-serif; }
@@ -280,6 +295,7 @@ class KnihaJizdMap extends HTMLElement {
         .swatch.mixed { background:#6d4c41; }
         .swatch.home { background:#2e7d32; }
         .swatch.company { background:#00897b; } .swatch.car { background:#d32f2f; }
+        .swatch.short-stop { border-radius:2px; background:#f9a825; transform:rotate(45deg); }
         .route-swatch { width:18px; height:0; border-top:4px solid #1769aa; border-radius:2px; }
         .route-swatch.private { border-color:#8e44ad; }
         .route-swatch.pending { border-color:#ef6c00; border-top-style:dashed; }
@@ -299,6 +315,7 @@ class KnihaJizdMap extends HTMLElement {
           <span><i class="swatch mixed"></i>Služební / soukromé</span>
           <span><i class="swatch home"></i>Domov</span>
           <span><i class="swatch company"></i>Firma</span>
+          <span><i class="swatch short-stop"></i>Krátká zastávka</span>
           <span><i class="route-swatch"></i>Služební trasa</span>
           <span><i class="route-swatch private"></i>Soukromá trasa</span>
           <span><i class="route-swatch pending"></i>Čeká na zařazení</span>
@@ -468,6 +485,13 @@ class KnihaJizdMap extends HTMLElement {
       const selected = String(marker.id) === String(this._selectedId);
       return `<button class="marker ${role} ${selected ? "selected" : ""}" data-id="${id}" style="left:${point.x.toFixed(1)}px;top:${point.y.toFixed(1)}px" title="${this._text(marker.label)}"><span class="marker-label">${this._text(marker.label)}</span></button>`;
     });
+    for (const stop of this._shortStops()) {
+      const point = this._screenPoint(stop.end_latitude, stop.end_longitude, width, height);
+      if (point.x < -100 || point.x > width + 100 || point.y < -100 || point.y > height + 100) continue;
+      const label = this._text(stop.short_stop_label || "Krátká zastávka");
+      const stateClass = stop.short_stop_confirmed ? "confirmed" : "candidate";
+      markerHtml.push(`<div class="short-stop-marker ${stateClass}" style="left:${point.x.toFixed(1)}px;top:${point.y.toFixed(1)}px" title="Krátká zastávka · ${label}"><i></i><span class="marker-label">${label}</span></div>`);
+    }
     const car = this._data?.car;
     if (this._coordinatePair(car?.latitude, car?.longitude)) {
       const point = this._screenPoint(car.latitude, car.longitude, width, height);

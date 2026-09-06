@@ -36,7 +36,8 @@ from .const import (
 _PHYSICAL_POINT_MERGE_DISTANCE_M = 25
 _MAX_ANCHORS_PER_PLACE = 1
 _RAW_DATA_VERSION = 5
-_LEARNED_PLACES_VERSION = 7
+_DESTINATION_BACKFILL_VERSION = 7
+_LEARNED_PLACES_VERSION = 8
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -629,16 +630,16 @@ def backfill_classified_destinations(
                 latitude = None
                 longitude = None
 
-        label = str(
-            (
+        label = (
+            "Soukromé"
+            if trip_type == TRIP_TYPE_PRIVATE
+            else str(
                 segment.get("purpose")
-                if trip_type == TRIP_TYPE_BUSINESS
-                else None
-            )
-            or segment.get("map_estimate")
-            or segment.get("end_address")
-            or ("Soukromé místo" if trip_type == TRIP_TYPE_PRIVATE else "Klient")
-        ).strip()
+                or segment.get("map_estimate")
+                or segment.get("end_address")
+                or "Klient"
+            ).strip()
+        )
         places.append(
             {
                 "id": str(segment.get("matched_place_id") or uuid4().hex),
@@ -667,6 +668,23 @@ def backfill_classified_destinations(
 
     consolidate_learned_places(document)
     return added
+
+
+def normalize_private_place_labels(document: dict[str, Any]) -> int:
+    """Use a neutral label for exclusively private places during the v8 upgrade."""
+    places = document.get("places")
+    if not isinstance(places, list):
+        return 0
+    changed = 0
+    for place in places:
+        if (
+            isinstance(place, dict)
+            and place_trip_types(place) == [TRIP_TYPE_PRIVATE]
+            and place.get("label") != "Soukromé"
+        ):
+            place["label"] = "Soukromé"
+            changed += 1
+    return changed
 
 
 def _classification_for_place(place: dict[str, Any]) -> str:
@@ -1273,12 +1291,14 @@ class KnihaJizdRepository:
         except (TypeError, ValueError):
             source_places_version = 0
         changed = migrate_return_places(places_data)
-        if source_places_version < _LEARNED_PLACES_VERSION:
+        if source_places_version < _DESTINATION_BACKFILL_VERSION:
             changed = bool(
                 backfill_classified_destinations(
                     places_data, raw_data.get("segments", [])
                 )
             ) or changed
+        if source_places_version < _LEARNED_PLACES_VERSION:
+            changed = bool(normalize_private_place_labels(places_data)) or changed
         changed = consolidate_learned_places(places_data) or changed
         if changed or not places_existed:
             _write_json_atomic(self.places_path, places_data)
@@ -1819,14 +1839,10 @@ class KnihaJizdRepository:
                     )
 
         default_label = (
-            str(
-                target.get("map_estimate")
-                or target.get("end_address")
-                or "Soukromé místo"
-            )
+            "Soukromé"
             if classification == "private"
-            else str(purpose or target.get("map_estimate") or "Klient")
-        ).strip()
+            else str(purpose or target.get("map_estimate") or "Klient").strip()
+        )
         label = str(place_label or default_label).strip()
         if not label:
             raise ValueError("place label cannot be empty")
