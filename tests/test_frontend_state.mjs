@@ -102,6 +102,30 @@ await firstHistory;
 assert.equal(panel._historyData.selected, "latest");
 assert.equal(panel._historyLoading, false);
 
+const tabRefreshRequests = [];
+panel._mapData = { learned_places: [{ id: "stale-map-place" }] };
+panel._placesData = { places: [{ id: "stale-managed-place" }] };
+panel._hass = {
+  async callApi(method, path) {
+    tabRefreshRequests.push({ method, path });
+    if (path === "kniha_jizd/map") {
+      return { generated_at: "2026-09-06T08:00:00+00:00", learned_places: [{ id: "fresh-map-place" }] };
+    }
+    if (path === "kniha_jizd/places") {
+      return { generated_at: "2026-09-06T08:00:00+00:00", places: [{ id: "fresh-managed-place" }] };
+    }
+    throw new Error(`unexpected API path ${path}`);
+  },
+};
+await panel._selectTab("map");
+await panel._selectTab("places");
+assert.deepEqual(tabRefreshRequests, [
+  { method: "GET", path: "kniha_jizd/map" },
+  { method: "GET", path: "kniha_jizd/places" },
+]);
+assert.equal(panel._mapData.learned_places[0].id, "fresh-map-place");
+assert.equal(panel._placesData.places[0].id, "fresh-managed-place");
+
 const mapRequests = [];
 panel._hass = {
   async callApi(method, path, payload) {
@@ -248,6 +272,8 @@ assert.deepEqual(resolutionCalls[1], {
     value: "Genetická laboratoř",
   },
 });
+assert.equal(panel._mapData, null, "saving a place must invalidate cached map data");
+assert.equal(panel._placesData, null, "saving a place must invalidate cached management data");
 
 const privatePlaceHtml = panel._placeQuestionCard({
   id: "private-place-1",

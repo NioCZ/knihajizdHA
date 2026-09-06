@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.14.1";
+import "./kniha-jizd-map.js?v=1.14.2";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -553,6 +553,13 @@ class KnihaJizdPanel extends HTMLElement {
       this._resolvedPlaceQuestions.add(segmentId);
       this._placeQuestionValues.delete(segmentId);
       this._message = action === "save" ? "Místo bylo uloženo pro příští rozpoznání." : "Místo se nebude učit.";
+      if (action === "save") {
+        // Both tabs cache their API response. Discard it as soon as a place is
+        // learned so the next visit cannot keep showing the pre-save snapshot.
+        this._mapData = null;
+        this._mapLoadedAt = 0;
+        this._placesData = null;
+      }
       this._overviewLoadedAt = 0;
       await this._loadOverviewData();
     } catch (error) {
@@ -766,9 +773,12 @@ class KnihaJizdPanel extends HTMLElement {
     if (tab === "overview" && Date.now() - this._overviewLoadedAt > 1000) {
       await this._loadOverviewData();
     }
-    if (tab === "map" && !this._mapData) await this._loadMapData();
+    // Places may also be saved by a notification while these views are not
+    // open. Refresh every time a user enters either tab instead of treating a
+    // previously loaded response as permanent.
+    if (tab === "map") await this._loadMapData();
     if (tab === "history" && !this._historyData) await this._loadHistoryData();
-    if (tab === "places" && !this._placesData) await this._loadPlacesData();
+    if (tab === "places") await this._loadPlacesData();
   }
 
   _syncMapElement() {
