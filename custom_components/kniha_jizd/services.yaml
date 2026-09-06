@@ -64,7 +64,7 @@ update_trip:
           unit_of_measurement: km
 resolve_trip:
   name: Odpovědět na dotaz k jízdě
-  description: Zařadí čekající jízdu; uložení cíle jako místa je samostatný krok.
+  description: Zařadí čekající jízdu a její skutečný cíl automaticky uloží jako místo.
   fields:
     segment_id:
       name: ID segmentu

@@ -44,6 +44,20 @@ const panel = new Panel();
 panel._render = () => {};
 panel._syncMapElement = () => {};
 
+panel._placesData = {
+  configured_places: [
+    { label: "Domov", place_role: "home", trip_type: "contextual", radius_m: 300 },
+    { label: "Altium", place_role: "company", trip_type: "contextual", radius_m: 300 },
+  ],
+  places: [],
+};
+const configuredPlaceRows = panel._placesTable();
+assert.equal(
+  (configuredPlaceRows.match(/Podle směru jízdy/g) || []).length,
+  2,
+  "home and company must both use direction-dependent classification",
+);
+
 const trackedDetails = {
   dataset: { detailsKey: "input-checks" },
   open: true,
@@ -248,6 +262,8 @@ assert.deepEqual(resolutionCalls, [
     payload: { segment_id: "pending-1", action: "business" },
   },
 ]);
+assert.equal(panel._mapData, null, "classifying a trip must invalidate cached map data");
+assert.equal(panel._placesData, null, "classifying a trip must invalidate cached management data");
 
 const placeQuestionCard = {
   dataset: { segmentId: "saved-1" },

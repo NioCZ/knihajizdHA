@@ -126,8 +126,9 @@ vedlejší číslo domu) zůstává jen v detailu jízd a v listu **Raw data** p
 - Nastavená adresa domova se rozpozná jako **Domov**. Při platné návaznosti na
   předchozího zákazníka se automaticky použije služební návrat; bez návaznosti se
   integrace zeptá, protože cesta domů může být také soukromá.
-- Nastavená adresa firmy se automaticky uloží jako služební cíl pod zadaným
-  názvem firmy.
+- Nastavená adresa firmy se stejně jako domov řídí směrem a návazností jízdy.
+  Při platné služební nebo soukromé návaznosti převezme její typ; bez návaznosti
+  se integrace zeptá, zda byla cesta služební, nebo soukromá.
 
 ### Služební návraty domů, na firmu nebo do hotelu
 
@@ -248,15 +249,15 @@ telefonu.
 Návrat je uložen jen jako vztah mezi jízdami (`journey_role` a
 `return_of_segment_id`); nevytváří ani neučí samostatný typ místa.
 
-Po zařazení jízdy se zobrazí samostatná otázka **Uložit místo pro příště?**.
-Teprve potvrzení této druhé otázky uloží souřadnice a typ místa do
-`/config/learned_places.json`; volba **Jen tentokrát** jízdu ponechá beze změny a
-nic neučí. Příští návštěva výslovně uloženého cíle v nastaveném poloměru se už
-neptá. Bod se neuloží, pokud je známá přesnost GPS horší než zvolený poloměr;
-je-li současně dostupná skutečná textová adresa, uloží se bezpečně jen tato
-adresa bez nepřesných souřadnic.
-U soukromé jízdy se na vlastní název nikdo neptá; při potvrzení se použije
-mapový odhad nebo adresa. Výslovně uložené soukromé cíle používají nastavitelnou výchozí zónu 250 m,
+Po zařazení se skutečný cíl služební nebo soukromé jízdy automaticky uloží do
+`/config/learned_places.json`. Domov, firma, návraty a potvrzené mezibody se jako
+nová místa neduplikují. Pokud cíl nelze bezpečně uložit automaticky, zůstává jako
+záložní postup samostatná otázka **Uložit místo pro příště?**. Bod se souřadnicemi
+se neuloží, pokud je známá přesnost GPS horší než zvolený poloměr; je-li současně
+dostupná skutečná textová adresa, uloží se bezpečně jen tato adresa bez nepřesných
+souřadnic.
+U soukromé jízdy se použije mapový odhad nebo adresa. Uložené soukromé cíle
+používají nastavitelnou výchozí zónu 250 m,
 takže několik různých soukromých cílů nesplyne do jedné široké kilometrové zóny.
 V raw jízdě zůstává účel `Soukromá`.
 
@@ -330,11 +331,13 @@ Záložka **Mapa míst** v administračním panelu načítá přes přihlášen�
   zóny; pokud je fix širší než překrývající se zóna, mapa místo falešné shody
   zobrazí, že zónu nelze spolehlivě určit,
 - nakonfigurovaný domov a firmu,
-- všechny fyzické body z `learned_places.json` včetně názvu, role, adresy a skutečně
+- všechny fyzické cíle zařazených jízd z `learned_places.json` včetně názvu, role, adresy a skutečně
   použitého rozpoznávacího poloměru,
 - dnešní uložené i rozpracované úseky jízdy.
 
-Mapa rozlišuje výslovně uložené klienty a soukromá místa. Nakonfigurovaný domov a firma
+Mapa rozlišuje uložené klienty a soukromá místa. Nový skutečný cíl se po
+zařazení jízdy uloží automaticky; domov, firma, návraty a mezizastávky se
+neduplikují. Nakonfigurovaný domov a firma
 mají vždy jen jeden bod bez ohledu na to, zda tam vedla soukromá nebo služební
 jízda. Služební trasy jsou modré, soukromé fialové a aktivní či dosud nezařazené
 trasy oranžové a přerušované, takže čekající kandidát nepůsobí jako potvrzená
@@ -349,8 +352,8 @@ se upravují v nastavení integrace.
 
 U servisního kandidáta integrace čeká nastavený počet minut na pokračování: pokud
 další jízda začne ze stejného místa, návštěva zdědí klasifikaci celé cesty. Pokud
-nepokračuje, přijde běžná otázka na služební nebo soukromý typ. Uložení obchodu či
-jiného cíle je vždy až následující samostatná volba. Známé soukromé i služební
+nepokračuje, přijde běžná otázka na služební nebo soukromý typ. Po zařazení se
+obchod či jiný skutečný cíl uloží automaticky. Známé soukromé i služební
 místo má přednost před časovou domněnkou a zaznamená se jako skutečný cíl i při
 krátké návštěvě.
 Pokud zůstane bez odpovědi otázka vzniklá z nepotvrzeného servisního kandidáta,
@@ -415,9 +418,9 @@ se odešlou jen stále aktuální otázky, které splňují pravidla pro telefon
 Telefonní otázka na typ jízdy už mapové výsledky nepoužívá jako odpovědi: nabízí
 jen služební, soukromou a případně služební návrat. V panelu se až tři nejlepší
 mapové výsledky se vzdáleností zobrazí pouze jako návrhy pro předvyplnění
-volitelného účelu. Název ukládaného místa se potvrzuje nebo mění až ve druhé
-samostatné otázce. Kompletní skóre, důvody a kandidáti zůstávají v raw datech pro
-audit.
+volitelného účelu. Vybraný účel nebo mapový odhad se po zařazení použije také jako
+název automaticky ukládaného cíle; samostatná otázka zůstává jen jako záložní
+postup. Kompletní skóre, důvody a kandidáti zůstávají v raw datech pro audit.
 
 Každý záznam v `learned_places.json` představuje právě jeden fyzický bod. Stejný
 název může mít více samostatných bodů (například různé pobočky), ale každý má své

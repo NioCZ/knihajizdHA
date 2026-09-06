@@ -84,10 +84,7 @@ def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | Non
     else:
         kind = "destination"
         title = "Jaký typ měla tato jízda?"
-        prompt = (
-            f"Rozpoznaný cíl: {estimate}. Nejprve vyberte typ jízdy; "
-            "uložení místa nabídneme samostatně."
-        )
+        prompt = f"Rozpoznaný cíl: {estimate}. Vyberte typ jízdy."
 
     actions: list[dict[str, Any]] = []
     if kind == "return" and isinstance(return_context, dict) and (

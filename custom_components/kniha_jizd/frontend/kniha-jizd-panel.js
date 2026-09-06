@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.14.2";
+import "./kniha-jizd-map.js?v=1.14.3";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -487,6 +487,9 @@ class KnihaJizdPanel extends HTMLElement {
       this._resolvedQuestions.add(segmentId);
       this._questionValues.delete(segmentId);
       this._message = "Rozhodnutí bylo uloženo.";
+      this._mapData = null;
+      this._mapLoadedAt = 0;
+      this._placesData = null;
       this._overviewLoadedAt = 0;
       await this._loadOverviewData();
       if (this._activeTab === "history") await this._loadHistoryData();
@@ -979,7 +982,7 @@ class KnihaJizdPanel extends HTMLElement {
     }
     const disabled = Boolean(this._savingPlace);
     const configuredRows = configuredPlaces.map((place) => {
-      const typeLabel = place.place_role === "home" ? "Podle směru jízdy" : "Služební";
+      const typeLabel = place.trip_type === "contextual" ? "Podle směru jízdy" : "Služební";
       return `<tr class="configured-place-row">
         <td data-label="Výběr"></td>
         <td data-label="Název"><strong>${this._text(place.label)}</strong><small>Konfigurované místo · upravuje se v nastavení integrace</small></td>
@@ -1385,12 +1388,12 @@ class KnihaJizdPanel extends HTMLElement {
           </section>
         </div>` : ""}
         ${this._activeTab === "map" ? `<section class="card map-card">
-          <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Mapa zobrazuje jen výslovně uložená místa a celé dnešní trasy; potvrzené mezibody se do ní nepřidávají.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
+          <div class="map-heading"><div><h2>Mapa uložených míst a zón</h2><div class="muted">Mapa zobrazuje cíle zařazených jízd a celé dnešní trasy; domov, firma a potvrzené mezibody se neduplikují.</div></div><button id="refresh-map" ${this._mapLoading ? "disabled" : ""}>Aktualizovat</button></div>
           <div class="map-loading"></div>
           <kniha-jizd-map></kniha-jizd-map>
         </section>` : ""}
         ${this._activeTab === "places" ? `<section class="card daily-trips">
-          <div class="places-heading"><div><h2>Správa míst</h2><div class="muted">Jsou zde jen místa, která jste výslovně uložili. Každý řádek je samostatný fyzický bod; volbu „Služební i soukromé“ používejte jen pro skutečnou výjimku.</div></div>
+          <div class="places-heading"><div><h2>Správa míst</h2><div class="muted">Jsou zde skutečné cíle zařazených jízd. Každý řádek je samostatný fyzický bod; volbu „Služební i soukromé“ používejte jen pro skutečnou výjimku.</div></div>
             <div class="place-toolbar"><span class="selected-place-count">${this._selectedPlaces.size} vybráno</span><button id="merge-places" ${this._selectedPlaces.size < 2 || this._savingPlace ? "disabled" : ""}>Sloučit GPS duplicity</button><button id="refresh-places" ${this._placesLoading || this._savingPlace ? "disabled" : ""}>Aktualizovat</button></div>
           </div>
           <div class="radius-summary">Aktivní výchozí poloměry: domov ${this._number(this._placesData?.radii?.home)} m · firma ${this._number(this._placesData?.radii?.company)} m · klient ${this._number(this._placesData?.radii?.business)} m · soukromé ${this._number(this._placesData?.radii?.private)} m</div>

@@ -16,6 +16,8 @@ from homeassistant.core import HomeAssistant
 
 from .address_rules import shorten_address
 from .const import (
+    DEFAULT_CLIENT_RADIUS,
+    DEFAULT_PRIVATE_RADIUS,
     LEARNED_PLACES_FILENAME,
     LEARNED_PRIVATE_RADIUS,
     LEARNED_TRANSIENT_RADIUS,
@@ -34,7 +36,7 @@ from .const import (
 _PHYSICAL_POINT_MERGE_DISTANCE_M = 25
 _MAX_ANCHORS_PER_PLACE = 1
 _RAW_DATA_VERSION = 5
-_LEARNED_PLACES_VERSION = 6
+_LEARNED_PLACES_VERSION = 7
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -572,6 +574,99 @@ def migrate_return_places(document: dict[str, Any]) -> bool:
     if migrated != source:
         document["places"] = migrated
     return changed
+
+
+def backfill_classified_destinations(
+    document: dict[str, Any], segments: list[dict[str, Any]]
+) -> int:
+    """Add real classified destinations missed by the 1.14 save-place workflow."""
+    places = document.get("places")
+    if not isinstance(places, list):
+        document["places"] = []
+        places = document["places"]
+
+    added = 0
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        trip_type = str(segment.get("trip_type") or "")
+        source = str(segment.get("classification_source") or "")
+        if (
+            trip_type not in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}
+            or not source.startswith(("manual_panel", "notification"))
+            or segment.get("journey_role") in {"return", "transient_stop"}
+            or segment.get("visit_role") == "waypoint"
+            or segment.get("configured_place") in {"home", "company"}
+            or segment.get("needs_review")
+        ):
+            continue
+
+        coordinates = _valid_coordinate_pair(
+            segment.get("end_latitude"), segment.get("end_longitude")
+        )
+        raw_address = segment.get("end_address_raw") or segment.get("end_address")
+        stable_address = bool(
+            _normalize_address(str(raw_address or ""))
+            and not _coordinate_address(raw_address)
+        )
+        if coordinates is None and not stable_address:
+            continue
+
+        latitude = coordinates[0] if coordinates is not None else None
+        longitude = coordinates[1] if coordinates is not None else None
+        accuracy = _optional_float(segment.get("end_accuracy_m"))
+        if coordinates is not None and accuracy is not None and accuracy < 0:
+            accuracy = None
+        if coordinates is not None and accuracy is not None:
+            default_radius = (
+                DEFAULT_PRIVATE_RADIUS
+                if trip_type == TRIP_TYPE_PRIVATE
+                else DEFAULT_CLIENT_RADIUS
+            )
+            if accuracy > default_radius:
+                if not stable_address:
+                    continue
+                latitude = None
+                longitude = None
+
+        label = str(
+            (
+                segment.get("purpose")
+                if trip_type == TRIP_TYPE_BUSINESS
+                else None
+            )
+            or segment.get("map_estimate")
+            or segment.get("end_address")
+            or ("Soukromé místo" if trip_type == TRIP_TYPE_PRIVATE else "Klient")
+        ).strip()
+        places.append(
+            {
+                "id": str(segment.get("matched_place_id") or uuid4().hex),
+                "label": label,
+                "map_name": segment.get("map_estimate"),
+                "trip_type": trip_type,
+                "trip_types": [trip_type],
+                "place_role": (
+                    PLACE_ROLE_PRIVATE
+                    if trip_type == TRIP_TYPE_PRIVATE
+                    else PLACE_ROLE_CLIENT
+                ),
+                "updated_at": segment.get("ended_at") or segment.get("started_at"),
+                "anchors": [
+                    {
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "address": raw_address,
+                        "updated_at": segment.get("ended_at")
+                        or segment.get("started_at"),
+                    }
+                ],
+            }
+        )
+        added += 1
+
+    consolidate_learned_places(document)
+    return added
 
 
 def _classification_for_place(place: dict[str, Any]) -> str:
@@ -1120,9 +1215,8 @@ class KnihaJizdRepository:
     def _initialize_sync(self) -> None:
         """Initialize the files in an executor."""
         if not self.raw_path.exists():
-            _write_json_atomic(
-                self.raw_path, {"version": _RAW_DATA_VERSION, "segments": []}
-            )
+            raw_data = {"version": _RAW_DATA_VERSION, "segments": []}
+            _write_json_atomic(self.raw_path, raw_data)
         else:
             raw_data = self._load_raw_sync()
             changed = 0
@@ -1168,17 +1262,26 @@ class KnihaJizdRepository:
                 raw_data["version"] = _RAW_DATA_VERSION
                 _write_json_atomic(self.raw_path, raw_data)
 
-        if not self.places_path.exists():
-            _write_json_atomic(
-                self.places_path,
-                {"version": _LEARNED_PLACES_VERSION, "places": []},
-            )
-        else:
-            places_data = self._load_places_sync()
-            changed = migrate_return_places(places_data)
-            changed = consolidate_learned_places(places_data) or changed
-            if changed:
-                _write_json_atomic(self.places_path, places_data)
+        places_existed = self.places_path.exists()
+        places_data = (
+            self._load_places_sync()
+            if places_existed
+            else {"version": 0, "places": []}
+        )
+        try:
+            source_places_version = int(places_data.get("version") or 0)
+        except (TypeError, ValueError):
+            source_places_version = 0
+        changed = migrate_return_places(places_data)
+        if source_places_version < _LEARNED_PLACES_VERSION:
+            changed = bool(
+                backfill_classified_destinations(
+                    places_data, raw_data.get("segments", [])
+                )
+            ) or changed
+        changed = consolidate_learned_places(places_data) or changed
+        if changed or not places_existed:
+            _write_json_atomic(self.places_path, places_data)
 
     def _load_raw_sync(self) -> dict[str, Any]:
         """Load and validate raw data."""
@@ -1198,7 +1301,7 @@ class KnihaJizdRepository:
             loaded = json.load(file_handle)
 
         if isinstance(loaded, list):
-            return {"version": _LEARNED_PLACES_VERSION, "places": loaded}
+            return {"version": 0, "places": loaded}
         if isinstance(loaded, dict) and isinstance(loaded.get("places"), list):
             return loaded
         if isinstance(loaded, dict):
@@ -1209,7 +1312,7 @@ class KnihaJizdRepository:
                 place = value.copy()
                 place.setdefault("label", str(key))
                 places.append(place)
-            return {"version": _LEARNED_PLACES_VERSION, "places": places}
+            return {"version": 0, "places": places}
         raise ValueError(f"{self.places_path} has an unsupported structure")
 
     async def async_append_segment(self, segment: dict[str, Any]) -> bool:
@@ -1599,8 +1702,9 @@ class KnihaJizdRepository:
         client_radius: float,
         private_radius: float,
         place_label: str | None = None,
+        explicit: bool = True,
     ) -> dict[str, Any]:
-        """Apply a manual historical correction to the destination's learned place."""
+        """Synchronize one classified destination with learned places."""
         async with self._lock:
             return await self.hass.async_add_executor_job(
                 self._sync_place_from_trip_sync,
@@ -1610,6 +1714,7 @@ class KnihaJizdRepository:
                 client_radius,
                 private_radius,
                 place_label,
+                explicit,
             )
 
     def _sync_place_from_trip_sync(
@@ -1620,6 +1725,7 @@ class KnihaJizdRepository:
         client_radius: float,
         private_radius: float,
         place_label: str | None = None,
+        explicit: bool = True,
     ) -> dict[str, Any]:
         raw = self._load_raw_sync()
         segments: list[dict[str, Any]] = raw["segments"]
@@ -1743,7 +1849,9 @@ class KnihaJizdRepository:
             match["label"] = label
         _apply_place_classification(match, classification, radius)
         target["matched_place_id"] = match["id"]
-        target["place_saved_explicitly"] = True
+        target[
+            "place_saved_explicitly" if explicit else "place_saved_automatically"
+        ] = True
         data["version"] = _LEARNED_PLACES_VERSION
         _write_json_atomic(self.places_path, data)
         raw["version"] = _RAW_DATA_VERSION

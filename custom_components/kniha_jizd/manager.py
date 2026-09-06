@@ -642,7 +642,7 @@ class KnihaJizdManager:
                 "place_id": "configured:company",
                 "label": self.company_label or "Firma",
                 "place_role": "company",
-                "trip_type": TRIP_TYPE_BUSINESS,
+                "trip_type": TRIP_TYPE_CONTEXTUAL,
                 "latitude": self.company_latitude,
                 "longitude": self.company_longitude,
                 "address": self.company_address or None,
@@ -2188,15 +2188,31 @@ class KnihaJizdManager:
             segment["configured_place_match"] = company_match
             segment["configured_place_radius_m"] = self.company_radius
             segment["map_estimate"] = label
-            await self._async_finalize_segment(
-                segment,
-                purpose=label,
-                trip_type=TRIP_TYPE_BUSINESS,
-                source="configured_company",
-                learn_place=True,
-                learned_label=label,
-                place_role=PLACE_ROLE_CLIENT,
-            )
+            segment["return_destination_label"] = label
+            if segment.get("return_context"):
+                await self._async_finalize_return(
+                    segment,
+                    source="configured_company_return",
+                    learn_place=False,
+                )
+                return True
+            if segment.get("private_return_context"):
+                segment["journey_role"] = "return"
+                await self._async_finalize_segment(
+                    segment,
+                    purpose="Soukromá",
+                    trip_type=TRIP_TYPE_PRIVATE,
+                    source="configured_company_private_return",
+                    learn_place=False,
+                )
+                return True
+            segment["return_context"] = {
+                "suggested": True,
+                "reason": "configured_company_destination",
+                "previous_segment_id": None,
+                "previous_purpose": None,
+            }
+            await self._async_queue_pending(segment)
             return True
         return False
 
@@ -2723,7 +2739,6 @@ class KnihaJizdManager:
                 f"Jízda ukončena. Odhadovaný cíl: {estimate}. "
                 "Jaký typ měla tato jízda?"
             )
-        base_message += " Uložení místa nabídneme zvlášť až po zařazení jízdy."
         message = (
             f"{validation_message} {base_message}"
             if validation_message
@@ -3308,7 +3323,7 @@ class KnihaJizdManager:
         learned_label: str | None = None,
         place_role: str | None = None,
     ) -> None:
-        """Write a ready segment and optionally learn its destination."""
+        """Write a ready segment and remember its real destination when safe."""
         if segment.get("configured_place") in {"home", "company"}:
             # Also protect segments restored with pre-fix classification options.
             learn_place = False
@@ -3330,11 +3345,23 @@ class KnihaJizdManager:
             if segment_date:
                 await self.repository.async_reconcile_day(segment_date)
 
-            # Places are persisted only through the independent save-place
-            # decision after the trip itself is safely classified.
+            # Legacy classification options stay accepted for restored runtime
+            # data; destination learning now happens after the trip is durable.
             del learn_place, learned_label, place_role
         if self._should_offer_place_save(segment, source, trip_type):
-            await self._async_queue_place_prompt(segment, purpose, trip_type)
+            result = await self.repository.async_sync_place_from_trip(
+                str(segment.get("id") or ""),
+                purpose,
+                trip_type,
+                self.client_radius,
+                self.private_radius,
+                place_label_suggestion(segment, purpose, trip_type),
+                False,
+            )
+            if not result.get("place_updated"):
+                # Keep the explicit fallback available when a destination cannot
+                # be stored safely from the captured location data.
+                await self._async_queue_place_prompt(segment, purpose, trip_type)
         self._last_error = None
         await self._async_refresh_statistics()
         _LOGGER.info(
@@ -3376,7 +3403,7 @@ class KnihaJizdManager:
     async def _async_queue_place_prompt(
         self, segment: dict[str, Any], purpose: str, trip_type: str
     ) -> None:
-        """Create the second, independent decision about remembering a place."""
+        """Create a fallback decision when automatic place saving was unsafe."""
         segment_id = str(segment.get("id") or "")
         if not segment_id or segment_id in self._place_prompts:
             return
@@ -3704,6 +3731,10 @@ def _classification_decision(segment: dict[str, Any]) -> dict[str, Any]:
         "notification": "Potvrzení z telefonu",
         "notification_map_candidate": "Mapový návrh potvrzený z telefonu",
         "configured_company": "Nakonfigurovaná firemní zóna",
+        "configured_company_return": "Návazná jízda do firemní zóny",
+        "configured_company_private_return": (
+            "Soukromá návazná jízda do firemní zóny"
+        ),
         "configured_home_return": "Návazná jízda do zóny domova",
         "configured_home_private_return": "Soukromá návazná jízda domů",
         "learned_place": "Známé služební místo",
