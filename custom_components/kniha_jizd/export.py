@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from math import asin, cos, floor, isfinite, radians, sin, sqrt
 from pathlib import Path
 import re
@@ -122,10 +123,15 @@ def _build_summary_rows(
             for segment in day_segments
             if segment.get("trip_type") == "business"
         ]
+        short_visits = {
+            id(segment)
+            for segment, following in zip(day_segments, day_segments[1:])
+            if _stop_was_short(segment, following)
+        }
         visible_business_segments = [
             segment
             for segment in business_segments
-            if not _is_waypoint(segment)
+            if not _is_waypoint(segment) and id(segment) not in short_visits
         ]
         route_nodes: list[str] = []
         if business_segments:
@@ -285,6 +291,27 @@ def _is_waypoint(segment: dict[str, Any]) -> bool:
     # role is assigned. This still identifies a fuel/rest stop, not a customer.
     stop = segment.get("transient_stop")
     return isinstance(stop, dict) and bool(stop.get("detected", True))
+
+
+def _stop_was_short(segment: dict[str, Any], following: dict[str, Any]) -> bool:
+    """A destination is a short visit when the next trip leaves within 15 minutes."""
+    arrival = _parse_timestamp(segment.get("ended_at"))
+    departure = _parse_timestamp(following.get("started_at"))
+    if arrival is None or departure is None:
+        return False
+    minutes = (departure - arrival).total_seconds() / 60
+    return 0 <= minutes < 15
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Parse stored ISO timestamps, including UTC Z suffixes."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _deduplicate_adjacent(values: list[str]) -> list[str]:
