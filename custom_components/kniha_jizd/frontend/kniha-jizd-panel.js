@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.14.5";
+import "./kniha-jizd-map.js?v=1.14.6";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {

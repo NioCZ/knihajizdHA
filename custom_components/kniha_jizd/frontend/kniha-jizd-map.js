@@ -307,7 +307,7 @@ class KnihaJizdMap extends HTMLElement {
         <div class="map-canvas" aria-label="Mapa uložených míst">
           <div class="tile-layer"></div><svg class="zone-layer"></svg><div class="marker-layer"></div>
           <div class="map-controls"><button class="zoom-in" title="Přiblížit">+</button><button class="zoom-out" title="Oddálit">−</button><button class="fit" title="Zobrazit všechna místa">⌖</button></div>
-          <div class="attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>, © <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a></div>
+          <div class="attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>, © <a href="https://www.fossgis.de/" target="_blank" rel="noopener">FOSSGIS</a></div>
         </div>
         <aside><div class="car-info info-card"></div><div class="selection-info info-card"></div><div class="info-card"><h3>Legenda</h3><div class="legend">
           <span><i class="swatch car"></i>Auto</span><span><i class="swatch client"></i>Klient</span>
@@ -448,7 +448,7 @@ class KnihaJizdMap extends HTMLElement {
       for (let y = minTileY; y <= maxTileY; y += 1) {
         if (y < 0 || y >= tileCount) continue;
         const wrappedX = ((x % tileCount) + tileCount) % tileCount;
-        tiles.push(`<img draggable="false" alt="" src="https://basemaps.cartocdn.com/rastertiles/voyager/${this._zoom}/${wrappedX}/${y}.png" style="left:${Math.round(x * 256 - center.x + width / 2)}px;top:${Math.round(y * 256 - center.y + height / 2)}px">`);
+        tiles.push(`<img draggable="false" alt="" src="https://tile.openstreetmap.de/${this._zoom}/${wrappedX}/${y}.png" style="left:${Math.round(x * 256 - center.x + width / 2)}px;top:${Math.round(y * 256 - center.y + height / 2)}px">`);
       }
     }
     tileLayer.innerHTML = tiles.join("");
