@@ -275,10 +275,16 @@ def _whole_km(value: float) -> int:
 
 
 def _is_waypoint(segment: dict[str, Any]) -> bool:
-    """Hide only visits that the journey classifier actually confirmed as waypoints."""
+    """Hide stops explicitly marked as short, while retaining their kilometres."""
     if segment.get("visit_role") is not None:
-        return segment.get("visit_role") == "waypoint"
-    return segment.get("journey_role") == "transient_stop"
+        if segment.get("visit_role") == "waypoint":
+            return True
+    if segment.get("journey_role") == "transient_stop":
+        return True
+    # Older/incomplete records can carry the stop evidence before the journey
+    # role is assigned. This still identifies a fuel/rest stop, not a customer.
+    stop = segment.get("transient_stop")
+    return isinstance(stop, dict) and bool(stop.get("detected", True))
 
 
 def _deduplicate_adjacent(values: list[str]) -> list[str]:
