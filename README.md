@@ -346,7 +346,7 @@ cíli, ale samotné krátké zastávky zůstávají rozlišené žlutým kosočt
 Kandidát zůstává viditelný jako běžná
 návštěva, dokud další jízda skutečně nepotvrdí návaznost. Totéž platí pro interní návratový kontext:
 ovlivní zařazení trasy, ale nevytváří kategorii místa na mapě. Podklad tvoří
-dlaždice OpenStreetMap. Po výběru naučeného bodu lze přímo v jeho detailu použít
+dlaždice CARTO Voyager s daty OpenStreetMap. Po výběru naučeného bodu lze přímo v jeho detailu použít
 **Odstranit označený bod**. Smaže se jen vybraný fyzický GPS bod; historické jízdy
 zůstanou zachované. Konfigurovaný domov a firmu mapa odstranit nedovolí, protože
 se upravují v nastavení integrace.
