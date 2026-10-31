@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from homeassistant.components import frontend, panel_custom
@@ -11,9 +12,26 @@ from homeassistant.core import HomeAssistant
 PANEL_URL_PATH = "kniha-jizd"
 PANEL_STATIC_URL = "/kniha_jizd/frontend"
 PANEL_COMPONENT = "kniha-jizd-panel"
-PANEL_MODULE_URL = f"{PANEL_STATIC_URL}/kniha-jizd-panel.js?v=1.14.6"
+PANEL_MODULE_URL = f"{PANEL_STATIC_URL}/kniha-jizd-panel.js?v=1.15.0"
 PANEL_DIRECTORY = Path(__file__).parent / "frontend"
 PANEL_STATIC_REGISTERED = "kniha_jizd_panel_static_registered"
+
+
+def _get_panel_version() -> str:
+    """Return a cache-busting version string using manifest version and file mtime."""
+    manifest_path = Path(__file__).parent / "manifest.json"
+    version = "1.15.0"
+    try:
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        version = str(manifest_data.get("version", "1.15.0"))
+    except Exception:
+        pass
+    js_path = PANEL_DIRECTORY / "kniha-jizd-panel.js"
+    try:
+        mtime = int(js_path.stat().st_mtime)
+        return f"{version}.{mtime}"
+    except Exception:
+        return version
 
 
 async def async_register_panel(hass: HomeAssistant) -> None:
@@ -35,11 +53,12 @@ async def async_register_panel(hass: HomeAssistant) -> None:
     if _panel_exists(hass):
         _remove_panel(hass)
 
+    module_url = f"{PANEL_STATIC_URL}/kniha-jizd-panel.js?v={_get_panel_version()}"
     await panel_custom.async_register_panel(
         hass,
         webcomponent_name=PANEL_COMPONENT,
         frontend_url_path=PANEL_URL_PATH,
-        module_url=PANEL_MODULE_URL,
+        module_url=module_url,
         sidebar_title="Kniha jízd",
         sidebar_icon="mdi:car-clock",
         require_admin=True,

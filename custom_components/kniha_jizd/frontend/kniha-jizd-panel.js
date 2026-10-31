@@ -1,4 +1,4 @@
-import "./kniha-jizd-map.js?v=1.14.6";
+import "./kniha-jizd-map.js?v=1.15.0";
 
 class KnihaJizdPanel extends HTMLElement {
   constructor() {
@@ -1322,6 +1322,7 @@ class KnihaJizdPanel extends HTMLElement {
     const pendingValue = pendingCount;
     const isManualGps = attrs.tracking_mode === "manual_calculated";
     const currentOdometer = attrs.virtual_odometer_km ?? attrs.odometer_km;
+    const todayTripRows = attrs.today_trips || [];
     const allQuestionTrips = [
       ...todayTripRows,
       ...pendingTrips,
@@ -1335,7 +1336,6 @@ class KnihaJizdPanel extends HTMLElement {
     const totalBusinessValue = statistics.business_km_total ?? totalBusiness?.state;
     const totalPrivateValue = statistics.private_km_total ?? totalPrivate?.state;
     const odometerCheck = attrs.odometer_day_check || {};
-    const todayTripRows = attrs.today_trips || [];
     const historyRows = this._historyData?.rows || [];
     const selectedDay = (this._historyData?.days || []).find(
       (day) => day.date === this._historyDate,
@@ -1346,7 +1346,6 @@ class KnihaJizdPanel extends HTMLElement {
     const expiresAt = Date.parse(exportData.expires_at || "");
     const downloadUrl = rawDownloadUrl && expiresAt > Date.now() ? rawDownloadUrl : null;
     const downloadFilename = exportData.filename || "kniha_jizd.xlsx";
-    const isManualGps = attrs.tracking_mode === "manual_calculated";
     const gpsDetail = attrs.gps_ok
       ? `${attrs.gps_entity}: ${attrs.latitude}, ${attrs.longitude} · ${attrs.gps_coordinate_source}`
       : `${attrs.gps_entity}: stav ${attrs.gps_state ?? "—"} · souřadnice nenalezeny ani v ${attrs.address_entity}`;
