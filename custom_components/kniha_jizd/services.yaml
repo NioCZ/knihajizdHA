@@ -320,3 +320,16 @@ reconcile_day:
           step: any
           unit_of_measurement: km
           mode: box
+process_pending_trips:
+  name: Zpracovat a dopočítat čekající jízdy
+  description: Spočítá silniční vzdálenost přes GPS/OSRM pro všechny čekající nedokončené jízdy a posune virtuální tachometr.
+discard_trip:
+  name: Zahodit nedokončenou jízdu
+  description: Odstraní vybranou nedokončenou jízdu z paměti bez uložení do knihy jízd.
+  fields:
+    segment_id:
+      name: ID segmentu jízdy
+      description: Unikátní identifikátor čekající jízdy.
+      required: true
+      selector:
+        text:

@@ -47,7 +47,10 @@ def mobile_notification_policy(
 
 def panel_question(segment: dict[str, Any], status: str) -> dict[str, Any] | None:
     """Build one safe action model for an unresolved trip in the admin panel."""
-    if status != "waiting_classification" or segment.get("classification_ready"):
+    if (
+        status not in {"waiting_classification", "waiting_odometer"}
+        or segment.get("classification_ready")
+    ):
         return None
 
     estimate = str(

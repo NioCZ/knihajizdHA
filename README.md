@@ -404,6 +404,42 @@ data:
   terminal_anchor_km: 125480.0 # Volitelné
 ```
 
+#### 5. Hromadné dopočtení čekajících jízd (`process_pending_trips`)
+Pokud vám v systému zůstaly viset jízdy (např. z doby, kdy vypadlo API automobilky a jízdy čekaly na doručení tachometru), tato akce pro všechny nedokončené jízdy spočítá silniční vzdálenost přes GPS / OSRM směrování a posune virtuální tachometr:
+
+```yaml
+action: kniha_jizd.process_pending_trips
+```
+
+Tuto akci můžete spustit jedním kliknutím i přímo v panelu (tlačítko **⚡ Dopočítat km podle GPS**).
+
+#### 6. Zahodit nedokončenou jízdu (`discard_trip`)
+Pokud v paměti visí nechtěná nebo fantomová jízda (např. krátké zapnutí zapalování), můžete ji odstranit bez uložení do knihy jízd:
+
+```yaml
+action: kniha_jizd.discard_trip
+data:
+  segment_id: "ID_CEKAJICI_JIZDY"
+```
+
+V administračním panelu je pro každou čekající jízdu k dispozici tlačítko **✕ Zahodit**.
+
+### Nová záložka v panelu: Čekající jízdy
+
+Pokud karta **Vyžaduje pozornost** v panelu ukazuje čekající jízdy (např. `19 čeká`), v záhlaví panelu se objeví záložka **Čekající jízdy** s oranžovým odznáčkem počtu.
+V této záložce:
+- Vidíte přehlednou tabulku všech čekajících jízd napříč všemi dny (včetně minulých dnů z doby výpadku API).
+- U každé jízdy vidíte datum, čas, trasu, aktuální stav a vzdálenost.
+- Můžete jízdu přímo zařadit tlačítky **Služební**, **Soukromá** nebo **Návrat**.
+- Pokud jízda čeká na tachometr z auta, tlačítkem **GPS km** (nebo hromadným tlačítkem v záhlaví) jí okamžitě spočítáte silniční km podle GPS trasy.
+- Tlačítkem **✕ Zahodit** můžete nechtěnou jízdu ihned smazat.
+
+### Kalibrace tachometru v panelu
+
+- **V hlavičce a metrikách panelu**: Trvale vidíte aktuální stav počitadla kilometrů (např. `Tachometr: 125 480 km (virtuální)`).
+- **V přehledu dne**: Přímo nahoře je sekce pro okamžité zadání stavu z palubní desky auta nebo celkových kilometrů ujetých za dnešek.
+- **V záložce Historie**: U každého vybraného dne můžete zadat koncový stav tachometru pro daný den nebo ujeté kilometry, a integrace jízdy daného dne okamžitě proporcionálně rozpočítá.
+
 ### Mapa míst a zón
 
 Záložka **Mapa míst** v administračním panelu načítá přes přihlášené HA API:

@@ -387,6 +387,15 @@ class KnihaJizdManager:
                 else datetime.now(UTC)
             )
             await self._async_begin_end_segment(disconnected_at)
+
+        if self.tracking_mode == TRACKING_MODE_MANUAL_CALCULATED and (
+            self._closing
+            or any(not s.get("odometer_ready") for s in self._pending.values())
+        ):
+            self._create_task(
+                self.async_process_pending_trips(),
+                f"{DOMAIN}_auto_process_pending_on_start",
+            )
         self._notify_listeners()
 
     @staticmethod
@@ -564,6 +573,8 @@ class KnihaJizdManager:
                 self._statistics.get("today_odometer_check") or {}
             ),
             "today_trips": self._today_trip_rows(),
+            "pending_trips": self._pending_trip_rows(),
+            "attention_count": len(self._pending_trip_rows()),
             "trigger_entity": self.trigger_entity,
             "trigger_state": trigger_state.state if trigger_state else None,
             "trigger_ok": trigger_ok,
@@ -619,6 +630,7 @@ class KnihaJizdManager:
             "today_review_count",
             "transient_count",
             "place_prompt_count",
+            "attention_count",
             "trigger_ok",
             "gps_ok",
             "address_ok",
@@ -1014,6 +1026,36 @@ class KnihaJizdManager:
                 )
         return sorted(rows.values(), key=lambda row: str(row.get("started_at") or ""))
 
+    def _pending_trip_rows(self) -> list[dict[str, Any]]:
+        """Return all unfinished runtime trips across all dates for the attention view."""
+        rows: dict[str, dict[str, Any]] = {}
+        runtime_groups: tuple[tuple[str, list[dict[str, Any]]], ...] = (
+            ("waiting_odometer", list(self._closing.values())),
+            ("waiting_classification", list(self._pending.values())),
+            ("waiting_journey", list(self._transient.values())),
+        )
+        for status, segments in runtime_groups:
+            for segment in segments:
+                segment_id = segment.get("id")
+                if not segment_id:
+                    continue
+                effective_status = status
+                if status == "waiting_odometer" and not segment.get(
+                    "classification_prepared"
+                ):
+                    effective_status = "processing_destination"
+                row = _panel_trip_row(segment, effective_status)
+                if str(segment_id) in self._place_prompts:
+                    row["place_question"] = deepcopy(
+                        self._place_prompts[str(segment_id)]
+                    )
+                rows[str(segment_id)] = row
+        return sorted(
+            rows.values(),
+            key=lambda row: str(row.get("started_at") or ""),
+            reverse=True,
+        )
+
     async def async_update_trip(
         self,
         segment_id: str,
@@ -1395,6 +1437,75 @@ class KnihaJizdManager:
             "date": target_date,
             "check": check,
         }
+
+    async def async_process_pending_trips(self) -> dict[str, Any]:
+        """Process and calculate distance for all closing/pending trips using GPS/OSRM."""
+        processed = 0
+        ordered_segments = sorted(
+            [
+                *self._closing.values(),
+                *self._pending.values(),
+            ],
+            key=lambda item: str(item.get("started_at") or ""),
+        )
+        for segment in ordered_segments:
+            if not segment.get("odometer_ready"):
+                raw_distance = await self._async_calculate_trip_distance(segment)
+                start_odo = _as_float(segment.get("start_odometer_km"))
+                if start_odo is None:
+                    start_odo = round(self._virtual_odometer_km, 3)
+                    segment["start_odometer_km"] = start_odo
+                end_odo = round(start_odo + raw_distance, 3)
+                self._virtual_odometer_km = end_odo
+                segment["end_odometer_km"] = end_odo
+                segment["distance_hint_km"] = raw_distance
+                segment["distance_km_raw"] = raw_distance
+                segment["distance_km"] = _whole_km(raw_distance)
+                segment["odometer_ready"] = True
+                segment["odometer_completion_source"] = (
+                    "gps_route_calculated"
+                    if self.tracking_mode == TRACKING_MODE_MANUAL_CALCULATED
+                    else "gps_fallback_user_requested"
+                )
+                segment["distance_reconciliation_source"] = segment["odometer_completion_source"]
+                processed += 1
+
+            if not segment.get("classification_prepared"):
+                try:
+                    await self._async_prepare_classification(segment)
+                except Exception:
+                    pass
+
+            await self._async_try_finalize_segment(segment)
+
+        async with self._odometer_completion_condition:
+            self._odometer_completion_condition.notify_all()
+
+        await self._async_save_runtime()
+        await self._async_refresh_statistics()
+        self._notify_listeners()
+        return {"status": "processed", "processed_count": processed}
+
+    async def async_discard_trip(self, segment_id: str) -> dict[str, Any]:
+        """Discard an unfinished runtime trip without saving it."""
+        target_id = str(segment_id).strip()
+        found = False
+        for collection in (self._closing, self._pending, self._transient):
+            if target_id in collection:
+                collection.pop(target_id, None)
+                found = True
+        if target_id in self._place_prompts:
+            self._place_prompts.pop(target_id, None)
+            found = True
+        if self._active is not None and str(self._active.get("id")) == target_id:
+            self._active = None
+            found = True
+        if found:
+            await self._async_save_runtime()
+            await self._async_refresh_statistics()
+            self._notify_listeners()
+            return {"status": "discarded", "segment_id": target_id}
+        return {"status": "not_found", "segment_id": target_id}
 
     def _find_runtime_segment(self, segment_id: str) -> dict[str, Any] | None:
         """Find one unfinished segment without copying its live state."""

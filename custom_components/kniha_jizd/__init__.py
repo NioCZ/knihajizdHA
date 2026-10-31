@@ -91,8 +91,10 @@ from .const import (
     DEFAULT_TRANSIENT_RADIUS,
     DOMAIN,
     SERVICE_ADD_TRIP,
+    SERVICE_DISCARD_TRIP,
     SERVICE_END_TRIP,
     SERVICE_EXPORT_EXCEL,
+    SERVICE_PROCESS_PENDING_TRIPS,
     SERVICE_RECONCILE_DAY,
     SERVICE_RESOLVE_TRIP,
     SERVICE_SAVE_TRIP_PLACE,
@@ -208,6 +210,12 @@ RECONCILE_DAY_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_DATE): vol.Match(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$"),
         vol.Optional(ATTR_ODOMETER_KM): vol.All(vol.Coerce(float), vol.Range(min=0)),
+    }
+)
+PROCESS_PENDING_TRIPS_SERVICE_SCHEMA = vol.Schema({})
+DISCARD_TRIP_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_SEGMENT_ID): str,
     }
 )
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
@@ -446,6 +454,36 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_RECONCILE_DAY,
         _async_reconcile_day_service,
         schema=RECONCILE_DAY_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_process_pending_trips_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_process_pending_trips()
+        except (ValueError, TypeError) as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PROCESS_PENDING_TRIPS,
+        _async_process_pending_trips_service,
+        schema=PROCESS_PENDING_TRIPS_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_discard_trip_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_discard_trip(str(call.data[ATTR_SEGMENT_ID]))
+        except (ValueError, TypeError) as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DISCARD_TRIP,
+        _async_discard_trip_service,
+        schema=DISCARD_TRIP_SERVICE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     return True

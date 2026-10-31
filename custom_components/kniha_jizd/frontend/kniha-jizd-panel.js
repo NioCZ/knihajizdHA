@@ -253,6 +253,17 @@ class KnihaJizdPanel extends HTMLElement {
     }).format(parsed);
   }
 
+  _dateTime(value) {
+    const parsed = new Date(value || "");
+    if (Number.isNaN(parsed.getTime())) return "—";
+    return new Intl.DateTimeFormat("cs-CZ", {
+      day: "numeric",
+      month: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(parsed);
+  }
+
   _tripValues(trip) {
     return {
       start: String(trip?.start_address ?? ""),
@@ -411,6 +422,110 @@ class KnihaJizdPanel extends HTMLElement {
     }
   }
 
+  async _setManualOdometerHistory(button) {
+    if (!this._hass || !this._historyDate) return;
+    const input = this.shadowRoot.getElementById("history-odometer-input");
+    const val = input ? parseFloat(input.value) : null;
+    if (val === null || isNaN(val) || val < 0) return;
+    button.disabled = true;
+    try {
+      await this._hass.callService("kniha_jizd", "set_odometer", {
+        odometer_km: val,
+        date: this._historyDate,
+      });
+      this._message = `Tachometr pro den ${this._historyDate} nastaven na ${val} km a den přepočten.`;
+      if (input) input.value = "";
+      await this._loadHistoryData();
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při zápisu tachometru: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async _setManualDailyHistory(button) {
+    if (!this._hass || !this._historyDate) return;
+    const input = this.shadowRoot.getElementById("history-daily-input");
+    const val = input ? parseFloat(input.value) : null;
+    if (val === null || isNaN(val) || val < 0) return;
+    button.disabled = true;
+    try {
+      await this._hass.callService("kniha_jizd", "set_odometer", {
+        daily_km: val,
+        date: this._historyDate,
+      });
+      this._message = `Denní nájezd ${val} km pro ${this._historyDate} rozpočten mezi segmenty.`;
+      if (input) input.value = "";
+      await this._loadHistoryData();
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při rozpočtu dne: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async _processAllPendingTrips(button) {
+    if (!this._hass) return;
+    if (button) button.disabled = true;
+    try {
+      const res = await this._hass.callService("kniha_jizd", "process_pending_trips", {});
+      this._message = "Čekající jízdy byly dopočteny a aktualizovány podle GPS silničního směrování.";
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při zpracování čekajících jízd: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async _resolveTripInline(button) {
+    if (!this._hass) return;
+    const segmentId = button.dataset.segmentId;
+    const action = button.dataset.action;
+    const row = button.closest("tr[data-segment-id]");
+    const input = row?.querySelector(".trip-pending-purpose");
+    const value = input?.value || "";
+    button.disabled = true;
+    try {
+      await this._hass.callService("kniha_jizd", "resolve_trip", {
+        segment_id: segmentId,
+        action,
+        value,
+      });
+      this._message = `Jízda zařazena (${action === "business" ? "služební" : action === "private" ? "soukromá" : "návrat"}).`;
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při zařazení jízdy: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async _discardTrip(button) {
+    if (!this._hass) return;
+    const segmentId = button.dataset.segmentId;
+    if (!confirm("Opravdu chcete tuto nedokončenou jízdu zahodit z paměti?")) return;
+    button.disabled = true;
+    try {
+      await this._hass.callService("kniha_jizd", "discard_trip", {
+        segment_id: segmentId,
+      });
+      this._message = "Nedokončená jízda byla odstraněna.";
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při zahazování jízdy: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   async _saveTrip(button) {
     if (!this._hass || this._savingTrip) return;
     const row = button.closest("tr");
@@ -462,6 +577,61 @@ class KnihaJizdPanel extends HTMLElement {
         this._render();
       }
     }
+  }
+
+  _pendingTripsTable(trips) {
+    if (!Array.isArray(trips) || trips.length === 0) {
+      return `<div class="muted" style="padding:16px 0;">Žádné jízdy momentálně nečekají na vyřízení.</div>`;
+    }
+    return `<div class="table-wrap" role="region" aria-label="Tabulka čekajících jízd">
+      <table class="trips-table">
+        <thead>
+          <tr>
+            <th style="min-width:130px;">Datum a čas</th>
+            <th style="min-width:170px;">Odkud</th>
+            <th style="min-width:170px;">Kam</th>
+            <th class="num" style="min-width:70px;">km</th>
+            <th style="min-width:130px;">Stav</th>
+            <th style="min-width:160px;">Účel / Zákazník</th>
+            <th style="min-width:260px;">Akce</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${trips.map((trip) => {
+            const segmentId = String(trip.id || "");
+            const hasQuestion = Boolean(trip.question);
+            const question = trip.question || {};
+            const actions = question.actions || [];
+            const value = this._questionValues.get(segmentId) || trip.purpose || "";
+            const statusLabel = {
+              waiting_odometer: "Čeká na tachometr",
+              waiting_classification: "Čeká na zařazení",
+              waiting_journey: "Mezizastávka",
+              processing_destination: "Zpracovává cíl",
+            }[trip.status] || trip.status || "Čeká";
+            return `<tr data-segment-id="${this._text(segmentId)}" class="pending-trip-row">
+              <td><strong>${this._dateTime(trip.started_at)}</strong><br><small class="muted">${this._time(trip.started_at)} – ${this._time(trip.ended_at)}</small></td>
+              <td>${this._text(trip.start_address, "Neznámý start")}</td>
+              <td>${this._text(trip.end_address, "Neznámý cíl")}</td>
+              <td class="num"><strong>${this._number(trip.distance_km)}</strong></td>
+              <td><span class="pill" style="font-size:11px; padding:4px 9px; border-radius:12px; background:color-mix(in srgb,var(--warning-color,#ef6c00) 15%,transparent); color:var(--warning-color,#ef6c00); border:1px solid currentColor;">${this._text(statusLabel)}</span></td>
+              <td>
+                <input class="trip-pending-purpose" type="text" value="${this._text(value)}" placeholder="Účel / zákazník" style="width:100%; min-width:130px; padding:6px 8px; border:1px solid var(--divider-color); border-radius:6px; background:var(--card-background-color); color:var(--primary-text-color);">
+              </td>
+              <td>
+                <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+                  <button class="resolve-trip-inline" data-action="business" data-segment-id="${this._text(segmentId)}" style="padding:6px 11px; font-size:12px; font-weight:600; border-radius:6px; background:var(--primary-color); color:var(--text-primary-color, #fff); border:0; cursor:pointer;" title="Uložit jako služební jízdu">Služební</button>
+                  <button class="resolve-trip-inline secondary" data-action="private" data-segment-id="${this._text(segmentId)}" style="padding:6px 11px; font-size:12px; font-weight:600; border-radius:6px; background:var(--secondary-background-color); color:var(--primary-text-color); border:1px solid var(--divider-color); cursor:pointer;" title="Uložit jako soukromou jízdu">Soukromá</button>
+                  ${actions.some(a => a.id === "return") ? `<button class="resolve-trip-inline" data-action="return" data-segment-id="${this._text(segmentId)}" style="padding:6px 11px; font-size:12px; font-weight:600; border-radius:6px; background:#2e7d32; color:#fff; border:0; cursor:pointer;" title="Uložit jako služební návrat">Návrat</button>` : ""}
+                  ${!trip.odometer_ready ? `<button class="process-single-pending-btn" data-segment-id="${this._text(segmentId)}" style="padding:6px 11px; font-size:12px; font-weight:600; border-radius:6px; background:#0288d1; color:#fff; border:0; cursor:pointer;" title="Dopočítat kilometry podle GPS trasy">GPS km</button>` : ""}
+                  <button class="discard-trip-btn" data-segment-id="${this._text(segmentId)}" style="padding:6px 9px; font-size:12px; border-radius:6px; background:#c62828; color:#fff; border:0; cursor:pointer;" title="Zahodit tuto nedokončenou jízdu">✕</button>
+                </div>
+              </td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>`;
   }
 
   _tripTable(
@@ -842,10 +1012,10 @@ class KnihaJizdPanel extends HTMLElement {
   }
 
   async _selectTab(tab) {
-    if (!new Set(["overview", "history", "map", "places"]).has(tab)) return;
+    if (!new Set(["overview", "attention", "history", "map", "places"]).has(tab)) return;
     this._activeTab = tab;
     this._render();
-    if (tab === "overview" && Date.now() - this._overviewLoadedAt > 1000) {
+    if ((tab === "overview" || tab === "attention") && Date.now() - this._overviewLoadedAt > 1000) {
       await this._loadOverviewData();
     }
     // Places may also be saved by a notification while these views are not
@@ -1140,11 +1310,26 @@ class KnihaJizdPanel extends HTMLElement {
     const businessValue = statistics.today_business_km ?? business?.state;
     const privateValue = statistics.today_private_km ?? privateKm?.state;
     const todayTripsValue = statistics.today_segments ?? todayTrips?.state;
-    const pendingValue = (
-      Number(attrs.closing_count || 0)
-      + Number(attrs.pending_count || 0)
-      + Number(attrs.transient_count || 0)
-      + Number(attrs.place_prompt_count || 0)
+    const pendingTrips = attrs.pending_trips || [];
+    const pendingCount = (
+      Number(attrs.attention_count ?? (pendingTrips.length || (
+        Number(attrs.closing_count || 0)
+        + Number(attrs.pending_count || 0)
+        + Number(attrs.transient_count || 0)
+        + Number(attrs.place_prompt_count || 0)
+      )))
+    );
+    const pendingValue = pendingCount;
+    const isManualGps = attrs.tracking_mode === "manual_calculated";
+    const currentOdometer = attrs.virtual_odometer_km ?? attrs.odometer_km;
+    const allQuestionTrips = [
+      ...todayTripRows,
+      ...pendingTrips,
+    ].filter(
+      (trip, index, arr) =>
+        trip?.question &&
+        arr.findIndex((t) => String(t.id) === String(trip.id)) === index &&
+        !this._resolvedQuestions.has(String(trip.id))
     );
     const totalTripsValue = statistics.segments_total ?? totalTrips?.state;
     const totalBusinessValue = statistics.business_km_total ?? totalBusiness?.state;
@@ -1364,7 +1549,16 @@ class KnihaJizdPanel extends HTMLElement {
         <header>
           <div>
             <h1>Kniha jízd</h1>
-            <div class="muted title-subtitle">Jízdy, historie a reporty na jednom místě · ${isManualGps ? "Režim: Bez senzorů auta (GPS a ruční zápis)" : "Režim: API senzor z auta"}</div>
+            <div class="muted title-subtitle" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <span>Jízdy, historie a reporty na jednom místě</span>
+              <span>·</span>
+              <span class="mode-badge" style="font-size:12px; padding:2px 8px; border-radius:6px; background:var(--secondary-background-color); border:1px solid var(--divider-color); font-weight:600;">
+                ${isManualGps ? "Režim: Bez senzorů (GPS)" : "Režim: API senzor z auta"}
+              </span>
+              <span class="odometer-badge" style="font-size:12px; padding:2px 8px; border-radius:6px; background:color-mix(in srgb,var(--primary-color) 15%,transparent); border:1px solid var(--primary-color); font-weight:600; color:var(--primary-color);">
+                Tachometr: <strong>${this._number(currentOdometer)} km</strong> ${isManualGps ? "(virtuální)" : ""}
+              </span>
+            </div>
           </div>
           <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
             ${attrs.active_segment_id
@@ -1375,6 +1569,9 @@ class KnihaJizdPanel extends HTMLElement {
         </header>
         <nav class="tabs" aria-label="Části panelu">
           <button class="tab ${this._activeTab === "overview" ? "active" : ""}" data-tab="overview">Přehled</button>
+          <button class="tab ${this._activeTab === "attention" ? "active" : ""}" data-tab="attention" style="${pendingCount > 0 ? "font-weight:700;" : ""}">
+            Čekající jízdy ${pendingCount > 0 ? `<span style="background:var(--warning-color,#ef6c00); color:#fff; padding:2px 7px; border-radius:10px; font-size:12px; margin-left:4px;">${pendingCount}</span>` : ""}
+          </button>
           <button class="tab ${this._activeTab === "history" ? "active" : ""}" data-tab="history">Historie</button>
           <button class="tab ${this._activeTab === "map" ? "active" : ""}" data-tab="map">Mapa míst</button>
           <button class="tab ${this._activeTab === "places" ? "active" : ""}" data-tab="places">Správa míst</button>
@@ -1382,18 +1579,32 @@ class KnihaJizdPanel extends HTMLElement {
         ${this._message ? `<div class="global-message" role="status" aria-live="polite">${this._text(this._message)}</div>` : ""}
         <div ${this._activeTab === "overview" ? "" : "hidden"}>
         ${this._overviewError ? `<div class="inline-error" role="alert">Živý přehled se nepodařilo načíst: ${this._text(this._overviewError)}</div>` : ""}
-        <section class="card daily-trips primary-section">
-          <div class="section-titlebar"><div><div class="section-kicker">Hlavní přehled</div><h2>Dnešní jízdy</h2><div class="muted">Jízdy můžete přímo opravit a uložit. Zákazník je u služební jízdy volitelný.</div></div><span class="pill">${this._text(todayTripsValue, "0")} jízd</span></div>
-          ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.", "overview-trips")}
+        <section class="grid metrics-grid">
+          <article class="card metric-card odometer-metric" style="cursor:pointer;" id="metric-odometer-card" title="Klikněte pro zadání stavu z tachometru">
+            <div class="muted">Tachometr (${isManualGps ? "virtuální" : "auto"})</div>
+            <div class="metric" style="color:var(--primary-color);">${this._number(currentOdometer)} km</div>
+            <small>${isManualGps ? "Virtuální odhad z GPS trasy" : "Stav z palubního senzoru"}</small>
+          </article>
+          <article class="card metric-card"><div class="muted">Dnes služební</div><div class="metric">${this._number(businessValue)} km</div></article>
+          <article class="card metric-card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateValue)} km</div></article>
+          <article class="card metric-card"><div class="muted">Dnešní jízdy</div><div class="metric">${this._text(todayTripsValue, "0")}</div></article>
+          <article class="card metric-card attention" style="cursor:pointer;" id="metric-attention-card" title="Klikněte pro zobrazení čekajících jízd">
+            <div class="muted">Vyžaduje pozornost</div>
+            <div class="metric">${this._text(pendingCount + Number(attrs.today_review_count || 0), "0")}</div>
+            <small>${pendingCount} čeká · ${this._text(attrs.today_review_count, "0")} k revizi</small>
+          </article>
         </section>
-        <section class="card odometer-entry-card" style="margin-bottom:16px;">
+        <section class="card odometer-entry-card" id="odometer-section" style="margin-bottom:16px; border-left:4px solid var(--primary-color);">
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
             <div>
-              <h3 style="margin:0 0 4px; font-size:16px;">Zápis stavu tachometru a rozpočítání km</h3>
-              <div class="muted" style="font-size:13px;">
-                ${isManualGps
-                  ? `Virtuální tachometr: <strong>${this._number(attrs.virtual_odometer_km ?? attrs.odometer_km)} km</strong> · zadejte stav z auta pro rozpočítání celého dne.`
-                  : `Tachometr: <strong>${this._number(attrs.odometer_km)} km</strong> · zadejte stav pro přepočet a kontrolu dne.`}
+              <div style="display:flex; align-items:center; gap:8px;">
+                <h3 style="margin:0; font-size:16px;">Zápis stavu tachometru a rozpočítání km</h3>
+                <span class="pill" style="font-size:11px; padding:2px 8px; border-radius:12px; background:var(--primary-color); color:var(--text-primary-color,#fff);">
+                  ${isManualGps ? "Virtuální odhad" : "Senzor auta"}
+                </span>
+              </div>
+              <div class="muted" style="font-size:13px; margin-top:4px;">
+                Aktuální stav počitadla: <strong>${this._number(currentOdometer)} km</strong> · zadejte stav z tachometru auta nebo celkové ujeté km pro rozpočtení celého dne.
               </div>
             </div>
             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
@@ -1404,13 +1615,27 @@ class KnihaJizdPanel extends HTMLElement {
             </div>
           </div>
         </section>
-        ${this._questionCards(todayTripRows)}
+        ${pendingCount > 0 ? `<section class="card attention-banner" style="border-left:4px solid var(--warning-color,#ef6c00); background:color-mix(in srgb,var(--warning-color,#ef6c00) 8%,var(--card-background-color)); margin-bottom:16px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h3 style="margin:0 0 4px; font-size:16px; color:var(--warning-color,#ef6c00); display:flex; align-items:center; gap:8px;">
+                <span>⚠️ ${pendingCount} jízd vyžaduje vaši pozornost</span>
+              </h3>
+              <div class="muted" style="font-size:13px;">
+                Tyto jízdy nemají doručený tachometr z auta nebo čekají na zařazení (služební / soukromá). Můžete je vyřešit v záložce <strong>Čekající jízdy</strong> nebo hromadně dopočítat.
+              </div>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <button id="overview-goto-attention-btn" style="padding:8px 14px; font-weight:600; border-radius:8px; background:var(--warning-color,#ef6c00); color:#fff; border:0; cursor:pointer;">Zobrazit ${pendingCount} čekajících jízd</button>
+              <button id="overview-process-pending-btn" style="padding:8px 14px; font-weight:600; border-radius:8px; background:var(--primary-color); color:var(--text-primary-color,#fff); border:0; cursor:pointer;">⚡ Dopočítat km podle GPS</button>
+            </div>
+          </div>
+        </section>` : ""}
+        ${this._questionCards(allQuestionTrips)}
         ${this._placeQuestionCards(attrs.place_questions || todayTripRows)}
-        <section class="grid metrics-grid">
-          <article class="card metric-card"><div class="muted">Dnes služební</div><div class="metric">${this._number(businessValue)} km</div></article>
-          <article class="card metric-card"><div class="muted">Dnes soukromé</div><div class="metric">${this._number(privateValue)} km</div></article>
-          <article class="card metric-card"><div class="muted">Dnešní jízdy</div><div class="metric">${this._text(todayTripsValue, "0")}</div></article>
-          <article class="card metric-card attention"><div class="muted">Vyžaduje pozornost</div><div class="metric">${this._text(pendingValue + Number(attrs.today_review_count || 0), "0")}</div><small>${pendingValue} čeká · ${this._text(attrs.today_review_count, "0")} k revizi</small></article>
+        <section class="card daily-trips primary-section">
+          <div class="section-titlebar"><div><div class="section-kicker">Hlavní přehled</div><h2>Dnešní jízdy</h2><div class="muted">Jízdy můžete přímo opravit a uložit. Zákazník je u služební jízdy volitelný.</div></div><span class="pill">${this._text(todayTripsValue, "0")} jízd</span></div>
+          ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.", "overview-trips")}
         </section>
         <section class="overview-secondary">
           <article class="card last-trip-card"><div class="last-trip-heading"><div><div class="muted">Poslední jízda</div><h2>${this._text(last.purpose, last.trip_type === "private" ? "Soukromá" : "Bez klienta")}</h2></div><strong>${this._number(last.distance_km ?? lastTrip?.state)} km</strong></div>
@@ -1457,6 +1682,22 @@ class KnihaJizdPanel extends HTMLElement {
           </div>
         </section>
         </div>
+        ${this._activeTab === "attention" ? `<div class="attention-view">
+          <section class="card daily-trips">
+            <div class="section-titlebar">
+              <div>
+                <div class="section-kicker" style="color:var(--warning-color,#ef6c00);">Čekající jízdy</div>
+                <h2>Jízdy vyžadující pozornost (${pendingCount})</h2>
+                <div class="muted">Tyto jízdy nemají doručený tachometr z auta nebo čekají na zařazení (služební / soukromá). Zde je můžete jednotlivě zařadit, dopočítat podle GPS nebo zahodit.</div>
+              </div>
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <button id="tab-process-pending-btn" style="padding:8px 14px; font-weight:600; border-radius:8px; background:var(--primary-color); color:var(--text-primary-color,#fff); border:0; cursor:pointer;">⚡ Dopočítat všechny podle GPS</button>
+              </div>
+            </div>
+            ${pendingTrips.length === 0 ? `<div style="padding:24px 0; text-align:center;" class="muted">Všechny jízdy jsou zařazené a mají platné kilometry. Žádné jízdy nečekají.</div>` : ""}
+            ${this._pendingTripsTable(pendingTrips)}
+          </section>
+        </div>` : ""}
         ${this._activeTab === "history" ? `<div class="history-view">
           <section class="card daily-trips">
             <div class="history-heading">
@@ -1483,6 +1724,22 @@ class KnihaJizdPanel extends HTMLElement {
             <article class="card"><div class="muted">Služební</div><div class="metric">${this._number(selectedDay.business_km || 0)} km</div><small>${this._text(selectedDay.business_trips, "0")} jízd</small></article>
             <article class="card"><div class="muted">Soukromé</div><div class="metric">${this._number(selectedDay.private_km || 0)} km</div><small>${this._text(selectedDay.private_trips, "0")} jízd</small></article>
             <article class="card"><div class="muted">K revizi</div><div class="metric">${this._text(selectedDay.review_trips, "0")}</div><small>nezapočteno do typu</small></article>
+          </section>
+          <section class="card odometer-entry-card" style="margin-bottom:16px; border-left:4px solid var(--primary-color);">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+              <div>
+                <h3 style="margin:0 0 4px; font-size:16px;">Kalibrace tachometru pro vybraný den (${this._text(this._historyDateLabel(this._historyDate))})</h3>
+                <div class="muted" style="font-size:13px;">
+                  Zadejte koncový stav tachometru pro tento den nebo skutečný počet ujetých km pro proporcionální rozpočtení mezi segmenty.
+                </div>
+              </div>
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <input id="history-odometer-input" type="number" step="any" min="0" placeholder="Koncový stav tachometru" style="width:190px; padding:8px 10px; border:1px solid var(--divider-color); border-radius:8px; background:var(--card-background-color); color:var(--primary-text-color);">
+                <button id="history-set-odometer-btn" style="padding:8px 14px; font-weight:600; border-radius:8px; background:var(--primary-color); color:var(--text-primary-color, #fff); border:0; cursor:pointer;">Uložit stav</button>
+                <input id="history-daily-input" type="number" step="any" min="0" placeholder="Ujeto v tento den (km)" style="width:160px; padding:8px 10px; border:1px solid var(--divider-color); border-radius:8px; background:var(--card-background-color); color:var(--primary-text-color);">
+                <button id="history-set-daily-btn" style="padding:8px 14px; font-weight:600; border-radius:8px; background:color-mix(in srgb,var(--primary-color) 80%,var(--primary-background-color)); color:var(--text-primary-color, #fff); border:0; cursor:pointer;">Rozpočítat den</button>
+              </div>
+            </div>
           </section>
           <section class="card daily-trips"><h2>Jízdy vybraného dne</h2>
             <div class="muted">Historické záznamy lze opravit stejně jako dnešní jízdy.</div>
@@ -1539,6 +1796,36 @@ class KnihaJizdPanel extends HTMLElement {
     this.shadowRoot.getElementById("manual-end-trip-btn")?.addEventListener("click", (event) => this._manualEndTrip(event.currentTarget));
     this.shadowRoot.getElementById("set-odometer-btn")?.addEventListener("click", (event) => this._setManualOdometer(event.currentTarget));
     this.shadowRoot.getElementById("set-daily-btn")?.addEventListener("click", (event) => this._setManualDailyKm(event.currentTarget));
+    this.shadowRoot.getElementById("history-set-odometer-btn")?.addEventListener("click", (event) => this._setManualOdometerHistory(event.currentTarget));
+    this.shadowRoot.getElementById("history-set-daily-btn")?.addEventListener("click", (event) => this._setManualDailyHistory(event.currentTarget));
+    this.shadowRoot.getElementById("metric-odometer-card")?.addEventListener("click", () => {
+      const section = this.shadowRoot.getElementById("odometer-section");
+      if (section) {
+        section.scrollIntoView({ behavior: "smooth", block: "center" });
+        this.shadowRoot.getElementById("manual-odometer-input")?.focus();
+      }
+    });
+    this.shadowRoot.getElementById("metric-attention-card")?.addEventListener("click", () => {
+      this._selectTab("attention");
+    });
+    this.shadowRoot.getElementById("overview-goto-attention-btn")?.addEventListener("click", () => {
+      this._selectTab("attention");
+    });
+    this.shadowRoot.getElementById("overview-process-pending-btn")?.addEventListener("click", (event) => {
+      this._processAllPendingTrips(event.currentTarget);
+    });
+    this.shadowRoot.getElementById("tab-process-pending-btn")?.addEventListener("click", (event) => {
+      this._processAllPendingTrips(event.currentTarget);
+    });
+    this.shadowRoot.querySelectorAll(".resolve-trip-inline").forEach((button) => {
+      button.addEventListener("click", () => this._resolveTripInline(button));
+    });
+    this.shadowRoot.querySelectorAll(".process-single-pending-btn").forEach((button) => {
+      button.addEventListener("click", () => this._processAllPendingTrips(button));
+    });
+    this.shadowRoot.querySelectorAll(".discard-trip-btn").forEach((button) => {
+      button.addEventListener("click", () => this._discardTrip(button));
+    });
     this.shadowRoot.querySelectorAll(".save-trip").forEach((button) => {
       button.addEventListener("click", () => this._saveTrip(button));
     });

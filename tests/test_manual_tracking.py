@@ -134,6 +134,7 @@ class ManualTrackingModeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.hass.states.get.return_value = None
         self.hass.services.has_service.return_value = True
+        self.hass.services.async_call = AsyncMock()
         self.hass.bus.async_listen.return_value = lambda: None
         self.hass.async_create_task = lambda coro, name=None: asyncio.create_task(coro)
 
@@ -344,6 +345,113 @@ class ManualTrackingModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 2)
         total_reconciled = sum(row["distance_km"] for row in rows)
         self.assertEqual(total_reconciled, 60)
+
+    async def test_pending_trips_diagnostics_and_attention_count(self) -> None:
+        """Unfinished segments across any date must be visible in pending_trips diagnostics."""
+        manager = self._create_manager("manual_calculated", initial_odometer=100000.0)
+        await manager.async_start()
+
+        # Simulate stuck segment from a past date waiting in _closing
+        stuck_seg_1 = {
+            "id": "stuck-1",
+            "date": "2026-10-15",
+            "started_at": "2026-10-15T08:00:00+02:00",
+            "ended_at": "2026-10-15T08:30:00+02:00",
+            "start_address": "Praha",
+            "end_address": "Benešov",
+            "start_latitude": 50.08,
+            "start_longitude": 14.43,
+            "end_latitude": 49.78,
+            "end_longitude": 14.69,
+            "start_odometer_km": 100000.0,
+            "end_odometer_km": None,
+            "distance_km": None,
+            "odometer_ready": False,
+            "trip_type": "unclassified",
+            "purpose": None,
+        }
+        # Simulate segment waiting for classification in _pending
+        stuck_seg_2 = {
+            "id": "stuck-2",
+            "date": "2026-10-20",
+            "started_at": "2026-10-20T10:00:00+02:00",
+            "ended_at": "2026-10-20T10:45:00+02:00",
+            "start_address": "Benešov",
+            "end_address": "Tábor",
+            "start_latitude": 49.78,
+            "start_longitude": 14.69,
+            "end_latitude": 49.41,
+            "end_longitude": 14.66,
+            "start_odometer_km": 100040.0,
+            "end_odometer_km": 100085.0,
+            "distance_km": 45,
+            "odometer_ready": True,
+            "trip_type": "unclassified",
+            "purpose": None,
+        }
+        manager._closing["stuck-1"] = stuck_seg_1
+        manager._pending["stuck-2"] = stuck_seg_2
+
+        diag = manager.diagnostics
+        self.assertEqual(diag["attention_count"], 2)
+        pending = diag["pending_trips"]
+        self.assertEqual(len(pending), 2)
+        ids = {p["id"] for p in pending}
+        self.assertEqual(ids, {"stuck-1", "stuck-2"})
+
+    async def test_process_pending_trips_resolves_stuck_trips(self) -> None:
+        """async_process_pending_trips calculates distance and marks segments odometer_ready."""
+        manager = self._create_manager("manual_calculated", initial_odometer=100000.0)
+        await manager.async_start()
+
+        # Add a stuck segment with GPS coordinates but no distance/odometer
+        manager._closing["stuck-trip"] = {
+            "id": "stuck-trip",
+            "date": "2026-10-15",
+            "started_at": "2026-10-15T08:00:00+02:00",
+            "ended_at": "2026-10-15T08:30:00+02:00",
+            "start_address": "Praha",
+            "end_address": "Průhonice",
+            "start_latitude": 50.0755,
+            "start_longitude": 14.4378,
+            "end_latitude": 50.0012,
+            "end_longitude": 14.5612,
+            "start_odometer_km": 100000.0,
+            "end_odometer_km": None,
+            "distance_km": None,
+            "odometer_ready": False,
+            "trip_type": "unclassified",
+            "purpose": None,
+        }
+
+        result = await manager.async_process_pending_trips()
+        self.assertEqual(result["status"], "processed")
+        self.assertEqual(result["processed_count"], 1)
+
+        seg = manager._find_runtime_segment("stuck-trip")
+        self.assertIsNotNone(seg)
+        self.assertTrue(seg["odometer_ready"])
+        self.assertGreater(seg["distance_km"], 10)
+        self.assertIsNotNone(seg["end_odometer_km"])
+
+    async def test_discard_trip(self) -> None:
+        """async_discard_trip removes unwanted/phantom trips from runtime."""
+        manager = self._create_manager("manual_calculated", initial_odometer=100000.0)
+        await manager.async_start()
+
+        manager._closing["phantom-1"] = {"id": "phantom-1"}
+        manager._pending["phantom-2"] = {"id": "phantom-2"}
+
+        res1 = await manager.async_discard_trip("phantom-1")
+        self.assertEqual(res1["status"], "discarded")
+        self.assertNotIn("phantom-1", manager._closing)
+
+        res2 = await manager.async_discard_trip("phantom-2")
+        self.assertEqual(res2["status"], "discarded")
+        self.assertNotIn("phantom-2", manager._pending)
+
+        res3 = await manager.async_discard_trip("non-existent")
+        self.assertEqual(res3["status"], "not_found")
 
 
 if __name__ == "__main__":
