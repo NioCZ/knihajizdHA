@@ -7,7 +7,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from openpyxl import load_workbook
+try:
+    from openpyxl import load_workbook
+except ImportError:
+    load_workbook = None
 
 ROOT = Path(__file__).parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -18,6 +21,7 @@ EXPORT_MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EXPORT_MODULE)
 
 
+@unittest.skipIf(load_workbook is None, "openpyxl not installed")
 class ExportExcelTest(unittest.TestCase):
     """Verify workbook structure and representative aggregations."""
 

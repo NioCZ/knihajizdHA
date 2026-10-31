@@ -789,10 +789,19 @@ def _optional_datetime(value: Any) -> datetime | None:
 def _raw_trusted_odometer_end(segment: dict[str, Any]) -> float | None:
     """Return only a trustworthy raw post-disconnect odometer value."""
     source = str(segment.get("odometer_completion_source") or "")
+    trusted_sources = {
+        "gps_route_calculated",
+        "manual_panel",
+        "manual_entry",
+        "manual_set_odometer",
+    }
     if (
         segment.get("odometer_wait_timed_out")
         or segment.get("odometer_shared_update")
-        or not source.startswith("post_disconnect_update")
+        or not (
+            source.startswith("post_disconnect_update")
+            or source in trusted_sources
+        )
     ):
         return None
     return _optional_float(segment.get("end_odometer_km"))
@@ -1137,7 +1146,7 @@ def reconcile_odometer_day(
                 "distance_reconciliation_source",
                 "awaiting_future_odometer_anchor",
             )
-    check = odometer_day_check(ordered)
+    check = odometer_day_check(ordered, terminal)
     if (
         first_start is not None
         and candidates
@@ -1154,11 +1163,13 @@ def reconcile_odometer_day(
                 boundary_source,
                 "daily_segment_sum_mismatch",
             )
-            check = odometer_day_check(ordered)
+            check = odometer_day_check(ordered, terminal)
     return changed, check
 
 
-def odometer_day_check(segments: list[dict[str, Any]]) -> dict[str, Any]:
+def odometer_day_check(
+    segments: list[dict[str, Any]], terminal_anchor_km: float | None = None
+) -> dict[str, Any]:
     """Compare assigned segment kilometres with the latest trusted day anchor."""
     ordered = sorted(segments, key=lambda item: str(item.get("started_at") or ""))
     first_start = next(
@@ -1177,6 +1188,10 @@ def odometer_day_check(segments: list[dict[str, Any]]) -> dict[str, Any]:
         if boundary is not None:
             last_end = boundary
             last_boundary_index = index
+    terminal = _optional_float(terminal_anchor_km)
+    if terminal is not None and ordered:
+        last_end = terminal
+        last_boundary_index = len(ordered) - 1
     verified_segments = (
         ordered[: last_boundary_index + 1] if last_boundary_index >= 0 else []
     )

@@ -90,6 +90,10 @@ def _load_config_flow():
     selector.NumberSelector = _NumberSelector
     selector.NumberSelectorConfig = lambda **kwargs: kwargs
     selector.NumberSelectorMode = type("NumberSelectorMode", (), {"BOX": "box"})
+    selector.SelectSelector = _Selector
+    selector.SelectSelectorConfig = lambda **kwargs: kwargs
+    selector.SelectOptionDict = lambda **kwargs: kwargs
+    selector.SelectSelectorMode = type("SelectSelectorMode", (), {"DROPDOWN": "dropdown"})
     helpers.selector = selector
     voluptuous = ModuleType("voluptuous")
     voluptuous.Schema = _Schema
@@ -204,6 +208,25 @@ class ConfigFlowTests(unittest.TestCase):
             module.CONF_COMPANY_LONGITUDE,
         ):
             self.assertEqual("", result["data"][key])
+
+    def test_schema_supports_tracking_mode_toggle(self) -> None:
+        """Schema must support toggling between API and manual/calculated mode."""
+        module = _load_config_flow()
+        schema = module._schema({})
+        fields = {marker.schema: marker for marker in schema.schema}
+
+        self.assertIn(module.CONF_TRACKING_MODE, fields)
+        self.assertEqual(module.DEFAULT_TRACKING_MODE, fields[module.CONF_TRACKING_MODE].default)
+        self.assertIn(module.CONF_ROUTING_URL, fields)
+        self.assertIn(module.CONF_ROAD_FACTOR, fields)
+        self.assertIn(module.CONF_INITIAL_ODOMETER, fields)
+
+        custom_schema = module._schema({module.CONF_TRACKING_MODE: module.TRACKING_MODE_MANUAL_CALCULATED})
+        custom_fields = {marker.schema: marker for marker in custom_schema.schema}
+        self.assertEqual(
+            module.TRACKING_MODE_MANUAL_CALCULATED,
+            custom_fields[module.CONF_TRACKING_MODE].default,
+        )
 
 
 if __name__ == "__main__":

@@ -114,3 +114,209 @@ save_trip_place:
       required: false
       selector:
         text:
+start_trip:
+  name: Zahájit jízdu
+  description: Ručně zahájí nový segment jízdy (vhodné pro tlačítka, widgety a režim bez senzorů z auta).
+  fields:
+    start_address:
+      name: Místo odjezdu
+      description: Volitelná textová adresa odjezdu.
+      required: false
+      selector:
+        text:
+    start_latitude:
+      name: Zeměpisná šířka startu
+      required: false
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: any
+          mode: box
+    start_longitude:
+      name: Zeměpisná délka startu
+      required: false
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: any
+          mode: box
+end_trip:
+  name: Ukončit jízdu
+  description: Ručně ukončí probíhající jízdu a v režimu bez senzorů auta ihned vypočte kilometry podle trasy na mapě.
+  fields:
+    end_address:
+      name: Místo příjezdu
+      description: Volitelná textová adresa příjezdu.
+      required: false
+      selector:
+        text:
+    end_latitude:
+      name: Zeměpisná šířka cíle
+      required: false
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: any
+          mode: box
+    end_longitude:
+      name: Zeměpisná délka cíle
+      required: false
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: any
+          mode: box
+add_trip:
+  name: Přidat jízdu
+  description: Ručně vloží dokončenou jízdu do historie. Pokud nejsou zadány km, dopočtou se z mapy/souřadnic.
+  fields:
+    date:
+      name: Datum
+      description: Datum jízdy ve formátu YYYY-MM-DD.
+      required: true
+      example: "2026-10-31"
+      selector:
+        text:
+    trip_type:
+      name: Typ jízdy
+      required: true
+      selector:
+        select:
+          options:
+            - label: Služební
+              value: business
+            - label: Soukromá
+              value: private
+    purpose:
+      name: Účel / zákazník
+      required: false
+      selector:
+        text:
+    start_address:
+      name: Místo odjezdu
+      required: false
+      selector:
+        text:
+    end_address:
+      name: Místo příjezdu
+      required: false
+      selector:
+        text:
+    distance_km:
+      name: Vzdálenost (km)
+      description: Celé kilometry jízdy. Pokud nevyplníte, vypočítá se ze souřadnic.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 5000
+          step: 1
+          unit_of_measurement: km
+    start_time:
+      name: Čas odjezdu
+      description: Čas ve formátu HH:MM.
+      required: false
+      example: "08:00"
+      selector:
+        text:
+    end_time:
+      name: Čas příjezdu
+      description: Čas ve formátu HH:MM.
+      required: false
+      example: "08:45"
+      selector:
+        text:
+    start_latitude:
+      name: Zeměpisná šířka startu
+      required: false
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: any
+          mode: box
+    start_longitude:
+      name: Zeměpisná délka startu
+      required: false
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: any
+          mode: box
+    end_latitude:
+      name: Zeměpisná šířka cíle
+      required: false
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: any
+          mode: box
+    end_longitude:
+      name: Zeměpisná délka cíle
+      required: false
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: any
+          mode: box
+set_odometer:
+  name: Zadat stav tachometru a rozpočítat km
+  description: Zapíše stav tachometru auta nebo denní nájezd a rozpočítá kilometry mezi jízdy dne podle jejich mapových vah.
+  fields:
+    odometer_km:
+      name: Stav tachometru (km)
+      description: Absolutní stav tachometru z palubní desky auta v km.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: any
+          unit_of_measurement: km
+          mode: box
+    daily_km:
+      name: Denní nájezd (km)
+      description: Alternativně celkový počet km ujetých za daný den.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 5000
+          step: any
+          unit_of_measurement: km
+          mode: box
+    date:
+      name: Datum
+      description: Datum ve formátu YYYY-MM-DD (výchozí je dnešek).
+      required: false
+      example: "2026-10-31"
+      selector:
+        text:
+reconcile_day:
+  name: Přepočítat denní rozdělení km
+  description: Znovu rozpočítá kilometry zvoleného dne podle mapových vah segmentů.
+  fields:
+    date:
+      name: Datum
+      description: Datum ve formátu YYYY-MM-DD.
+      required: false
+      example: "2026-10-31"
+      selector:
+        text:
+    odometer_km:
+      name: Cílový konečný stav tachometru
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: any
+          unit_of_measurement: km
+          mode: box

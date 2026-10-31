@@ -1,9 +1,29 @@
 # Kniha jízd pro Home Assistant
 
-Vlastní integrace sleduje jednotlivé úseky jízdy podle připojení Android Auto,
-počká na opožděnou cloudovou aktualizaci tachometru, rozpozná známý cíl a umí
+Vlastní integrace sleduje jednotlivé úseky jízdy podle připojení Android Auto (nebo ručního spouštění),
+vypočítává a eviduje ujeté kilometry, rozpozná známý cíl a umí
 vytvořit dvoulistý Excel report. Nejasné jízdy lze vyřešit přímo v panelu;
 telefon dostává jen otázky, u kterých má rychlá odpověď skutečný význam.
+
+Integrace podporuje dva provozní režimy:
+1. **S cloudovým API auta (`api`)** – původní režim se senzorem tachometru z auta (např. Škoda Connect / MyŠkoda, VW We Connect).
+2. **Bez senzorů z auta (`manual_calculated`)** – nezávislý režim bez potřeby API automobilky. Kilometry se počítají automaticky z GPS souřadnic přes silniční směrování (OSRM routing), eviduje se virtuální tachometr a kdykoliv lze zadat skutečný stav tachometru z palubní desky, přičemž integrace ujeté km spravedlivě rozpočítá na jednotlivé jízdy. Mezi oběma režimy lze kdykoliv přepínat v nastavení integrace.
+
+## Provozní režimy
+
+### 1. Režim bez senzorů z auta (`manual_calculated`)
+Určeno pro situace, kdy automobilka zrušila nebo omezila přístup k API, nebo když auto není připojeno k internetu.
+- **Jak se detekuje jízda**: Pomocí senzoru připojení mobilu k autu (např. Android Auto `binary_sensor.android_auto`, Bluetooth v autě, či Wi-Fi hotspot auta) nebo ručně tlačítky v panelu / službami z Home Assistant dashboardu.
+- **Jak se počítají kilometry**: Při ukončení jízdy integrace dotáže silniční OSRM směrovací službu (`http://router.project-osrm.org/route/v1/driving/...` nebo váš lokální OSRM server). Pokud není OSRM dostupné, použije se ortodroma (Haversine vzorec) vynásobená koeficientem zakřivení silnic (`road_factor`, výchozí 1.27x).
+- **Virtuální tachometr**: Integrace udržuje vlastní průběžný stav počitadla kilometrů (`virtual_odometer_km`), který začíná od hodnoty `initial_odometer` (např. 120 000 km) a po každé jízdě se automaticky navýší.
+- **Rozpočítání a kalibrace z palubní desky (Hare-Niemeyer)**: Kdykoliv se podíváte na palubní desku auta, můžete v panelu nebo přes službu zadat skutečný stav tachometru (nebo celkový počet km ujetých za daný den). Integrace porovná celkový součet s ujetými trasami a pomocí Hare-Niemeyerovy metody největších zbytků proporcionálně rozpočítá celá čísla kilometrů na jednotlivé jízdy tak, aby celkový součet přesně odpovídal stavu na autě.
+
+### 2. Režim se senzory auta (`api`)
+Původní režim s cloudovým API:
+- Vyžaduje nakonfigurovaný senzor tachometru (`sensor.skoda_odometer` apod.).
+- Integrace po jízdě čeká na doručení nového stavu z cloudu a zaznamenává fyzické stavy tachometru.
+
+Režim lze kdykoliv změnit v **Nastavení → Zařízení a služby → Kniha jízd → Konfigurovat**.
 
 ## Instalace
 
@@ -323,6 +343,67 @@ data:
 
 Místo `save` lze použít `skip`, které místo neuloží.
 
+### Nové služby pro ruční správu jízd a tachometru
+
+Pro provoz bez senzorů z auta (i pro pohodlné ruční ovládání z dashboardu) jsou k dispozici následující akce:
+
+#### 1. Zahájení a ukončení jízdy ručně (`start_trip` a `end_trip`)
+Pokud nemáte v autě senzor Android Auto ani Bluetooth, můžete jízdu spustit a ukončit ručně tlačítkem na dashboardu nebo v panelu Knihy jízd:
+
+```yaml
+action: kniha_jizd.start_trip
+```
+
+```yaml
+action: kniha_jizd.end_trip
+```
+
+Při ukončení jízdy se automaticky změří poloha, spočítá silniční trasa přes OSRM a navýší virtuální tachometr.
+
+#### 2. Ruční zadání celé jízdy (`add_trip`)
+Umožňuje zpětně zaevidovat jízdu z minulosti nebo jízdu jiným vozidlem:
+
+```yaml
+action: kniha_jizd.add_trip
+data:
+  date: "2026-10-31"
+  start_address: "Praha, Wilsonova"
+  end_address: "Kladno, Náměstí Starosty Pavla"
+  purpose: "Obchodní schůzka"
+  trip_type: business
+  distance_km: 32 # Volitelné, pokud nezadáte, spočítá se z mapy/souřadnic
+```
+
+#### 3. Zápis stavu tachometru z palubní desky a kalibrace (`set_odometer`)
+Kdykoliv se podíváte na palubní desku auta a chcete srovnat virtuální tachometr s realitou:
+
+```yaml
+action: kniha_jizd.set_odometer
+data:
+  odometer_km: 125480.0
+  date: "2026-10-31" # Volitelné, výchozí je dnešní den
+```
+
+Pokud neznáte celkový stav tachometru, ale víte, kolik km jste daný den celkem ujeli:
+
+```yaml
+action: kniha_jizd.set_odometer
+data:
+  daily_km: 115.0
+```
+
+Integrace nastaví virtuální tachometr a automaticky metodou největších zbytků (Hare-Niemeyer) rozpočítá celá čísla kilometrů mezi jízdy daného dne.
+
+#### 4. Ruční spuštění rozpočítání dne (`reconcile_day`)
+Spustí přepočet a kontrolu kilometrů pro zadaný den:
+
+```yaml
+action: kniha_jizd.reconcile_day
+data:
+  date: "2026-10-31"
+  terminal_anchor_km: 125480.0 # Volitelné
+```
+
 ### Mapa míst a zón
 
 Záložka **Mapa míst** v administračním panelu načítá přes přihlášené HA API:
@@ -495,3 +576,31 @@ nahradit vlastními službami.
 Souřadnice neznámého startu/cíle jsou při lookupu odeslány z HA na zvolený
 Nominatim endpoint; souřadnice neznámého cíle také na zvolený Overpass endpoint.
 Do Excelu se ukládá atribuce OpenStreetMap, je-li mapové hledání použito.
+
+## Alternativní řešení při výpadku API automobilky (např. Škoda Auto API)
+
+Vzhledem k tomu, že výrobci automobilů (jako Škoda Auto / Volkswagen Group) často mění podmínky cloudového přístupu, zpoplatňují API nebo ukončují podporu starších verzí aplikací, existuje několik spolehlivých hardwarových i softwarových alternativ pro automatické získávání dat z auta:
+
+### 1. Režim Knihy jízd bez senzorů (`manual_calculated`) – doporučené řešení bez investic
+- **Výhody**: 100% nezávislé na automobilce, žádné předplatné, žádný nový hardware.
+- **Jak to funguje**: Jízda se detekuje podle připojení telefonu k autu (Android Auto, Apple CarPlay, Bluetooth handsfree nebo Wi-Fi hotspot auta).
+- Kilometry se automaticky dopočítávají přes silniční směrování OSRM podle projetých souřadnic.
+- Jednou za čas (nebo na konci dne) stačí v panelu Knihy jízd zadat skutečný stav z tachometru na palubní desce a integrace kilometry přesně rozpočítá na jednotlivé jízdy.
+
+### 2. OBD-II adaptér s ESP32 / ESPHome (Lokální řešení bez cloudu)
+- **Princip**: Do diagnostické zásuvky OBD-II v autě (nachází se obvykle pod volantem) se zapojí malý adaptér s čipem ESP32 a CAN transceiverem (např. deska LilyGO T-CAN485 nebo standardní ELM327 s ESPHome).
+- **Jak to funguje v Home Assistantu**:
+  - Když zapnete zapalování, ESP32 se zapne a připojí k Wi-Fi (např. domácí Wi-Fi při parkování nebo hotspotu z mobilu).
+  - Přes standardní PID dotazy na CAN sběrnici přečte přesný stav počitadla kilometrů (`Odometer`) přímo z řídicí jednotky auta.
+  - ESPHome předává hodnotu do Home Assistantu jako standardní senzor `sensor.car_odometer`.
+- **Výhody**: Absolutní soukromí, žádné poplatky, 100% spolehlivost a přesná čísla přímo z palubní desky.
+
+### 3. Tronity (Nezávislá evropská telematická platforma)
+- **Web**: [tronity.io](https://www.tronity.io/)
+- **Podpora v HA**: Existuje oficiální integrace Tronity v Home Assistantu.
+- **Jak funguje**: Tronity má přímé napojení na servery většiny automobilek v Evropě (včetně VAG, Škoda, Audi, BMW, Tesla apod.) a poskytuje stabilní API i pro auta, kde původní mobilní aplikace přestala fungovat.
+
+### 4. Hardwarová telemetrie (AutoPi / Freematics / Teltonika)
+- **Princip**: Samostatná telematická krabička s vlastním GPS modulem, LTE SIM kartou a OBD-II konektorem.
+- **Integrace s HA**: Posílá GPS polohu i reálné kilometry přímo do Home Assistantu přes MQTT nebo webhooky.
+- **Využití**: Vhodné zejména pro firemní vozové parky nebo náročné uživatele vyžadující telemetrii i při vypnutém motoru.

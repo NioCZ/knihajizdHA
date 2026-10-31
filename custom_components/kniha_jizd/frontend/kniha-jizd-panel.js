@@ -339,6 +339,78 @@ class KnihaJizdPanel extends HTMLElement {
     });
   }
 
+  async _manualStartTrip(button) {
+    if (!this._hass) return;
+    button.disabled = true;
+    try {
+      await this._hass.callService("kniha_jizd", "start_trip", {});
+      this._message = "Jízda zahájena.";
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při zahájení jízdy: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async _manualEndTrip(button) {
+    if (!this._hass) return;
+    button.disabled = true;
+    try {
+      await this._hass.callService("kniha_jizd", "end_trip", {});
+      this._message = "Jízda ukončena a kilometry vypočteny.";
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při ukončení jízdy: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async _setManualOdometer(button) {
+    if (!this._hass) return;
+    const input = this.shadowRoot.getElementById("manual-odometer-input");
+    const val = input ? parseFloat(input.value) : null;
+    if (val === null || isNaN(val) || val < 0) return;
+    button.disabled = true;
+    try {
+      await this._hass.callService("kniha_jizd", "set_odometer", {
+        odometer_km: val,
+      });
+      this._message = `Tachometr nastaven na ${val} km a den přepočten.`;
+      if (input) input.value = "";
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při zápisu tachometru: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async _setManualDailyKm(button) {
+    if (!this._hass) return;
+    const input = this.shadowRoot.getElementById("manual-daily-input");
+    const val = input ? parseFloat(input.value) : null;
+    if (val === null || isNaN(val) || val < 0) return;
+    button.disabled = true;
+    try {
+      await this._hass.callService("kniha_jizd", "set_odometer", {
+        daily_km: val,
+      });
+      this._message = `Denní nájezd ${val} km rozpočten mezi segmenty.`;
+      if (input) input.value = "";
+      await this._loadOverviewData();
+    } catch (err) {
+      this._message = `Chyba při rozpočtu dne: ${err?.message || err}`;
+      this._requestRender();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   async _saveTrip(button) {
     if (!this._hass || this._savingTrip) return;
     const row = button.closest("tr");
@@ -1089,10 +1161,13 @@ class KnihaJizdPanel extends HTMLElement {
     const expiresAt = Date.parse(exportData.expires_at || "");
     const downloadUrl = rawDownloadUrl && expiresAt > Date.now() ? rawDownloadUrl : null;
     const downloadFilename = exportData.filename || "kniha_jizd.xlsx";
+    const isManualGps = attrs.tracking_mode === "manual_calculated";
     const gpsDetail = attrs.gps_ok
       ? `${attrs.gps_entity}: ${attrs.latitude}, ${attrs.longitude} · ${attrs.gps_coordinate_source}`
       : `${attrs.gps_entity}: stav ${attrs.gps_state ?? "—"} · souřadnice nenalezeny ani v ${attrs.address_entity}`;
-    const odometerDetail = attrs.odometer_ok
+    const odometerDetail = isManualGps
+      ? `Virtuální tachometr: ${attrs.virtual_odometer_km ?? attrs.odometer_km ?? "0"} km · režim bez senzorů (GPS/routing)`
+      : attrs.odometer_ok
       ? `${attrs.odometer_entity}: ${attrs.odometer_km} km · ${attrs.odometer_value_source}`
       : `${attrs.odometer_entity}: stav ${attrs.odometer_state ?? "—"} · číselná hodnota nenalezena`;
 
@@ -1286,8 +1361,17 @@ class KnihaJizdPanel extends HTMLElement {
         }
       </style>
       <main>
-        <header><div><h1>Kniha jízd</h1><div class="muted title-subtitle">Jízdy, historie a reporty na jednom místě</div></div>
-          <span class="pill ${readyValue ? "ready" : "error"}">${readyValue ? this._statusLabel(statusValue) : "Vstupy nejsou připravené"}</span>
+        <header>
+          <div>
+            <h1>Kniha jízd</h1>
+            <div class="muted title-subtitle">Jízdy, historie a reporty na jednom místě · ${isManualGps ? "Režim: Bez senzorů auta (GPS a ruční zápis)" : "Režim: API senzor z auta"}</div>
+          </div>
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            ${attrs.active_segment_id
+              ? '<button id="manual-end-trip-btn" class="button" style="background:var(--error-color,#c62828); padding:8px 14px; font-size:13px;">Ukončit jízdu</button>'
+              : '<button id="manual-start-trip-btn" class="button" style="background:var(--success-color,#2e7d32); padding:8px 14px; font-size:13px;">Zahájit jízdu</button>'}
+            <span class="pill ${readyValue ? "ready" : "error"}">${readyValue ? this._statusLabel(statusValue) : "Vstupy nejsou připravené"}</span>
+          </div>
         </header>
         <nav class="tabs" aria-label="Části panelu">
           <button class="tab ${this._activeTab === "overview" ? "active" : ""}" data-tab="overview">Přehled</button>
@@ -1301,6 +1385,24 @@ class KnihaJizdPanel extends HTMLElement {
         <section class="card daily-trips primary-section">
           <div class="section-titlebar"><div><div class="section-kicker">Hlavní přehled</div><h2>Dnešní jízdy</h2><div class="muted">Jízdy můžete přímo opravit a uložit. Zákazník je u služební jízdy volitelný.</div></div><span class="pill">${this._text(todayTripsValue, "0")} jízd</span></div>
           ${this._tripTable(todayTripRows, "Dnes zatím není zaznamenána žádná jízda.", "overview-trips")}
+        </section>
+        <section class="card odometer-entry-card" style="margin-bottom:16px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h3 style="margin:0 0 4px; font-size:16px;">Zápis stavu tachometru a rozpočítání km</h3>
+              <div class="muted" style="font-size:13px;">
+                ${isManualGps
+                  ? `Virtuální tachometr: <strong>${this._number(attrs.virtual_odometer_km ?? attrs.odometer_km)} km</strong> · zadejte stav z auta pro rozpočítání celého dne.`
+                  : `Tachometr: <strong>${this._number(attrs.odometer_km)} km</strong> · zadejte stav pro přepočet a kontrolu dne.`}
+              </div>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <input id="manual-odometer-input" type="number" step="any" min="0" placeholder="Stav tachometru (km)" style="width:175px; padding:8px 10px; border:1px solid var(--divider-color); border-radius:8px; background:var(--card-background-color); color:var(--primary-text-color);">
+              <button id="set-odometer-btn" style="padding:8px 14px; font-weight:600; border-radius:8px; background:var(--primary-color); color:var(--text-primary-color, #fff); border:0; cursor:pointer;">Uložit stav</button>
+              <input id="manual-daily-input" type="number" step="any" min="0" placeholder="Ujeto dnes (km)" style="width:145px; padding:8px 10px; border:1px solid var(--divider-color); border-radius:8px; background:var(--card-background-color); color:var(--primary-text-color);">
+              <button id="set-daily-btn" style="padding:8px 14px; font-weight:600; border-radius:8px; background:color-mix(in srgb,var(--primary-color) 80%,var(--primary-background-color)); color:var(--text-primary-color, #fff); border:0; cursor:pointer;">Rozpočítat den</button>
+            </div>
+          </div>
         </section>
         ${this._questionCards(todayTripRows)}
         ${this._placeQuestionCards(attrs.place_questions || todayTripRows)}
@@ -1433,6 +1535,10 @@ class KnihaJizdPanel extends HTMLElement {
       if (event.target.value) this._month = event.target.value;
     });
     this.shadowRoot.getElementById("export")?.addEventListener("click", () => this._exportExcel());
+    this.shadowRoot.getElementById("manual-start-trip-btn")?.addEventListener("click", (event) => this._manualStartTrip(event.currentTarget));
+    this.shadowRoot.getElementById("manual-end-trip-btn")?.addEventListener("click", (event) => this._manualEndTrip(event.currentTarget));
+    this.shadowRoot.getElementById("set-odometer-btn")?.addEventListener("click", (event) => this._setManualOdometer(event.currentTarget));
+    this.shadowRoot.getElementById("set-daily-btn")?.addEventListener("click", (event) => this._setManualDailyKm(event.currentTarget));
     this.shadowRoot.querySelectorAll(".save-trip").forEach((button) => {
       button.addEventListener("click", () => this._saveTrip(button));
     });

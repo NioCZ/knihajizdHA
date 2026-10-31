@@ -19,13 +19,22 @@ from homeassistant.util import dt as dt_util
 from .const import (
     ATTR_ACTION,
     ATTR_CANDIDATE_INDEX,
+    ATTR_DAILY_KM,
+    ATTR_DATE,
     ATTR_DISTANCE_KM,
     ATTR_END_ADDRESS,
+    ATTR_END_LATITUDE,
+    ATTR_END_LONGITUDE,
+    ATTR_END_TIME,
     ATTR_MONTH,
+    ATTR_ODOMETER_KM,
     ATTR_PATH,
     ATTR_PURPOSE,
     ATTR_SEGMENT_ID,
     ATTR_START_ADDRESS,
+    ATTR_START_LATITUDE,
+    ATTR_START_LONGITUDE,
+    ATTR_START_TIME,
     ATTR_TRIP_TYPE,
     ATTR_VALUE,
     CONF_COMPANY_ADDRESS,
@@ -38,6 +47,7 @@ from .const import (
     CONF_HOME_LATITUDE,
     CONF_HOME_LONGITUDE,
     CONF_HOME_RADIUS,
+    CONF_INITIAL_ODOMETER,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_LOCATION_SETTLE_SECONDS,
     CONF_NOMINATIM_EMAIL,
@@ -49,6 +59,9 @@ from .const import (
     CONF_PRIVATE_RADIUS,
     CONF_RELEVANCE_KEYWORDS,
     CONF_RETURN_CONTEXT_HOURS,
+    CONF_ROAD_FACTOR,
+    CONF_ROUTING_URL,
+    CONF_TRACKING_MODE,
     CONF_TRANSIENT_STOP_MINUTES,
     CONF_TRANSIENT_RADIUS,
     DEFAULT_COMPANY_ADDRESS,
@@ -62,6 +75,7 @@ from .const import (
     DEFAULT_HOME_LATITUDE,
     DEFAULT_HOME_LONGITUDE,
     DEFAULT_HOME_RADIUS,
+    DEFAULT_INITIAL_ODOMETER,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_LOCATION_SETTLE_SECONDS,
     DEFAULT_OVERPASS_URL,
@@ -70,12 +84,20 @@ from .const import (
     DEFAULT_PRIVATE_RADIUS,
     DEFAULT_RELEVANCE_KEYWORDS,
     DEFAULT_RETURN_CONTEXT_HOURS,
+    DEFAULT_ROAD_FACTOR,
+    DEFAULT_ROUTING_URL,
+    DEFAULT_TRACKING_MODE,
     DEFAULT_TRANSIENT_STOP_MINUTES,
     DEFAULT_TRANSIENT_RADIUS,
     DOMAIN,
+    SERVICE_ADD_TRIP,
+    SERVICE_END_TRIP,
     SERVICE_EXPORT_EXCEL,
+    SERVICE_RECONCILE_DAY,
     SERVICE_RESOLVE_TRIP,
     SERVICE_SAVE_TRIP_PLACE,
+    SERVICE_SET_ODOMETER,
+    SERVICE_START_TRIP,
     SERVICE_UPDATE_TRIP,
 )
 from .export import export_excel
@@ -83,6 +105,7 @@ from .geocoding import NominatimGeocoder
 from .manager import KnihaJizdManager
 from .nearby_search import NearbyInstitutionSearcher
 from .panel import async_register_panel, async_unregister_panel
+from .routing import OsrmRoutingService
 from .storage import KnihaJizdRepository
 
 _LOGGER = logging.getLogger(__name__)
@@ -126,6 +149,65 @@ SAVE_TRIP_PLACE_SERVICE_SCHEMA = vol.Schema(
             vol.In(["save", "skip"]),
         ),
         vol.Optional(ATTR_VALUE, default=""): str,
+    }
+)
+START_TRIP_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_START_ADDRESS): str,
+        vol.Optional(ATTR_START_LATITUDE): vol.All(
+            vol.Coerce(float), vol.Range(min=-90, max=90)
+        ),
+        vol.Optional(ATTR_START_LONGITUDE): vol.All(
+            vol.Coerce(float), vol.Range(min=-180, max=180)
+        ),
+    }
+)
+END_TRIP_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_END_ADDRESS): str,
+        vol.Optional(ATTR_END_LATITUDE): vol.All(
+            vol.Coerce(float), vol.Range(min=-90, max=90)
+        ),
+        vol.Optional(ATTR_END_LONGITUDE): vol.All(
+            vol.Coerce(float), vol.Range(min=-180, max=180)
+        ),
+    }
+)
+ADD_TRIP_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_DATE): vol.Match(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$"),
+        vol.Required(ATTR_TRIP_TYPE): vol.In(["business", "private"]),
+        vol.Optional(ATTR_PURPOSE, default=""): str,
+        vol.Optional(ATTR_START_ADDRESS, default=""): str,
+        vol.Optional(ATTR_END_ADDRESS, default=""): str,
+        vol.Optional(ATTR_DISTANCE_KM): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional(ATTR_START_TIME): vol.Match(r"^(?:[01]\d|2[0-3]):[0-5]\d$"),
+        vol.Optional(ATTR_END_TIME): vol.Match(r"^(?:[01]\d|2[0-3]):[0-5]\d$"),
+        vol.Optional(ATTR_START_LATITUDE): vol.All(
+            vol.Coerce(float), vol.Range(min=-90, max=90)
+        ),
+        vol.Optional(ATTR_START_LONGITUDE): vol.All(
+            vol.Coerce(float), vol.Range(min=-180, max=180)
+        ),
+        vol.Optional(ATTR_END_LATITUDE): vol.All(
+            vol.Coerce(float), vol.Range(min=-90, max=90)
+        ),
+        vol.Optional(ATTR_END_LONGITUDE): vol.All(
+            vol.Coerce(float), vol.Range(min=-180, max=180)
+        ),
+    }
+)
+SET_ODOMETER_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ODOMETER_KM): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional(ATTR_DAILY_KM): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional(ATTR_DATE): vol.Match(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$"),
+    }
+)
+RECONCILE_DAY_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_DATE): vol.Match(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$"),
+        vol.Optional(ATTR_ODOMETER_KM): vol.All(vol.Coerce(float), vol.Range(min=0)),
     }
 )
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
@@ -263,6 +345,109 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         schema=SAVE_TRIP_PLACE_SERVICE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
+
+    async def _async_start_trip_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_start_trip(
+                call.data.get(ATTR_START_ADDRESS),
+                call.data.get(ATTR_START_LATITUDE),
+                call.data.get(ATTR_START_LONGITUDE),
+            )
+        except (ValueError, TypeError) as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_START_TRIP,
+        _async_start_trip_service,
+        schema=START_TRIP_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_end_trip_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_end_trip(
+                call.data.get(ATTR_END_ADDRESS),
+                call.data.get(ATTR_END_LATITUDE),
+                call.data.get(ATTR_END_LONGITUDE),
+            )
+        except (ValueError, TypeError) as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_END_TRIP,
+        _async_end_trip_service,
+        schema=END_TRIP_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_add_trip_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_add_trip(
+                str(call.data[ATTR_DATE]),
+                str(call.data[ATTR_TRIP_TYPE]),
+                str(call.data.get(ATTR_PURPOSE, "")),
+                str(call.data.get(ATTR_START_ADDRESS, "")),
+                str(call.data.get(ATTR_END_ADDRESS, "")),
+                call.data.get(ATTR_DISTANCE_KM),
+                call.data.get(ATTR_START_TIME),
+                call.data.get(ATTR_END_TIME),
+                call.data.get(ATTR_START_LATITUDE),
+                call.data.get(ATTR_START_LONGITUDE),
+                call.data.get(ATTR_END_LATITUDE),
+                call.data.get(ATTR_END_LONGITUDE),
+            )
+        except (ValueError, TypeError) as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ADD_TRIP,
+        _async_add_trip_service,
+        schema=ADD_TRIP_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_set_odometer_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_set_odometer(
+                call.data.get(ATTR_ODOMETER_KM),
+                call.data.get(ATTR_DAILY_KM),
+                call.data.get(ATTR_DATE),
+            )
+        except (ValueError, TypeError) as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_ODOMETER,
+        _async_set_odometer_service,
+        schema=SET_ODOMETER_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _async_reconcile_day_service(call: ServiceCall) -> dict[str, Any]:
+        manager = _get_loaded_manager(hass)
+        try:
+            return await manager.async_reconcile_day(
+                call.data.get(ATTR_DATE),
+                call.data.get(ATTR_ODOMETER_KM),
+            )
+        except (ValueError, TypeError) as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RECONCILE_DAY,
+        _async_reconcile_day_service,
+        schema=RECONCILE_DAY_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     return True
 
 
@@ -307,6 +492,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     merged_config.setdefault(
         CONF_PENDING_REVIEW_HOURS, DEFAULT_PENDING_REVIEW_HOURS
     )
+    merged_config.setdefault(CONF_TRACKING_MODE, DEFAULT_TRACKING_MODE)
+    merged_config.setdefault(CONF_ROUTING_URL, DEFAULT_ROUTING_URL)
+    merged_config.setdefault(CONF_ROAD_FACTOR, DEFAULT_ROAD_FACTOR)
+    merged_config.setdefault(CONF_INITIAL_ODOMETER, DEFAULT_INITIAL_ODOMETER)
     repository = KnihaJizdRepository(hass)
     try:
         await repository.async_initialize()
@@ -326,6 +515,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         str(merged_config[CONF_NOMINATIM_USER_AGENT]),
         str(merged_config[CONF_RELEVANCE_KEYWORDS]),
     )
+    routing_service = OsrmRoutingService(
+        session,
+        str(merged_config.get(CONF_ROUTING_URL, DEFAULT_ROUTING_URL)),
+        float(merged_config.get(CONF_ROAD_FACTOR, DEFAULT_ROAD_FACTOR)),
+    )
     manager = KnihaJizdManager(
         hass,
         entry,
@@ -333,6 +527,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         repository,
         geocoder,
         institution_searcher,
+        routing_service,
     )
     entry.runtime_data = manager
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
@@ -402,6 +597,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         values.setdefault(
             CONF_PENDING_REVIEW_HOURS, DEFAULT_PENDING_REVIEW_HOURS
         )
+        values.setdefault(CONF_TRACKING_MODE, DEFAULT_TRACKING_MODE)
+        values.setdefault(CONF_ROUTING_URL, DEFAULT_ROUTING_URL)
+        values.setdefault(CONF_ROAD_FACTOR, DEFAULT_ROAD_FACTOR)
+        values.setdefault(CONF_INITIAL_ODOMETER, DEFAULT_INITIAL_ODOMETER)
         values.pop(CONF_PLACE_RADIUS, None)
         values.pop("wait_timeout", None)
 

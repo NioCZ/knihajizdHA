@@ -23,6 +23,7 @@ from .const import (
     CONF_HOME_LATITUDE,
     CONF_HOME_LONGITUDE,
     CONF_HOME_RADIUS,
+    CONF_INITIAL_ODOMETER,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_LOCATION_SETTLE_SECONDS,
     CONF_NOMINATIM_EMAIL,
@@ -36,6 +37,9 @@ from .const import (
     CONF_PRIVATE_RADIUS,
     CONF_RELEVANCE_KEYWORDS,
     CONF_RETURN_CONTEXT_HOURS,
+    CONF_ROAD_FACTOR,
+    CONF_ROUTING_URL,
+    CONF_TRACKING_MODE,
     CONF_TRANSIENT_STOP_MINUTES,
     CONF_TRANSIENT_RADIUS,
     CONF_TRIGGER_ENTITY,
@@ -47,6 +51,7 @@ from .const import (
     DEFAULT_GPS_ENTITY,
     DEFAULT_HOME_ADDRESS,
     DEFAULT_HOME_RADIUS,
+    DEFAULT_INITIAL_ODOMETER,
     DEFAULT_INSTITUTION_SEARCH_RADIUS,
     DEFAULT_LOCATION_SETTLE_SECONDS,
     DEFAULT_NOMINATIM_URL,
@@ -58,11 +63,16 @@ from .const import (
     DEFAULT_PRIVATE_RADIUS,
     DEFAULT_RELEVANCE_KEYWORDS,
     DEFAULT_RETURN_CONTEXT_HOURS,
+    DEFAULT_ROAD_FACTOR,
+    DEFAULT_ROUTING_URL,
+    DEFAULT_TRACKING_MODE,
     DEFAULT_TRANSIENT_STOP_MINUTES,
     DEFAULT_TRANSIENT_RADIUS,
     DEFAULT_TRIGGER_ENTITY,
     DOMAIN,
     NAME,
+    TRACKING_MODE_API,
+    TRACKING_MODE_MANUAL_CALCULATED,
 )
 
 
@@ -108,6 +118,24 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
             vol.Required(
+                CONF_TRACKING_MODE,
+                default=defaults.get(CONF_TRACKING_MODE, DEFAULT_TRACKING_MODE),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(
+                            value=TRACKING_MODE_API,
+                            label="Senzor z auta / API (např. Škoda Connect)",
+                        ),
+                        selector.SelectOptionDict(
+                            value=TRACKING_MODE_MANUAL_CALCULATED,
+                            label="Bez senzorů z auta (GPS výpočet a ruční zadávání km)",
+                        ),
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(
                 CONF_TRIGGER_ENTITY,
                 default=defaults.get(CONF_TRIGGER_ENTITY, DEFAULT_TRIGGER_ENTITY),
             ): selector.EntitySelector(
@@ -121,10 +149,22 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 CONF_ADDRESS_ENTITY,
                 default=defaults.get(CONF_ADDRESS_ENTITY, DEFAULT_ADDRESS_ENTITY),
             ): selector.EntitySelector(),
-            vol.Required(
+            vol.Optional(
                 CONF_ODOMETER_ENTITY,
                 default=defaults.get(CONF_ODOMETER_ENTITY, DEFAULT_ODOMETER_ENTITY),
             ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+            vol.Optional(
+                CONF_ROUTING_URL,
+                default=defaults.get(CONF_ROUTING_URL, DEFAULT_ROUTING_URL),
+            ): str,
+            vol.Optional(
+                CONF_ROAD_FACTOR,
+                default=defaults.get(CONF_ROAD_FACTOR, DEFAULT_ROAD_FACTOR),
+            ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=2.5)),
+            vol.Optional(
+                CONF_INITIAL_ODOMETER,
+                default=defaults.get(CONF_INITIAL_ODOMETER, DEFAULT_INITIAL_ODOMETER),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0)),
             vol.Required(
                 CONF_NOTIFY_SERVICE,
                 default=defaults.get(CONF_NOTIFY_SERVICE, DEFAULT_NOTIFY_SERVICE),

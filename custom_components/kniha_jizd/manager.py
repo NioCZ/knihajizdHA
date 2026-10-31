@@ -50,6 +50,7 @@ from .const import (
     CONF_HOME_LATITUDE,
     CONF_HOME_LONGITUDE,
     CONF_HOME_RADIUS,
+    CONF_INITIAL_ODOMETER,
     CONF_INSTITUTION_SEARCH_RADIUS,
     CONF_LOCATION_SETTLE_SECONDS,
     CONF_NOTIFY_SERVICE,
@@ -57,15 +58,24 @@ from .const import (
     CONF_PENDING_REVIEW_HOURS,
     CONF_PRIVATE_RADIUS,
     CONF_RETURN_CONTEXT_HOURS,
+    CONF_ROAD_FACTOR,
+    CONF_ROUTING_URL,
+    CONF_TRACKING_MODE,
     CONF_TRANSIENT_STOP_MINUTES,
     CONF_TRANSIENT_RADIUS,
     CONF_TRIGGER_ENTITY,
+    DEFAULT_INITIAL_ODOMETER,
+    DEFAULT_ROAD_FACTOR,
+    DEFAULT_ROUTING_URL,
+    DEFAULT_TRACKING_MODE,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
     PLACE_ROLE_CLIENT,
     PLACE_ROLE_PRIVATE,
     PLACE_ROLE_TRANSIENT,
     RUNTIME_STORE_VERSION,
+    TRACKING_MODE_API,
+    TRACKING_MODE_MANUAL_CALCULATED,
     TRIP_TYPE_BUSINESS,
     TRIP_TYPE_CONTEXTUAL,
     TRIP_TYPE_PRIVATE,
@@ -89,6 +99,7 @@ from .location_logic import (
 )
 from .nearby_search import NearbyInstitutionSearcher
 from .odometer_logic import odometer_update_signal, propagated_start_odometer
+from .routing import OsrmRoutingService, estimate_road_distance_km
 from .storage import (
     KnihaJizdRepository,
     learned_place_behavior,
@@ -130,6 +141,7 @@ class KnihaJizdManager:
         repository: KnihaJizdRepository,
         geocoder: NominatimGeocoder,
         institution_searcher: NearbyInstitutionSearcher,
+        routing_service: OsrmRoutingService | None = None,
     ) -> None:
         """Initialize the manager."""
         self.hass = hass
@@ -137,13 +149,25 @@ class KnihaJizdManager:
         self.repository = repository
         self.geocoder = geocoder
         self.institution_searcher = institution_searcher
+        self.routing_service = routing_service
 
-        self.trigger_entity = str(config[CONF_TRIGGER_ENTITY])
-        self.gps_entity = str(config[CONF_GPS_ENTITY])
-        self.address_entity = str(config[CONF_ADDRESS_ENTITY])
-        self.odometer_entity = str(config[CONF_ODOMETER_ENTITY])
+        self.tracking_mode = str(
+            config.get(CONF_TRACKING_MODE, DEFAULT_TRACKING_MODE)
+        )
+        self.trigger_entity = str(config.get(CONF_TRIGGER_ENTITY, ""))
+        self.gps_entity = str(config.get(CONF_GPS_ENTITY, ""))
+        self.address_entity = str(config.get(CONF_ADDRESS_ENTITY, ""))
+        self.odometer_entity = str(config.get(CONF_ODOMETER_ENTITY, ""))
+        self.routing_url = str(config.get(CONF_ROUTING_URL, DEFAULT_ROUTING_URL))
+        self.road_factor = float(
+            config.get(CONF_ROAD_FACTOR, DEFAULT_ROAD_FACTOR)
+        )
+        self.initial_odometer = float(
+            config.get(CONF_INITIAL_ODOMETER, DEFAULT_INITIAL_ODOMETER)
+        )
+        self._virtual_odometer_km: float = self.initial_odometer
         self.notify_service = _normalize_notify_service(
-            str(config[CONF_NOTIFY_SERVICE])
+            str(config.get(CONF_NOTIFY_SERVICE, ""))
         )
         self.location_settle_seconds = float(config[CONF_LOCATION_SETTLE_SECONDS])
         self.return_context_hours = float(config[CONF_RETURN_CONTEXT_HOURS])
@@ -255,12 +279,20 @@ class KnihaJizdManager:
             if started_at is not None:
                 self._mark_previous_odometer_rollovers(started_at)
         await self._async_refresh_statistics()
+        saved_virtual = runtime.get("virtual_odometer_km")
+        if saved_virtual is not None:
+            self._virtual_odometer_km = float(saved_virtual)
+        elif self._virtual_odometer_km == 0.0:
+            last_segment = self._statistics.get("last_segment")
+            if isinstance(last_segment, dict) and last_segment.get("end_odometer_km"):
+                self._virtual_odometer_km = float(last_segment["end_odometer_km"])
 
-        self._unsubscribers.append(
-            async_track_state_change_event(
-                self.hass, [self.trigger_entity], self._handle_trigger_event
+        if self.trigger_entity:
+            self._unsubscribers.append(
+                async_track_state_change_event(
+                    self.hass, [self.trigger_entity], self._handle_trigger_event
+                )
             )
-        )
         self._unsubscribers.append(
             self.hass.bus.async_listen(
                 EVENT_NOTIFICATION_ACTION, self._handle_notification_action
@@ -276,13 +308,19 @@ class KnihaJizdManager:
                 ),
             )
         )
-        self._unsubscribers.append(
-            async_track_state_change_event(
-                self.hass,
-                [self.gps_entity, self.address_entity, self.odometer_entity],
-                self._handle_input_update,
+        watched_inputs = [
+            entity
+            for entity in (self.gps_entity, self.address_entity, self.odometer_entity)
+            if entity
+        ]
+        if watched_inputs:
+            self._unsubscribers.append(
+                async_track_state_change_event(
+                    self.hass,
+                    watched_inputs,
+                    self._handle_input_update,
+                )
             )
-        )
 
         for segment in list(self._closing.values()):
             self._create_task(
@@ -456,6 +494,13 @@ class KnihaJizdManager:
         )
         gps_ok = latitude is not None and longitude is not None
         odometer_ok = odometer is not None
+        if self.tracking_mode == TRACKING_MODE_MANUAL_CALCULATED:
+            odometer_ok = True
+            if odometer is None:
+                odometer = round(self._virtual_odometer_km, 3)
+                odometer_source = "virtual_odometer"
+            if not self.trigger_entity:
+                trigger_ok = True
         notify_ok = self.hass.services.has_service("notify", self.notify_service)
         address = (
             address_state.state
@@ -469,6 +514,8 @@ class KnihaJizdManager:
             # authoritative workflow when the mobile service is unavailable.
             "ready": trigger_ok and gps_ok and odometer_ok,
             "status": self.status,
+            "tracking_mode": self.tracking_mode,
+            "virtual_odometer_km": round(self._virtual_odometer_km, 3),
             "active_segment_id": (
                 self._active.get("id") if self._active is not None else None
             ),
@@ -576,6 +623,8 @@ class KnihaJizdManager:
             "gps_ok",
             "address_ok",
             "odometer_ok",
+            "tracking_mode",
+            "virtual_odometer_km",
             "notify_ok",
             "last_error",
         )
@@ -1111,6 +1160,242 @@ class KnihaJizdManager:
         await self._async_clear_classification_notification(segment_id)
         return {"updated": changed, "state": "saved"}
 
+    async def _async_calculate_trip_distance(
+        self, segment: dict[str, Any]
+    ) -> float:
+        """Calculate road driving distance from coordinates using routing service or road-factor."""
+        start_lat = segment.get("start_latitude")
+        start_lon = segment.get("start_longitude")
+        end_lat = segment.get("end_latitude")
+        end_lon = segment.get("end_longitude")
+        if self.routing_service is not None:
+            try:
+                dist = await self.routing_service.async_route_distance_km(
+                    start_lat, start_lon, end_lat, end_lon
+                )
+                if dist is not None:
+                    return dist
+            except Exception:
+                _LOGGER.exception("Routing service failed, falling back to estimation")
+        fallback = estimate_road_distance_km(
+            start_lat, start_lon, end_lat, end_lon, self.road_factor
+        )
+        return fallback if fallback is not None else 0.0
+
+    async def async_start_trip(
+        self,
+        start_address: str | None = None,
+        start_latitude: float | None = None,
+        start_longitude: float | None = None,
+    ) -> dict[str, Any]:
+        """Manually trigger a trip start without requiring car sensors."""
+        now = datetime.now(UTC)
+        await self._async_start_segment(now)
+        if self._active is not None:
+            if start_address:
+                self._active["start_address"] = start_address.strip()
+                self._active["start_address_raw"] = start_address.strip()
+            if start_latitude is not None and start_longitude is not None:
+                self._active["start_latitude"] = float(start_latitude)
+                self._active["start_longitude"] = float(start_longitude)
+            await self._async_save_runtime()
+            self._notify_listeners()
+            return {"status": "started", "segment_id": self._active["id"]}
+        return {
+            "status": "already_active",
+            "segment_id": self._active.get("id") if self._active else None,
+        }
+
+    async def async_end_trip(
+        self,
+        end_address: str | None = None,
+        end_latitude: float | None = None,
+        end_longitude: float | None = None,
+    ) -> dict[str, Any]:
+        """Manually trigger a trip end without requiring car sensors."""
+        now = datetime.now(UTC)
+        if self._active is None:
+            return {"status": "no_active_trip"}
+        segment_id = str(self._active["id"])
+        if end_address:
+            self._active["end_address"] = end_address.strip()
+            self._active["end_address_raw"] = end_address.strip()
+        if end_latitude is not None and end_longitude is not None:
+            self._active["end_latitude"] = float(end_latitude)
+            self._active["end_longitude"] = float(end_longitude)
+        await self._async_begin_end_segment(now)
+        self._notify_listeners()
+        return {"status": "ended", "segment_id": segment_id}
+
+    async def async_add_trip(
+        self,
+        date_str: str,
+        trip_type: str,
+        purpose: str = "",
+        start_address: str = "",
+        end_address: str = "",
+        distance_km: float | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        start_latitude: float | None = None,
+        start_longitude: float | None = None,
+        end_latitude: float | None = None,
+        end_longitude: float | None = None,
+    ) -> dict[str, Any]:
+        """Manually add a completed trip segment directly to history."""
+        if trip_type not in {TRIP_TYPE_BUSINESS, TRIP_TYPE_PRIVATE}:
+            raise ValueError("trip_type must be business or private")
+        try:
+            parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError as err:
+            raise ValueError("date must use YYYY-MM-DD") from err
+
+        start_iso = f"{date_str}T{start_time}:00Z" if start_time else f"{date_str}T08:00:00Z"
+        end_iso = f"{date_str}T{end_time}:00Z" if end_time else f"{date_str}T08:30:00Z"
+
+        calc_distance: float
+        if distance_km is not None and float(distance_km) >= 0:
+            calc_distance = float(distance_km)
+            distance_source = "manual_entry"
+        elif (
+            start_latitude is not None
+            and start_longitude is not None
+            and end_latitude is not None
+            and end_longitude is not None
+        ):
+            calc_distance = await self._async_calculate_trip_distance(
+                {
+                    "start_latitude": start_latitude,
+                    "start_longitude": start_longitude,
+                    "end_latitude": end_latitude,
+                    "end_longitude": end_longitude,
+                }
+            )
+            distance_source = "gps_route_calculated"
+        else:
+            calc_distance = 0.0
+            distance_source = "manual_entry"
+
+        start_odometer = round(self._virtual_odometer_km, 3)
+        end_odometer = round(start_odometer + calc_distance, 3)
+        self._virtual_odometer_km = end_odometer
+
+        selected_purpose = normalize_trip_purpose(purpose, trip_type)
+        segment = {
+            "id": uuid4().hex,
+            "journey_id": uuid4().hex,
+            "journey_segment_count": 1,
+            "journey_distance_km": _whole_km(calc_distance),
+            "journey_distance_complete": True,
+            "date": parsed_date.isoformat(),
+            "started_at": start_iso,
+            "ended_at": end_iso,
+            "start_odometer_km": start_odometer,
+            "end_odometer_km": end_odometer,
+            "distance_km": _whole_km(calc_distance),
+            "distance_km_raw": round(calc_distance, 3),
+            "start_address": start_address or "Výchozí místo",
+            "end_address": end_address or "Cílové místo",
+            "start_address_raw": start_address or "Výchozí místo",
+            "end_address_raw": end_address or "Cílové místo",
+            "start_latitude": start_latitude,
+            "start_longitude": start_longitude,
+            "end_latitude": end_latitude,
+            "end_longitude": end_longitude,
+            "purpose": selected_purpose,
+            "trip_type": trip_type,
+            "classification_source": "manual_entry",
+            "classification_prepared": True,
+            "classification_ready": True,
+            "persisted": True,
+            "journey_role": "destination",
+            "visit_role": "destination",
+            "odometer_ready": True,
+            "odometer_wait_timed_out": False,
+            "odometer_completion_source": distance_source,
+            "distance_reconciliation_source": distance_source,
+            "manual_distance_override": False,
+            "validation_error": None,
+        }
+
+        await self.repository.async_append_segment(segment)
+        await self.repository.async_reconcile_day(parsed_date.isoformat(), end_odometer)
+        await self._async_refresh_statistics()
+        await self._async_save_runtime()
+        self._notify_listeners()
+        return {
+            "status": "created",
+            "segment_id": segment["id"],
+            "distance_km": _whole_km(calc_distance),
+        }
+
+    async def async_set_odometer(
+        self,
+        odometer_km: float | None = None,
+        daily_km: float | None = None,
+        date_str: str | None = None,
+    ) -> dict[str, Any]:
+        """Record manual dashboard odometer or daily distance and reconcile."""
+        target_date = (
+            date_str
+            if date_str
+            else dt_util.now().date().isoformat()
+        )
+        if odometer_km is None and daily_km is None:
+            raise ValueError("Either odometer_km or daily_km must be provided")
+
+        terminal_anchor: float | None = None
+        if odometer_km is not None:
+            terminal_anchor = round(float(odometer_km), 3)
+            self._virtual_odometer_km = terminal_anchor
+        elif daily_km is not None:
+            history = await self.repository.async_get_history(target_date[:7], target_date)
+            rows = history.get("rows", [])
+            first_start: float | None = None
+            for row in rows:
+                if row.get("start_odometer_km") is not None:
+                    first_start = float(row["start_odometer_km"])
+                    break
+            if first_start is None:
+                first_start = self._virtual_odometer_km
+            terminal_anchor = round(first_start + float(daily_km), 3)
+            self._virtual_odometer_km = terminal_anchor
+
+        check = await self.repository.async_reconcile_day(
+            target_date, terminal_anchor
+        )
+        await self._async_refresh_statistics()
+        await self._async_save_runtime()
+        self._notify_listeners()
+        return {
+            "status": "reconciled",
+            "date": target_date,
+            "terminal_odometer_km": terminal_anchor,
+            "check": check,
+        }
+
+    async def async_reconcile_day(
+        self,
+        date_str: str | None = None,
+        terminal_anchor_km: float | None = None,
+    ) -> dict[str, Any]:
+        """Manually trigger daily reconciliation for a specific date."""
+        target_date = (
+            date_str
+            if date_str
+            else dt_util.now().date().isoformat()
+        )
+        check = await self.repository.async_reconcile_day(
+            target_date, terminal_anchor_km
+        )
+        await self._async_refresh_statistics()
+        self._notify_listeners()
+        return {
+            "status": "reconciled",
+            "date": target_date,
+            "check": check,
+        }
+
     def _find_runtime_segment(self, segment_id: str) -> dict[str, Any] | None:
         """Find one unfinished segment without copying its live state."""
         if self._active is not None and self._active.get("id") == segment_id:
@@ -1227,6 +1512,11 @@ class KnihaJizdManager:
             odometer_state = self.hass.states.get(self.odometer_entity)
             start_odometer = _odometer_value(odometer_state)
             odometer_updated_at = _odometer_updated_at(odometer_state)
+            start_odometer_source = "sensor_at_android_auto_connect"
+            if start_odometer is None and self.tracking_mode == TRACKING_MODE_MANUAL_CALCULATED:
+                start_odometer = round(self._virtual_odometer_km, 3)
+                odometer_updated_at = started_at
+                start_odometer_source = "virtual_odometer"
             location = self._capture_location()
             self._settle_previous_destination_from_new_start(location, started_at)
             location = self._align_start_with_previous_destination(
@@ -1252,7 +1542,7 @@ class KnihaJizdManager:
                 "end_odometer_km": None,
                 "distance_km": None,
                 "start_odometer_updated_at": _iso_utc(odometer_updated_at),
-                "start_odometer_source": "sensor_at_android_auto_connect",
+                "start_odometer_source": start_odometer_source,
                 "start_address": location["address"],
                 "end_address": None,
                 "start_address_raw": location["address_raw"],
@@ -1391,6 +1681,43 @@ class KnihaJizdManager:
                 _parse_datetime(segment.get("ended_at")) or datetime.now(UTC)
             )
             start_odometer = _as_float(segment.get("start_odometer_km"))
+
+            if self.tracking_mode == TRACKING_MODE_MANUAL_CALCULATED:
+                raw_distance = await self._async_calculate_trip_distance(segment)
+                if manual_distance is not None:
+                    final_distance = manual_distance
+                    reconciliation_source = "manual_panel"
+                else:
+                    final_distance = raw_distance
+                    reconciliation_source = "gps_route_calculated"
+
+                if start_odometer is None:
+                    start_odometer = round(self._virtual_odometer_km, 3)
+                    segment["start_odometer_km"] = start_odometer
+
+                end_odometer = round(start_odometer + final_distance, 3)
+                self._virtual_odometer_km = end_odometer
+
+                segment["odometer_updated_at"] = _iso_utc(disconnected_at)
+                segment["odometer_wait_timed_out"] = False
+                segment["odometer_completion_source"] = "gps_route_calculated"
+                segment["end_odometer_km"] = end_odometer
+                segment["odometer_shared_update"] = False
+                segment["distance_hint_km"] = raw_distance
+                segment["distance_km_raw"] = raw_distance
+                segment["distance_km"] = _whole_km(final_distance)
+                segment["validation_error"] = None
+                segment["distance_reconciliation_source"] = reconciliation_source
+                segment["odometer_ready"] = True
+                await self._async_apply_previous_final_to_next_segment(segment)
+                await self._async_save_runtime()
+                self._odometer_completion_condition.notify_all()
+                await self._async_try_finalize_segment(segment)
+                await self._async_try_finalize_journey_destination(
+                    segment.get("journey_id")
+                )
+                return
+
             end_odometer, odometer_updated_at, _, completion_source = (
                 await self._async_wait_for_odometer(
                     segment, disconnected_at, start_odometer
@@ -3502,6 +3829,8 @@ class KnihaJizdManager:
                     "pending": deepcopy(self._pending),
                     "transient": deepcopy(self._transient),
                     "place_prompts": deepcopy(self._place_prompts),
+                    "virtual_odometer_km": round(self._virtual_odometer_km, 3),
+                    "tracking_mode": self.tracking_mode,
                 }
             )
         self._notify_listeners()
@@ -3567,11 +3896,16 @@ def _location_coordinate_details(
 
 def _state_updated_at(state: State) -> datetime:
     """Read an integration timestamp before falling back to HA metadata."""
-    return (
+    parsed = (
         _parse_datetime(state.attributes.get("last_updated"))
         or _parse_datetime(state.attributes.get("timestamp"))
-        or _ensure_utc(state.last_updated)
     )
+    if parsed is not None:
+        return parsed
+    last_updated = getattr(state, "last_updated", None)
+    if isinstance(last_updated, datetime):
+        return _ensure_utc(last_updated)
+    return datetime.now(UTC)
 
 
 def _odometer_details(state: State | None) -> tuple[float | None, str | None]:
